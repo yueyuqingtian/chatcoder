@@ -15,26 +15,37 @@
 import { memo, useMemo, type ReactNode } from "react";
 import type { ToolLeaf } from "./timeline";
 import { useChatStore } from "../../store/chat";
+import { usePanelStore } from "../../store/panel";
 import { useFlowExpand } from "../../store/flowExpand";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { IconChevronRight } from "../icons";
 import { Button } from "../ui";
 import { Markdown } from "../ui/Markdown";
 import { ChatCollapse } from "./ChatCollapse";
-import { toolVerb } from "./toolLabels";
-import { SUBSESSION_RESULT_TOOL, splitInlineMarks, type InlineSpan } from "../../utils/subsessionQuestion";
+import { toolLabel } from "./toolLabels";
+import { SUBSESSION_RESULT_TOOL, SUBAGENT_COMPLETION_TOOL, SUBAGENT_NOTICE_TOOLS, splitInlineMarks, type InlineSpan } from "../../utils/subsessionQuestion";
 
-/** 来源子会话的标题：取最新的（子会话可能在提问之后被重命名），查不到时用提问当时的标题，再退到编号。
- *  返回原始字符串，selector 值不变就不重渲染。 */
-function useSourceTitle(id: number | null, asked: string): string {
+/** 来源标题的统一取值：子会话取会话桶里的最新标题，子代理取 subagentMeta 的任务名。
+ *  plan-549-2281：两者 id 语义不同（session id / agent id），但展示需求一致，
+ *  因此合并成一个 hook——**不能按类型分别调用不同的 hook**（React 规则要求 hook 调用顺序稳定）。 */
+function useNoticeTitle(
+  kind: "subsession" | "subagent", id: number | null, asked: string,
+): string {
   return useChatStore((s) => {
     if (id != null) {
-      for (const list of Object.values(s.subsessionsByParent)) {
-        const hit = list.find((c) => c.id === id);
-        if (hit?.title) return hit.title;
+      if (kind === "subsession") {
+        for (const list of Object.values(s.subsessionsByParent)) {
+          const hit = list.find((c) => c.id === id);
+          if (hit?.title) return hit.title;
+        }
+      } else {
+        const meta = s.subagentMeta[id];
+        const name = String((meta as { name?: unknown } | undefined)?.name ?? "").trim();
+        if (name) return name;
       }
     }
-    return asked || (id != null ? `子会话 #${id}` : "子会话");
+    const fallback = kind === "subsession" ? "子会话" : "子代理";
+    return asked || (id != null ? `${fallback} #${id}` : fallback);
   });
 }
 
@@ -55,13 +66,28 @@ function QuestionBody({ text }: { text: string }) {
 export const SubsessionQuestionRow = memo(function SubsessionQuestionRow({ leaf }: { leaf: ToolLeaf }) {
   const [expanded, setExpanded] = useFlowExpand(leaf.callKey);
   const switchSession = useChatStore((s) => s.switchSession);
-  const sourceId = typeof leaf.args.source_session_id === "number" ? leaf.args.source_session_id : null;
+  const openSubagent = usePanelStore((s) => s.openSubagent);
+  // plan-549-2281：同一行还要承载子代理的提问 / 进度上报。
+  // 两类来源的 id 语义不同：子会话是 session id（可切换会话），子代理是 agent id（开右面板看执行过程）。
+  const isSubagent = SUBAGENT_NOTICE_TOOLS.has(leaf.tool);
+  const sourceId = isSubagent
+    ? (typeof leaf.args.agent_id === "number" ? leaf.args.agent_id : null)
+    : (typeof leaf.args.source_session_id === "number" ? leaf.args.source_session_id : null);
   const asked = typeof leaf.args.title === "string" ? leaf.args.title : "";
-  const title = useSourceTitle(sourceId, asked);
-  const isResult = leaf.tool === SUBSESSION_RESULT_TOOL;
+  // hook 必须无条件调用，因此把类型作为参数传进去（不能按分支调用不同 hook）
+  const title = useNoticeTitle(isSubagent ? "subagent" : "subsession", sourceId, asked);
+  // plan-560-2311 E2：子代理完成通知与子会话结论同属「有结果的结束」，展开区都按 Markdown 渲染——
+  // 此前仅认 SUBSESSION_RESULT_TOOL，子代理失败 / 取消的正文被当成提问走 QuestionBody，代码块与列表全丢。
+  const isResult = leaf.tool === SUBSESSION_RESULT_TOOL || leaf.tool === SUBAGENT_COMPLETION_TOOL;
   const status = typeof leaf.args.status === "string" ? leaf.args.status : "";
-  // 结论行的动词带上结束状态：子会话已完成 / 子会话执行失败 / 子会话被中断
-  const verb = isResult && status ? `子会话${status}` : toolVerb(leaf.tool);
+  // plan-20261025-shell（需求 1）：与工具行同一写法——两字动作词（结束行取状态：完成 / 失败 / 取消 / 中断）
+  // + 弱色来源（子代理 / 子会话，不能共用，否则子代理的通知会显示成「子会话…」）+ 来源标题
+  const verb = isResult && status
+    ? (status.replace(/^(已|被|执行)/, "") || status)
+    : toolLabel(leaf.tool).verb;
+  const sourceName = isSubagent ? "子代理" : "子会话";
+  // 头部命中但确实没有正文时给用户可读占位（解析层已不再回退整段原文，见 parseSubagentNotice）
+  const body = leaf.output.trim() || "（无正文）";
 
   return (
     <div className={"tc-node tc-sq" + (isResult ? " is-result" : "")}>
@@ -74,17 +100,20 @@ export const SubsessionQuestionRow = memo(function SubsessionQuestionRow({ leaf 
       >
         <span className="tc-icon"><ToolGlyph tool={leaf.tool} size={16} /></span>
         <span className="tc-verb">{verb}</span>
-        <span className="tc-sq-title">{`「${title}」`}</span>
+        <span className="tc-tool-name">{sourceName}</span>
+        <span className="tc-sq-title">{title}</span>
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </button>
       <ChatCollapse open={expanded}>
         <div className="tc-output">
           {isResult
-            ? <div className="tc-sq-md"><Markdown>{leaf.output}</Markdown></div>
-            : <QuestionBody text={leaf.output} />}
+            ? <div className="tc-sq-md"><Markdown>{body}</Markdown></div>
+            : <QuestionBody text={body} />}
           {sourceId != null && (
             <div className="tc-sq-foot">
-              <Button variant="subtle" size="xs" onClick={() => void switchSession(sourceId)}>前往子会话</Button>
+              {isSubagent
+                ? <Button variant="subtle" size="xs" onClick={() => openSubagent(sourceId, title)}>打开执行过程</Button>
+                : <Button variant="subtle" size="xs" onClick={() => void switchSession(sourceId)}>前往子会话</Button>}
             </div>
           )}
         </div>

@@ -332,6 +332,48 @@ div.tcard-row:focus-visible { outline: none; background: var(--tcard-hover); }
 .tcard-proc.is-running .tcard-row-text { font-weight: 500; }
 .tcard-proc.is-interrupted .tcard-ic,
 .tcard-fold-item.is-interrupted .tcard-ic { color: var(--warning, #d29922); }
+/* 失败（子代理）：错误色圆环 + 叉，与右面板摘要的失败态同色 */
+.tcard-proc.is-failed .tcard-ic,
+.tcard-fold-item.is-failed .tcard-ic { color: var(--error); }
+
+/* 步骤执行者标记（plan-20261025-shell 需求 4）：行尾一枚 16px 图标（子代理 / 历史子会话），
+   状态色只落在图标上：执行中 = 强调色，失败 = 错误色；名称与去向在悬停提示里 */
+.tcard-owner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.tcard-owner:hover,
+.tcard-owner:focus-visible { outline: none; color: var(--text-1); background: var(--tcard-hover); }
+.tcard-owner[data-tone="run"] { color: var(--accent); }
+.tcard-owner[data-tone="fail"] { color: var(--error); }
+
+/* 栏目头计数的语气：进行中强调色、全部完成成功色（对齐参考卡片的「进程 7/7」） */
+.tcard-sec-meta[data-tone="run"] { color: var(--accent); }
+.tcard-sec-meta[data-tone="done"] { color: var(--success); }
+
+/* 悬浮形态（放不下停靠卡片时用户仍展开）：盖在内容之上，宽度不超过宿主；
+   与停靠卡片同一套扁平外观，只多一层很浅的投影，表明它浮在正文之上 */
+.tcard-shell.is-floating {
+  max-width: calc(100% - var(--tcard-inset) * 2);
+  box-shadow: 0 0 0 1px var(--tcard-ring), 0 4px 16px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+}
+.tcard-shell.is-floating .tcard-card { max-width: 100%; }
+
+/* 极窄宿主：胶囊收成只剩图标的小圆钮，不盖住正文 */
+.tcard-shell.is-compact { width: var(--tcard-cap-h); max-width: none; }
+.tcard-capsule.is-compact { justify-content: center; width: var(--tcard-cap-h); padding: 0; }
 
 /* 步骤归属标记（子会话执行）：点击切换到该子会话 */
 .tcard-chip {

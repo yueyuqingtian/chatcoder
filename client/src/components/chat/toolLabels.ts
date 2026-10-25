@@ -15,6 +15,8 @@ const FROM_TA3: Record<string, string> = {
   BashKill: "terminal_bg_kill", CompleteGoal: "goal_complete", AskUser: "ask_user_question",
   MultiFileEdit: "multi_file_edit", SymbolSearch: "symbol_search", get_file_outline: "outline",
   WebFetch: "web_fetch", CiRun: "ci_run", Git: "git", CodebaseSearch: "codebase_search",
+  // plan-562-2318：后端 ta3_tool_aliases 已有这两条伪装名，前端缺映射会让消息流显示英文原名
+  FeatureLookup: "feature_lookup", SymbolIndexEnable: "symbol_index_enable",
   CompactionIndex: "compaction_index", CompactionView: "compaction_view", SkillView: "skill_view",
   ReadSkill: "skill_view", MemoryWrite: "memory_write", single_find_and_replace: "editor_apply_diff",
   BrowserNavigate: "browser_navigate", BrowserScreenshot: "browser_screenshot", BrowserClick: "browser_click",
@@ -54,6 +56,10 @@ export const TOOL_VERBS: Record<string, string> = {
   fs_grep: "已搜索",
   codebase_search: "已检索代码",
   symbol_search: "已检索符号",
+  // plan-549-2281：新增的功能地图查询与符号索引导入，此前缺中文动词，
+  // 消息流会退回「已调用工具 feature lookup」这类中英混杂行
+  feature_lookup: "已查询功能",
+  symbol_index_enable: "已开启符号索引",
   outline: "已查看文件结构",
   terminal_exec: "已运行",
   shell_exec: "已运行",
@@ -67,6 +73,11 @@ export const TOOL_VERBS: Record<string, string> = {
   // plan-20261022-release-ci：子会话汇报 / 结论（伪工具名，见 timeline.subsessionNoticeItem）
   subsession_report: "子会话汇报",
   subsession_result: "子会话已结束",
+  // plan-549-2281：子代理提问 / 进度上报（伪工具名，见 timeline.subagentNoticeItem）——
+  // 子会话下线后所有「向上抛」的消息都来自子代理
+  subagent_question: "子代理提问",
+  subagent_report: "子代理进度上报",
+  subagent_completion: "子代理已结束",
   // 子会话工具：此前没有中文动词，工具行显示成「已调用工具 发送 to subsession」
   create_subsession: "已创建子会话",
   send_to_subsession: "已发消息给子会话",
@@ -142,6 +153,115 @@ export const TOOL_VERBS: Record<string, string> = {
   desktop_recipe: "已记录操作经验",
 };
 
+/** plan-20261025-shell（需求 1）：消息流工具行的精简标签（参考 zcode「查阅 · 2 文件」「读取 a.py」）。
+ *
+ * [动作词, 补充说明]：
+ *  · 动作词以两字为主（Git、子代理等专名例外），运行中与完成态用同一个词——运行态由流光文字与行尾转圈表达，
+ *    行宽不随「正在读取 → 已读取」跳变，一列工具行的起点与节奏也更整齐；
+ *  · 补充说明只在该行没有对象（文件 / 命令 / 查询词）可展示时出现，灰色小字，例如「查看 后台输出」。
+ * 完成态长句（已读取 / 已编辑…）仍由 TOOL_VERBS 提供，供小窗、宠物、审批卡等只放一句话的位置使用。 */
+const TOOL_LABELS: Record<string, [string, string?]> = {
+  fs_read: ["读取"],
+  read_file_range: ["读取"],
+  read_attachment: ["读取", "附件"],
+  fs_write: ["写入"],
+  editor_apply_diff: ["编辑"],
+  multi_file_edit: ["编辑"],
+  apply_patch: ["编辑"],
+  fs_list: ["列出", "目录"],
+  fs_grep: ["搜索"],
+  codebase_search: ["检索", "代码"],
+  symbol_search: ["符号"],
+  feature_lookup: ["查询", "功能地图"],
+  symbol_index_enable: ["索引", "开启符号索引"],
+  outline: ["大纲"],
+  terminal_exec: ["运行"],
+  shell_exec: ["运行"],
+  terminal_bg_status: ["查看", "后台命令输出"],
+  terminal_bg_kill: ["停止", "后台命令"],
+  bg_command_done: ["后台"],
+  bg_command_stopped: ["后台"],
+  subsession_question: ["提问"],
+  subsession_report: ["汇报"],
+  subsession_result: ["结束"],
+  subagent_question: ["提问"],
+  subagent_report: ["进展"],
+  subagent_completion: ["结束"],
+  create_subsession: ["创建", "子会话"],
+  send_to_subsession: ["发送", "给子会话"],
+  get_subsession_progress: ["查看", "子会话进度"],
+  interrupt_subsession: ["中断", "子会话"],
+  message_main: ["汇报", "给主代理"],
+  message_peer: ["发送", "给同级子会话"],
+  git: ["Git"],
+  git_diff: ["差异"],
+  git_root: ["定位", "仓库"],
+  ci_run: ["检查"],
+  web_fetch: ["抓取"],
+  web_search: ["联网"],
+  memory_search: ["记忆"],
+  memory_write: ["记住"],
+  skill_view: ["技能"],
+  compaction_index: ["摘要", "历史上下文"],
+  compaction_view: ["摘要", "历史上下文"],
+  view_image: ["看图"],
+  todo_write: ["待办"],
+  ask_user_question: ["提问"],
+  goal_complete: ["目标", "已达成"],
+  spawn_subagent: ["派发", "子代理"],
+  ask_subagent: ["询问", "子代理"],
+  collect_results: ["收集", "子代理结果"],
+  cancel_subagent: ["取消", "子代理"],
+  subagent_inspect: ["查看", "子代理"],
+  send_to_subagent: ["发送", "给子代理"],
+  resume_subagent: ["续跑", "子代理"],
+  report_to_leader: ["汇报", "给主代理"],
+  plan_workflow: ["规划", "工作流"],
+  start_workflow: ["启动", "工作流"],
+  workflow_status: ["进度", "工作流"],
+  resume_workflow: ["恢复", "工作流"],
+  cancel_workflow: ["取消", "工作流"],
+  amend_workflow: ["调整", "工作流"],
+  decide_workflow: ["决策", "工作流"],
+  request_write_scope: ["申请", "写入范围"],
+  db_query: ["查询", "数据库"],
+  db_execute: ["执行", "数据变更"],
+  db_ddl: ["变更", "表结构"],
+  db_schema: ["读取", "表结构"],
+  browser_navigate: ["打开"],
+  browser_tabs: ["标签"],
+  browser_snapshot: ["结构", "页面元素"],
+  browser_get_text: ["正文", "网页"],
+  browser_screenshot: ["截图"],
+  browser_click: ["点击"],
+  browser_type: ["输入"],
+  browser_press: ["按键"],
+  browser_scroll: ["滚动"],
+  browser_hover: ["悬停"],
+  browser_drag: ["拖拽"],
+  browser_fill: ["填写", "表单"],
+  browser_clipboard: ["剪贴"],
+  browser_wait: ["等待"],
+  browser_evaluate: ["脚本", "页面"],
+  browser_logs: ["日志", "页面"],
+  browser_batch: ["批量", "网页操作"],
+  browser_downloads: ["下载"],
+  browser_recipe: ["经验", "网页操作"],
+  desktop_screenshot: ["截屏"],
+  desktop_click: ["点击"],
+  desktop_type: ["输入"],
+  desktop_keys: ["按键"],
+  desktop_scroll: ["滚动"],
+  desktop_batch: ["批量", "桌面操作"],
+  desktop_snapshot: ["界面", "窗口元素"],
+  desktop_hit: ["识别", "界面元素"],
+  desktop_windows: ["窗口"],
+  desktop_focus: ["切换", "窗口"],
+  desktop_find_text: ["查找", "文字"],
+  desktop_apps: ["应用"],
+  desktop_recipe: ["经验", "桌面操作"],
+};
+
 /** 常见英文词 → 中文，用于未知工具名的兜底可读化 */
 const WORDS: Record<string, string> = {
   get: "获取", list: "列出", create: "创建", update: "更新", delete: "删除", remove: "删除",
@@ -198,6 +318,18 @@ export function toolDisplayName(tool: string): string {
   if (mcp) return `${mcp.server} · ${humanize(mcp.name)}`;
   if (real.startsWith("db_")) return "";
   return humanize(real);
+}
+
+/** 消息流工具行的精简标签（plan-20261025-shell 需求 1）。
+ *  noun：没有对象时的补充说明；alwaysNoun：连接器 / 未知工具的名称本身就是信息，有查询词时也要显示。 */
+export function toolLabel(tool: string): { verb: string; noun: string; alwaysNoun: boolean } {
+  const real = normalizeToolName(tool);
+  const hit = TOOL_LABELS[real];
+  if (hit) return { verb: hit[0], noun: hit[1] ?? "", alwaysNoun: false };
+  const mcp = splitMcp(real);
+  if (mcp) return { verb: "调用", noun: `${mcp.server} · ${humanize(mcp.name)}`, alwaysNoun: true };
+  if (real.startsWith("db_")) return { verb: "执行", noun: humanize(real.slice(3)), alwaysNoun: true };
+  return { verb: "调用", noun: humanize(real), alwaysNoun: true };
 }
 
 /** 完整可读名（审批卡、子代理摘要等只放一个名字的位置用）：动词去掉「已」+ 名称 */

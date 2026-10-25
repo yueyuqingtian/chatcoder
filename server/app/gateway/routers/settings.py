@@ -253,9 +253,25 @@ def load_persisted_workspace() -> None:
             settings.max_concurrent_subagents = max(1, min(30, int(data["max_concurrent_subagents"])))
         except (TypeError, ValueError):
             pass
-    if "max_subsessions_per_parent" in data:
+    # plan-549-2281：max_subsessions_per_parent 已删除（子会话创建下线），旧配置里的值不再读取。
+    # 复盘修复：三个改名键的迁移统一「写新键 + 删旧键 + 落盘」（与 _migrate_retry_policy 同款，
+    # 幂等）——此前只把旧值写进运行时、不落新键，配置文件里旧键永存，每次启动都重复迁移。
+    _RENAMED_SETTINGS_KEYS = {
+        "approval_timeout_sec_subsession": "approval_timeout_sec_child",
+        "operator_reasoning_effort": "operator_subagent_effort",
+        "operator_subsession_enabled": "operator_subagent_enabled",
+    }
+    _renamed_dirty = False
+    for _old_key, _new_key in _RENAMED_SETTINGS_KEYS.items():
+        if _old_key in data:
+            data.setdefault(_new_key, data[_old_key])
+            data.pop(_old_key, None)
+            _renamed_dirty = True
+    if _renamed_dirty:
+        _save_config(data)
+    if "approval_timeout_sec_child" in data:
         try:
-            settings.max_subsessions_per_parent = max(1, min(30, int(data["max_subsessions_per_parent"])))
+            settings.approval_timeout_sec_child = int(data["approval_timeout_sec_child"])
         except (TypeError, ValueError):
             pass
     # plan-156-619 S4d：子会话默认模型与思考深度（设置中心「子代理」面板只留这两项）
@@ -268,18 +284,13 @@ def load_persisted_workspace() -> None:
         settings.subagent_reasoning_effort = str(data["subagent_reasoning_effort"] or "")[:20]
     if "subagent_enabled" in data:
         settings.subagent_enabled = bool(data["subagent_enabled"])
-    # plan-20261020-subsession-switch：子会话开关已从合并开关中拆出。旧配置只有合并开关，
-    # 键缺失时跟随它的取值——用户此前显式关闭的，升级后不要被静默打开。
-    if "subsession_enabled" in data:
-        settings.subsession_enabled = bool(data["subsession_enabled"])
-    else:
-        settings.subsession_enabled = bool(
-            data.get("subagent_enabled", getattr(settings, "subagent_enabled", True)))
-    # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
-    if "operator_subsession_enabled" in data:
-        settings.operator_subsession_enabled = bool(data["operator_subsession_enabled"])
-    if "operator_reasoning_effort" in data:
-        settings.operator_reasoning_effort = str(data["operator_reasoning_effort"] or "lowest")[:20]
+    # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除；
+    # operator_reasoning_effort 改名 operator_subagent_effort——旧键已在上方统一迁移落盘，这里只认新键。
+    if "operator_subagent_effort" in data:
+        settings.operator_subagent_effort = str(data["operator_subagent_effort"] or "lowest")[:20]
+    # plan-549-2281：「操控子代理」开关（原 operator_subsession_enabled 的等价物）
+    if "operator_subagent_enabled" in data:
+        settings.operator_subagent_enabled = bool(data["operator_subagent_enabled"])
     # plan-156-619 S7：工具卡栏目的全局默认展开策略
     if "tool_card_sections_expanded" in data:
         settings.tool_card_sections_expanded = bool(data["tool_card_sections_expanded"])
@@ -312,25 +323,22 @@ def load_persisted_workspace() -> None:
                 setattr(settings, _key, max(_lo, min(_hi, int(data[_key]))))
             except (TypeError, ValueError):
                 pass
-    # 已显式保存的子代理 / 子会话开关必须还原到运行时：此前只做“缺失补写”，
+    # 已显式保存的子代理开关必须还原到运行时：此前只做“缺失补写”，
     # 用户保存的 false 重启后运行时回落为默认 true，而设置页读文件仍显示关闭。
-    for _key in ("subagent_enabled", "subsession_enabled"):
+    # plan-549-2281：subsession_enabled 已删除，这里只剩子代理开关。
+    for _key in ("subagent_enabled",):
         if isinstance(data.get(_key), bool):
             setattr(settings, _key, data[_key])
-    # plan-156-624：升级默认值——旧版本没有这两个键时补写为开启并落盘，用户升级后
-    # 无需手动去「设置 → 子代理 / 常规」打开子会话与并行分派。只补缺失键：
+    # plan-156-624：升级默认值——旧版本没有该键时补写为开启并落盘，用户升级后
+    # 无需手动去「设置 → 子代理」打开并行分派。只补缺失键：
     # 已存在的 false 是用户显式关闭，不覆盖。
+    # plan-549-2281：subsession_enabled 的补写已删除（该键下线）。
     _defaults_added = False
     for _key, _default in (("subagent_enabled", True),):
         if _key not in data:
             data[_key] = _default
             setattr(settings, _key, _default)
             _defaults_added = True
-    # plan-20261020-subsession-switch：子会话开关同步补写，取值跟随拆分前的合并开关
-    if "subsession_enabled" not in data:
-        data["subsession_enabled"] = bool(data.get("subagent_enabled", True))
-        settings.subsession_enabled = data["subsession_enabled"]
-        _defaults_added = True
     if _defaults_added:
         _save_config(data)
 
@@ -408,19 +416,20 @@ class GlobalSettingsOut(BaseModel):
     # plan-20261019-desktop-targeting：坐标口径 auto / pixel / norm1000
     desktop_coord_mode: str = "auto"
     # plan-474-2105: 单会话并发上限（设置中心「子代理」面板可配，运行时立即生效）
-    max_concurrent_subagents: int = 4    # 单会话并发上限（子代理，超出排队等待，1~30）
-    max_subsessions_per_parent: int = 4  # 单会话子会话并发上限（1~30）
+    # plan-474-2105: 单会话并发上限（子代理，1~30）
+    max_concurrent_subagents: int = 4
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）。
     # 工具范围与执行模式由主代理在创建时决定，设置里只保留这两项可调项。
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
     subagent_enabled: bool = True
-    # plan-20261020-subsession-switch：子会话开关（含操控子会话）
-    subsession_enabled: bool = True
-    # plan-20261018-operator-boost：GUI 操作交给操控子会话 / 操控子会话思考深度
-    operator_subsession_enabled: bool = True
-    operator_reasoning_effort: str = "lowest"
+    # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除——子会话下线，
+    # GUI 操作改由子代理承担。
+    # plan-549-2281：operator_reasoning_effort 改名 operator_subagent_effort（旧键一次性迁移）。
+    operator_subagent_effort: str = "lowest"
+    # 「操控子代理」开关（原 operator_subsession_enabled 的等价物）
+    operator_subagent_enabled: bool = True
     # plan-156-619 S7：工具卡栏目全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
     # plan-20261019-toolcard-v2：工具卡默认形态与逐栏默认展开
@@ -524,17 +533,17 @@ class GlobalSettingsIn(BaseModel):
     desktop_coord_mode: str | None = None
     # plan-474-2105: 单会话并发上限
     max_concurrent_subagents: int | None = None
-    max_subsessions_per_parent: int | None = None
+    # plan-549-2281：max_subsessions_per_parent 已删除
     # plan-156-619 S4d：子会话默认模型 / 思考深度
     subagent_model_id: int | None = None
     subagent_reasoning_effort: str | None = None
     # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
     subagent_enabled: bool | None = None
-    # plan-20261020-subsession-switch：子会话开关
-    subsession_enabled: bool | None = None
-    # plan-20261018-operator-boost：操控子会话
-    operator_subsession_enabled: bool | None = None
-    operator_reasoning_effort: str | None = None
+    # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除；
+    # 操控思考深度改名 operator_subagent_effort。
+    operator_subagent_effort: str | None = None
+    # 「操控子代理」开关（原 operator_subsession_enabled 的等价物）
+    operator_subagent_enabled: bool | None = None
     # plan-156-619 S7：工具卡栏目全局默认展开策略
     tool_card_sections_expanded: bool | None = None
     # plan-20261019-toolcard-v2：工具卡默认形态与逐栏默认展开
@@ -633,18 +642,19 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         ),
         # plan-474-2105: 单会话并发上限
         max_concurrent_subagents=data.get("max_concurrent_subagents", settings.max_concurrent_subagents),
-        max_subsessions_per_parent=data.get(
-            "max_subsessions_per_parent", settings.max_subsessions_per_parent),
         # plan-156-619 S4d：子会话默认模型 / 思考深度
         subagent_model_id=data.get("subagent_model_id", settings.subagent_model_id),
         subagent_reasoning_effort=data.get("subagent_reasoning_effort", settings.subagent_reasoning_effort),
         subagent_enabled=bool(data.get("subagent_enabled", settings.subagent_enabled)),
-        subsession_enabled=bool(data.get(
-            "subsession_enabled", getattr(settings, "subsession_enabled", True))),
-        operator_subsession_enabled=bool(data.get(
-            "operator_subsession_enabled", settings.operator_subsession_enabled)),
-        operator_reasoning_effort=str(data.get(
-            "operator_reasoning_effort", settings.operator_reasoning_effort) or "lowest"),
+        # plan-549-2281：subsession_enabled / operator_subsession_enabled 已从响应体移除；
+        # 操控思考深度按「新键优先、旧键回落」读取，保证升级用户的旧设置不丢。
+        operator_subagent_effort=str(data.get(
+            "operator_subagent_effort",
+            data.get("operator_reasoning_effort", settings.operator_subagent_effort)) or "lowest"),
+        # plan-549-2281：「操控子代理」开关（旧键 operator_subsession_enabled 兼容读一次）
+        operator_subagent_enabled=bool(data.get(
+            "operator_subagent_enabled",
+            data.get("operator_subsession_enabled", settings.operator_subagent_enabled))),
         tool_card_sections_expanded=bool(data.get(
             "tool_card_sections_expanded", settings.tool_card_sections_expanded,
         )),
@@ -727,8 +737,6 @@ async def get_terminal_options() -> TerminalOptionsOut:
 async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     """更新全局设置。"""
     data = _load_config()
-    if body.memory_enabled is not None:
-        data["memory_enabled"] = body.memory_enabled
     if body.global_rules is not None:
         data["global_rules"] = body.global_rules
     # plan-278-1391: 压缩触发阈值（夹紧到 0.50~0.95，非法值忽略），运行时立即生效
@@ -793,6 +801,9 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["auto_reset_on_quota_exceeded"] = body.auto_reset_on_quota_exceeded
         settings.auto_reset_on_quota_exceeded = body.auto_reset_on_quota_exceeded
     if body.memory_enabled is not None:
+        # plan-549-2281 复盘修复：memory_enabled 原先在本函数里写两遍（函数开头一遍、
+        # 这里一遍），开头那份不同步运行时——两处分支必须收成一处理，否则日后改一处、
+        # 落盘值与运行时值就会静默不一致。保留带 settings.auto_memory_enabled 同步的这份。
         data["memory_enabled"] = body.memory_enabled
         settings.auto_memory_enabled = body.memory_enabled
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
@@ -860,10 +871,8 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _mc = max(1, min(30, int(body.max_concurrent_subagents)))
         data["max_concurrent_subagents"] = _mc
         settings.max_concurrent_subagents = _mc
-    if body.max_subsessions_per_parent is not None:
-        _mp = max(1, min(30, int(body.max_subsessions_per_parent)))
-        data["max_subsessions_per_parent"] = _mp
-        settings.max_subsessions_per_parent = _mp
+    # plan-549-2281：max_subsessions_per_parent / subsession_enabled /
+    # operator_subsession_enabled 三处写入已删除（配置项下线）。
     # plan-156-619 S4d：子会话默认模型 / 思考深度（子代理设置面板仅保留这两项可调项）
     if body.subagent_model_id is not None:
         _sm = max(0, int(body.subagent_model_id))
@@ -873,20 +882,19 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _se = str(body.subagent_reasoning_effort or "")[:20]
         data["subagent_reasoning_effort"] = _se
         settings.subagent_reasoning_effort = _se
+    # plan-549-2281：子代理开关保存；子会话开关已删除。
     if body.subagent_enabled is not None:
         data["subagent_enabled"] = bool(body.subagent_enabled)
         settings.subagent_enabled = bool(body.subagent_enabled)
-    # plan-20261020-subsession-switch：子会话开关独立保存
-    if body.subsession_enabled is not None:
-        data["subsession_enabled"] = bool(body.subsession_enabled)
-        settings.subsession_enabled = bool(body.subsession_enabled)
-    if body.operator_subsession_enabled is not None:
-        data["operator_subsession_enabled"] = bool(body.operator_subsession_enabled)
-        settings.operator_subsession_enabled = bool(body.operator_subsession_enabled)
-    if body.operator_reasoning_effort is not None:
-        _oe = str(body.operator_reasoning_effort or "lowest")[:20]
-        data["operator_reasoning_effort"] = _oe
-        settings.operator_reasoning_effort = _oe
+    # plan-549-2281：操控思考深度改名 operator_subagent_effort（写新键，旧键不再回写）
+    if body.operator_subagent_effort is not None:
+        _oe = str(body.operator_subagent_effort or "lowest")[:20]
+        data["operator_subagent_effort"] = _oe
+        settings.operator_subagent_effort = _oe
+    # plan-549-2281：「操控子代理」开关（写新键，旧键不再回写）
+    if body.operator_subagent_enabled is not None:
+        data["operator_subagent_enabled"] = bool(body.operator_subagent_enabled)
+        settings.operator_subagent_enabled = bool(body.operator_subagent_enabled)
     if body.tool_card_sections_expanded is not None:
         data["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
         settings.tool_card_sections_expanded = bool(body.tool_card_sections_expanded)

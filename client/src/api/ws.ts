@@ -9,6 +9,16 @@ export interface ServerEvent {
   event: string;
   seq?: number;
   payload: Record<string, unknown>;
+  /** plan-549-2281 复盘：该事件是否属于「重连/进会话时的补发批次」。
+   *
+   *  补发（sync.request → sync.response 之间缓存的那批事件）由 WsClient 在派发前统一打标，
+   *  消费侧（store）据此判定「这条是旧数据的重放」还是「这条是实时事件」。
+   *  此前 store 靠「切回会话后 1 秒内一律忽略增量」的时间窗保护，把同窗口内到达的
+   *  真实 token/thinking 增量也一起丢了（文字停一秒后突然跳出）。
+   *
+   *  仅新增可选字段：既有的 event / seq / payload 语义与 WsClient 的方法签名不变，
+   *  不识别本字段的消费方照旧工作。 */
+  replay?: boolean;
 }
 
 type Handler = (event: ServerEvent) => void;
@@ -16,6 +26,11 @@ type Handler = (event: ServerEvent) => void;
 const _BASE_DELAY = 2000;
 const _MAX_DELAY = 30000;
 const _MAX_JITTER = 1000;
+
+/** plan-568-2333：服务端不写入补偿缓冲的高频流式增量（见 gateway/ws.py 的
+ *  _STREAM_NO_BUFFER_EVENTS）。补发批次里不可能出现这些事件，因此同一窗口内收到的
+ *  一定是实时增量，不能按重放处理——否则切回运行中会话时文字会停住、然后整段跳出。 */
+const _REALTIME_ONLY_EVENTS = new Set(["token.delta", "thinking.delta", "approval.explain.delta"]);
 
 export class WsClient {
   private ws: WebSocket | null = null;
@@ -26,6 +41,16 @@ export class WsClient {
   private intentionalClose = false;
   /** 会话级事件序号（断线补偿：重连后请求补发 seq > lastSeq 的事件） */
   private lastSeq = 0;
+  /** plan-20261025-shell（需求 10）：补发阶段——从发出 sync.request 到收到 sync.response。
+   *  进会话时 lastSeq=0，服务端会把缓冲里本会话的全部历史事件（最多 500 条）逐条补发；
+   *  此前每条都在单独的 onmessage 任务里派发、各自渲染一帧，界面就按时间线把整段工作「重演」一遍：
+   *  工具行逐个冒出、输入框随提问事件切成提问卡又切回、审批卡闪一下，最后才落到底部的回复。
+   *  现在补发期间先缓存，收到 sync.response 后在同一个任务里按序一次派发——处理逻辑与顺序完全不变，
+   *  React 18 会把这一串 store 更新合并成一次渲染，界面直接落到终态。 */
+  private syncing = false;
+  private syncBuffer: ServerEvent[] = [];
+  /** 用全局 setTimeout（不经 window）：WsClient 也在 Node 单测里跑，那里的 window 只是桩对象 */
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
 
   connect(sessionId: number) {
     this.disconnect();
@@ -74,6 +99,7 @@ export class WsClient {
       // v1.0: 重连成功，重置计数
       this.reconnectAttempt = 0;
       // v2.1: 断线补偿——请求补发 lastSeq 之后的事件
+      this.beginSync();
       this.send("sync.request", { last_seq: this.lastSeq });
     };
 
@@ -89,6 +115,12 @@ export class WsClient {
         if (typeof data.seq === "number" && data.seq > this.lastSeq) {
           this.lastSeq = data.seq;
         }
+        if (this.syncing) {
+          // 补发阶段：先缓存，结束帧到达时连同它一起按序派发
+          if (data.event === "sync.response") this.finishSync(data);
+          else this.syncBuffer.push(data);
+          return;
+        }
         this.handlers.forEach((h) => h(data));
       } catch {
         // ignore invalid
@@ -100,6 +132,8 @@ export class WsClient {
       if (this.intentionalClose) return;
       // v2.2: 旧连接（已被切换/替换）的 close 事件不触发重连
       if (this.ws !== sock || this.currentSessionId !== sessionId) return;
+      // 补发途中断线：已收到的事件照常派发（lastSeq 已越过它们，重连后不会再补）
+      if (this.syncing) this.finishSync();
       this.reconnectAttempt++;
       const delay = Math.min(
         _BASE_DELAY * Math.pow(2, this.reconnectAttempt - 1),
@@ -113,12 +147,54 @@ export class WsClient {
     };
   }
 
+  /** 进入补发阶段；兜底计时：旧后端或丢帧时结束帧可能不来，到点照常派发已缓存的事件 */
+  private beginSync() {
+    this.syncing = true;
+    this.syncBuffer = [];
+    if (this.syncTimer != null) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      if (this.syncing) this.finishSync();
+    }, 3000);
+  }
+
+  /** 结束补发阶段：在同一个任务里按序派发缓存事件（tail = 结束帧本身，排在最后） */
+  private finishSync(tail?: ServerEvent) {
+    if (this.syncTimer != null) {
+      clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
+    this.syncing = false;
+    const batch = this.syncBuffer;
+    this.syncBuffer = [];
+    if (tail) batch.push(tail);
+    /* plan-549-2281 复盘：给补发批次逐条打上 replay 标记。
+     * 消费侧不再用「切回会话后 1 秒内忽略增量」这种时间窗去盖补发——
+     * 那个窗口会把同期间到达的**实时**增量一起丢掉。有了批次标记，判定与时间无关：
+     * 批次内的事件带 replay=true，批次结束后派发的一律不带。
+     * 注意只改副本字段，不改事件名 / payload / seq 语义。 */
+    for (const ev of batch) {
+      // plan-568-2333：只给「可能来自补偿缓冲」的事件打标。高频流式增量服务端不写入
+      // 补偿缓冲（_STREAM_NO_BUFFER_EVENTS），批次里出现的一定是本窗口内的实时事件，
+      // 打上 replay 会被 store 当成重放丢弃（切回运行中会话时文字停住再整段跳出）。
+      if (ev.event !== "sync.response" && !_REALTIME_ONLY_EVENTS.has(ev.event)) ev.replay = true;
+    }
+    for (const ev of batch) this.handlers.forEach((h) => h(ev));
+  }
+
   disconnect() {
     this.intentionalClose = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // 主动断开（切会话）：缓存的补发事件属于旧会话，直接丢弃
+    if (this.syncTimer != null) {
+      clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
+    this.syncing = false;
+    this.syncBuffer = [];
     this.ws?.close();
     this.ws = null;
     this.currentSessionId = null;

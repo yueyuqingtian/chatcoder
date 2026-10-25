@@ -63,7 +63,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <SettingsGlyph name="memory" /> },
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
   { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <SettingsGlyph name="extensions" /> },
-  { key: "subagents", label: "子代理与子会话", group: "agent", keywords: "子代理 profile 工具白名单 子会话 并发 上限", icon: <SettingsGlyph name="subagents" /> },
+  { key: "subagents", label: "子代理", group: "agent", keywords: "子代理 profile 工具白名单 并发 上限 操控", icon: <SettingsGlyph name="subagents" /> },
   { key: "workflows", label: "工作流", group: "agent", keywords: "工作流 并发 上限 子代理 返工 预算 步骤 运行时", icon: <SettingsGlyph name="workflows" /> },
   { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <SettingsGlyph name="rules" /> },
   { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <SettingsGlyph name="hooks" /> },

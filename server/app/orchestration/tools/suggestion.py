@@ -1,7 +1,7 @@
 """后续任务建议工具（plan-156-619 S10）。
 
 会话收尾时调用一次，把「下一步可以做什么」交给用户决定：
-接受 → 新开一个子会话执行；取消 → 卡片刻隐藏且永久不再提示。
+接受 → 在当前会话里直接发起一轮执行；取消 → 卡片刻隐藏且永久不再提示。
 
 只提供**一条**建议（不是列表）——建议卡固定在消息流底部，
 一次给三条会让用户无从选择，也让「取消」语义变得含糊。
@@ -20,12 +20,26 @@ SUGGESTION_MODES = frozenset({"agent", "workflow"})
 
 
 def suggestion_allowed(mode: str, session) -> bool:
-    """本轮是否向主代理注入建议卡工具与提示词：设置开启 + 智能体 / 工作流模式 + 主会话（非子会话）。"""
+    """本轮是否向主代理注入建议卡工具与提示词：设置开启 + 智能体 / 工作流档 + 主会话。
+
+    plan-562-2318 A26：模式判定改按**判定档**（`resolve_mode_kind`，按 kind 归一）。
+    此前直接用原始模式名比 `SUGGESTION_MODES`，自定义模式名永远不等，于是自定义
+    `kind=full`（能力等同智能体）的主会话也拿不到建议卡，与 `subagent_dispatch`、
+    审批边界那些已按 kind 归一的判定口径不一致。归一异常时按原名判定（不放大注入面）。
+    """
     from app.core.config import settings
 
     if not getattr(settings, "suggestion_enabled", False):
         return False
-    if mode not in SUGGESTION_MODES:
+    raw = str(mode or "").strip()
+    try:
+        from app.services.permission_profile_service import resolve_mode_kind
+
+        kind = resolve_mode_kind(raw)
+    except Exception:  # noqa: BLE001 — 配置层异常时按原名判定（旧行为）
+        logger.warning("[suggestion] 模式归一失败 mode=%s(按原名判定)", raw, exc_info=True)
+        kind = raw
+    if kind not in SUGGESTION_MODES and raw not in SUGGESTION_MODES:
         return False
     return getattr(session, "side_parent_id", None) is None
 
@@ -46,9 +60,10 @@ async def unfinished_work_reason(db, session_id: int) -> str | None:
     except Exception:  # noqa: BLE001
         logger.debug("[suggestion] 工作流状态读取失败", exc_info=True)
     try:
-        from app.services import subsession_service
-        for child in await subsession_service.list_children(db, session_id):
-            if child.status != "archived" and await subsession_service._running_turn_id(db, child.id) is not None:
+        from app.services import child_session_service
+        for child in await child_session_service.list_children(db, session_id):
+            if child.status != "archived" and \
+                    await child_session_service.running_turn_id(db, child.id) is not None:
                 return "仍有子会话在运行"
     except Exception:  # noqa: BLE001
         logger.debug("[suggestion] 子会话状态读取失败", exc_info=True)

@@ -4,7 +4,9 @@ plan-206-975：写操作经 WriteEngine 单写线程（无锁单写者）；读�
 写函数返回标量（id/title/status 等），不返回跨层 ORM 对象。
 """
 import logging
+import re
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,16 @@ logger = logging.getLogger(__name__)
 
 # 自动标题的回落截断长度（AI 归纳失败时用首条消息前若干字）
 AUTO_TITLE_FALLBACK_CHARS = 30
+
+# 附件目录名（`uploads/{file_id}/...`）的合法取值：8~32 位十六进制。
+# 只认这种形状，避免把消息里形似的字符串当成目录名去删盘。
+_FILE_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+_CHUNK = 400
+
+
+def _chunks(ids: list[int]) -> list[list[int]]:
+    """按批切分 id 列表：每批远低于 SQLite 的参数个数上限。"""
+    return [ids[i:i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
 
 
 def _legacy_default_for_type(type_name: str) -> object:
@@ -431,6 +443,33 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
             MemoryEntry.session_id.in_(chunk),
             _or(MemoryEntry.scope == "session", MemoryEntry.scope.is_(None)),
         )
+        # plan-562-2318 H5：剩余的项目/全局记忆**显式解绑**，不等外键动作。
+        # `ON DELETE SET NULL` 是启动迁移重建表时才写进 DDL 的；旧库若仍是
+        # 「session_id NOT NULL + RESTRICT」，删会话/删项目会 IntegrityError，
+        # 用户看到的是「点了永久删除但删不掉」。显式 UPDATE 让删除不再依赖那次迁移是否成功，
+        # 且对已改好的库是无害的幂等操作。
+        # 作用域条件与上面的删除保持一致：只解绑非 session 作用域的行（它们已经删掉了）。
+        # 注意：旧库该列若仍是 NOT NULL，这条 UPDATE 自己就会撞约束——必须用 SAVEPOINT
+        # 把它圈起来，失败只损失这一批的解绑（随后删 sessions 行会因 RESTRICT 报错，
+        # 由调用方看到真实错误），绝不能让整个删除写事务在这里回滚。
+        try:
+            with s.begin_nested():
+                res = s.execute(
+                    _update(MemoryEntry)
+                    .where(
+                        MemoryEntry.session_id.in_(chunk),
+                        MemoryEntry.scope.is_not(None),
+                        MemoryEntry.scope != "session",
+                    )
+                    .values(session_id=None)
+                )
+                counts["memory_entries_detached"] = (
+                    counts.get("memory_entries_detached", 0) + int(res.rowcount or 0)
+                )
+        except Exception:  # noqa: BLE001 — 解绑不可行时退回外键动作，不阻断删除
+            logger.warning(
+                "[session] 记忆表会话关联解绑失败（该列可能仍为 NOT NULL）", exc_info=True
+            )
         # 3) 用量流水：只解除关联（保留历史用量）
         res = s.execute(
             _update(UsageRecord)
@@ -445,6 +484,54 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
     return counts
 
 
+async def prepare_session_removal(session_ids: list[int]) -> None:
+    """会话被物理删除**之前**清理它的运行态（三条删除路径统一走这里）。
+
+    plan-562-2318 H4：此前「删除前清理」分散在三处且各清一部分——归档批量删除最全，
+    工作树级联删除与单会话永久删除各有遗漏。漏清的后果都按会话 id 常驻：
+    后台命令仍占着端口、工作流运行时仍挂着已删的行、失败计数与 fs_read 缓存越积越多
+    （会话 id 被复用后，新会话的 `covers()` 会直接放行别人的读记录）。
+
+    每项各自兜底：单项失败只记日志，不阻断其余项，也不阻断调用方的删除。
+    """
+    for raw in session_ids:
+        sid = int(raw)
+        # 运行中的主代理轮次 / 子代理：不取消的话删除后它们仍会往已删的行写
+        try:
+            # 延迟导入：orchestration 反向依赖 services，顶层导入会成环
+            from app.orchestration import engine
+
+            if engine.session_has_live_execution(sid):
+                await engine.stop_session_execution(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 删除前停止执行失败 sid=%s", sid, exc_info=True)
+        try:
+            from app.orchestration.workflow import service as workflow_service
+
+            await workflow_service.on_session_deleted(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 取消会话工作流失败 sid=%s", sid, exc_info=True)
+        try:
+            from app.orchestration.tools.bg_process import bg_process_registry
+
+            # plan-20261020-bgtask：会话删掉后再没有界面能管理它名下的后台命令
+            await bg_process_registry.kill_session(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 终止后台命令失败 sid=%s", sid, exc_info=True)
+        try:
+            from app.services import post_edit_check
+
+            post_edit_check.clear_fail_counts(sid)  # plan-549-2281：会话级内存计数随删清理
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 清理失败计数失败 sid=%s", sid, exc_info=True)
+        try:
+            from app.orchestration.tools import read_cache
+
+            read_cache.clear_cache_for_session(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 清理 fs_read 缓存失败 sid=%s", sid, exc_info=True)
+
+
 async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | None:
     """**永久删除**会话及其全部关联数据（plan-282-1441 #4：归档页批量删除）。
 
@@ -453,8 +540,21 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
     会话不存在返回 None。
 
     关联数据清理统一走 `purge_session_children`（外键安全顺序，含 artifacts）。
+
+    plan-562-2318 H4：附件目录与回滚快照的清理原先只在归档批量路径里做，单会话永久删除
+    会漏掉它们（磁盘按已删会话 id 一直累积）。这里沿用归档路径的安全顺序——
+    **收集在写事务之前**（快照登记行随后会被删掉，提交后再查就再也拿不到文件名），
+    **磁盘清理在提交之后**（写事务内不做磁盘 IO，删库已生效，清盘失败不回滚删除）。
     """
     from app.persistence.database import run_write_locked
+
+    # 收集失败（旧库缺表/缺列）不能让删除失败：磁盘清理是附带收益，删库才是主目标。
+    try:
+        attachments = await collect_session_attachments([session_id])
+        checkpoints = await collect_session_checkpoints([session_id])
+    except Exception:  # noqa: BLE001
+        logger.warning("[session] 收集会话附件/快照失败，跳过磁盘清理 sid=%s", session_id, exc_info=True)
+        attachments, checkpoints = set(), set()
 
     def patch(s):
         session = s.get(Session, session_id)
@@ -468,7 +568,18 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
     result = await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
     if result is not None:
         _purge_tool_outputs(session_id)
+        result["files_removed"] = await _remove_session_assets(attachments, checkpoints)
     return result
+
+
+def purge_session_tool_outputs(session_id: int) -> None:
+    """公开入口：清理会话的长工具输出落盘目录。
+
+    plan-560-2311 E1：`archive_service` 与 `worktree_service` 的批量永久删除绕开了
+    `delete_session_permanent` 直接调 `purge_session_children`，于是 `uploads/_tool_outputs/{sid}`
+    无人清理、按已删会话 id 一直累积。它们跨模块调用，走这个公开入口而不是私有函数。
+    """
+    _purge_tool_outputs(session_id)
 
 
 def _purge_tool_outputs(session_id: int) -> None:
@@ -489,6 +600,164 @@ def _purge_tool_outputs(session_id: int) -> None:
             shutil.rmtree(folder, ignore_errors=True)
     except Exception:  # noqa: BLE001 — 清理失败不影响会话删除
         logger.debug("清理工具输出落盘失败 sid=%s", session_id, exc_info=True)
+
+
+def _attachment_ids(content: Any) -> set[str]:
+    """从一条消息内容里取出附件 file_id（只认 8~32 位十六进制的目录名）。"""
+    out: set[str] = set()
+    if not isinstance(content, dict):
+        return out
+    for att in content.get("attachments") or []:
+        if not isinstance(att, dict):
+            continue
+        fid = str(att.get("file_id") or "").strip()
+        if not fid:
+            path = str(att.get("path") or "").replace("\\", "/")
+            fid = path.split("/", 1)[0] if "/" in path else ""
+        if _FILE_ID_RE.match(fid):
+            out.add(fid)
+    return out
+
+
+async def collect_session_attachments(session_ids: list[int]) -> set[str]:
+    """这些会话的消息引用的附件 file_id（附件只由用户消息携带）。
+
+    plan-562-2318 H4：从 `archive_service` 下沉，供三条删除路径共用。
+    **必须在删除写事务之前调用**：消息行删掉之后就再也查不到这些 file_id 了。
+    """
+    from app.persistence.database import async_session_factory
+
+    found: set[str] = set()
+    ids = [int(x) for x in session_ids]
+    if not ids:
+        return found
+    async with async_session_factory() as db:
+        for chunk in _chunks(ids):
+            rows = await db.execute(
+                select(Message.content).where(
+                    Message.session_id.in_(chunk), Message.sender_type == "user"
+                )
+            )
+            for content in rows.scalars().all():
+                found |= _attachment_ids(content)
+    return found
+
+
+async def collect_session_checkpoints(session_ids: list[int]) -> set[str]:
+    """这些会话的回滚快照登记的备份文件（工作区 .chatcoder/checkpoints 下，应用生成）。
+
+    plan-562-2318 H4：同样必须在删除写事务之前调用（快照登记行会被删掉）。
+    """
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.rollback import TurnSnapshot
+
+    found: set[str] = set()
+    ids = [int(x) for x in session_ids]
+    if not ids:
+        return found
+    async with async_session_factory() as db:
+        for chunk in _chunks(ids):
+            rows = await db.execute(
+                select(TurnSnapshot.file_list).where(TurnSnapshot.session_id.in_(chunk))
+            )
+            for file_list in rows.scalars().all():
+                for item in file_list or []:
+                    if isinstance(item, dict) and item.get("ckpt"):
+                        found.add(str(item["ckpt"]))
+    return found
+
+
+def _in_checkpoint_dir(path) -> bool:
+    """路径是否位于工作区的 .chatcoder/checkpoints 目录内（只动应用自己生成的文件）。"""
+    parts = [p.lower() for p in path.parts]
+    return any(parts[i] == ".chatcoder" and parts[i + 1] == "checkpoints" for i in range(len(parts) - 1))
+
+
+async def remove_orphan_uploads(file_ids: set[str]) -> int:
+    """删除不再被任何消息引用的附件目录，返回删除的目录数。
+
+    **必须在删除写事务提交之后调用**：事务内不做磁盘 IO，且「是否还有引用」
+    要按删完之后的库判断（分支会话复制过去的消息仍引用时保留该目录）。
+    """
+    if not file_ids:
+        return 0
+    import shutil
+    from pathlib import Path
+
+    from sqlalchemy import String, cast
+
+    from app.core.config import settings
+    from app.persistence.database import async_session_factory
+
+    root = Path(settings.uploads_dir).resolve()
+    removed = 0
+    async with async_session_factory() as db:
+        for fid in sorted(file_ids):
+            still_used = (
+                await db.execute(
+                    select(Message.id).where(cast(Message.content, String).like(f"%{fid}%")).limit(1)
+                )
+            ).first()
+            if still_used is not None:
+                continue
+            target = (root / fid).resolve()
+            try:
+                target.relative_to(root)  # 防越界：file_id 只允许指向 uploads 下的直接子目录
+            except ValueError:
+                continue
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+                removed += 0 if target.exists() else 1
+    return removed
+
+
+async def remove_orphan_checkpoints(paths: set[str]) -> int:
+    """删除已无任何快照引用的备份文件；只动 .chatcoder/checkpoints 目录内的文件。
+
+    **必须在删除写事务提交之后调用**（引用集合要按删完之后的库计算）。
+    """
+    if not paths:
+        return 0
+    from pathlib import Path
+
+    from app.persistence.database import async_session_factory
+    from app.services.checkpoint_gc import _path_key, _referenced_ckpts
+
+    async with async_session_factory() as db:
+        refs = await _referenced_ckpts(db)
+    removed = 0
+    for raw in sorted(paths):
+        try:
+            target = Path(raw).resolve()
+        except (OSError, ValueError):
+            continue
+        if _path_key(target) in refs or not _in_checkpoint_dir(target) or not target.is_file():
+            continue
+        try:
+            target.unlink()
+            removed += 1
+        except OSError:
+            logger.debug("[session] 删除备份文件失败 %s", target, exc_info=True)
+    return removed
+
+
+async def _remove_session_assets(attachments: set[str], checkpoints: set[str]) -> int:
+    """删除写事务提交后清理附件目录与孤儿备份文件，返回删除的文件/目录数。
+
+    两段各自 try：附件清理抛错不该连带跳过备份清理。失败只记日志——
+    库里的行已经删掉，磁盘残留属于可事后清理的问题，不能反过来报删除失败。
+    """
+    removed = 0
+    try:
+        removed += await remove_orphan_uploads(attachments)
+    except Exception:  # noqa: BLE001
+        logger.warning("[session] 清理附件目录失败（不影响删除结果）", exc_info=True)
+    try:
+        removed += await remove_orphan_checkpoints(checkpoints)
+    except Exception:  # noqa: BLE001
+        logger.warning("[session] 清理回滚备份文件失败（不影响删除结果）", exc_info=True)
+    return removed
+
 
 
 async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:

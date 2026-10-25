@@ -21,6 +21,10 @@ PROBE_TIMEOUT_SEC = 12.0
 _REASON_TEXT = {
     "no_default_configured": "未配置默认模型",
     "provider_disabled": "模型所属供应商已停用",
+    # plan-565-2323 G4：账号被逐个停用与「凭据取不到 token」是两回事——
+    # 前者用户自己就能修（回模型管理启用），笼统报不可用会让人以为凭据坏了。
+    "provider_credentials_all_disabled": "该供应商的账号全部处于停用状态，请在模型管理中启用至少一个账号",
+    "provider_credential_unavailable": "供应商凭据不可用，请检查模型管理中的账号配置",
 }
 
 

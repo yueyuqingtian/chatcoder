@@ -22,6 +22,11 @@ EXPLORE_TOOLS = [
     # plan-20261016-ux（问题 7）：符号检索 / 文件骨架 / 技能查阅同属纯读，探索子代理此前缺失——
     # 已开索引的项目里子代理只能逐个文件 grep，调研又慢又费 token
     "symbol_search", "outline", "skill_view",
+    # plan-560-2311 D10：功能地图查询也是纯读，且主提示词的工具选择表把它列为
+    # 「知道要改什么功能、不知道在哪个模块」时的首选入口。子代理拿不到它，只能靠
+    # 关键词反复 grep，调研质量与主代理不一致。压缩块查看（compaction_index /
+    # compaction_view）不进本表：子代理是新上下文、没有压缩块可查，暴露只会误导。
+    "feature_lookup",
 ]
 
 SPAWN_SUBAGENT_SCHEMA = {
@@ -38,6 +43,8 @@ SPAWN_SUBAGENT_SCHEMA = {
             "- Work that splits into independent subtasks you can run in parallel.\n"
             "- Broad exploration or research that would take more than ~3 search/read calls to answer — "
             "delegate it and keep the conclusion, not the raw file dumps.\n"
+            "- Implementation work whose write scope is disjoint from yours — dispatch it with "
+            "`mode=\"agent\"` instead of doing every edit yourself.\n"
             "- Anything where you only need the conclusion instead of raw outputs in your own context.\n"
             "\n## When NOT to use\n"
             "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
@@ -45,8 +52,10 @@ SPAWN_SUBAGENT_SCHEMA = {
             "\n## How to dispatch\n"
             "- Dispatch returns immediately: you are NOT blocked while the subagent runs. Keep working on "
             "other things and the completion report is pushed back to you automatically (do NOT poll).\n"
-            "- explore only sets the READ/WRITE scope: true = read-only research (no writes, no commands), "
-            "false = the subagent may write. It never changes how the dispatch is scheduled.\n"
+            "- `mode` is the subagent's execution mode and the ONLY thing that decides what it may do: "
+            "`readonly` = research/review only (no writes, no commands); `agent` = may write and run "
+            "commands. Default `agent`. It never changes how the dispatch is scheduled.\n"
+            "- `explore` is the legacy alias of the same read/write switch (true = readonly) — prefer `mode`.\n"
             "- Independent subtasks: send SEVERAL spawn_subagent calls in ONE message so they run concurrently.\n"
             "- NEVER dispatch the same subtask twice, and give each subtask a distinct task_title; "
             "check collect_results first if unsure whether an equivalent one already exists.\n"
@@ -80,12 +89,35 @@ SPAWN_SUBAGENT_SCHEMA = {
                     "type": "string",
                     "description": "How to verify the subtask is done. Written in the current reply language.",
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["readonly", "agent"],
+                    "description": (
+                        "The subagent's execution mode — the only switch that decides what it may do. "
+                        "readonly = research/review only (no writes, no commands); "
+                        "agent = may write files and run commands. Default agent. "
+                        "Plan mode and workflow tools are never available to a subagent, and the "
+                        "approval mode is always inherited from this session."
+                    ),
+                },
                 "explore": {
                     "type": "boolean",
                     "description": (
-                        "True = the subtask is READ-ONLY research (no writes, no commands, no shell). "
-                        "False = the subagent may write to the workspace. It only sets the scope; it has "
-                        "no effect on scheduling. Default false."
+                        "Legacy alias of mode: true = readonly, false = agent. Prefer `mode`; "
+                        "kept so older sessions and ta3-backed calls keep working."
+                    ),
+                },
+                "purpose": {
+                    "type": "string",
+                    # 不能把 "" 放进 enum：Gemini 系网关直接拒绝空枚举值
+                    # （400 GenerateContentRequest.tools[...].enum[0]: cannot be empty），
+                    # 会让整轮请求失败。普通任务省略该参数即可，语义与旧版空串一致。
+                    "enum": ["operator"],
+                    "description": (
+                        "operator = GUI-operating subagent: it runs at the lowest reasoning effort "
+                        "configured for operator subagents (settings.operator_subagent_effort) and is "
+                        "meant for multi-step browser / desktop operations where speed matters more "
+                        "than deep reasoning. Omit this parameter for normal tasks."
                     ),
                 },
             },
@@ -102,7 +134,8 @@ COLLECT_RESULTS_SCHEMA = {
             "Check the status and structured summaries of subagents spawned this turn. "
             "Returns each finished subagent's status, result summary, files touched, key findings, "
             "risks/blockers, plus how many are still running. "
-            "Set wait=true to block until all subagents finish (preferred over repeated polling)."
+            "Set wait=true to block until ALL of them finish (preferred over repeated polling); "
+            "use it when your next step genuinely depends on their conclusions."
         ),
         "parameters": {
             "type": "object",
@@ -205,7 +238,11 @@ SEND_TO_SUBAGENT_SCHEMA = {
         "description": (
             "Send a follow-up instruction to a STILL-RUNNING subagent spawned this turn "
             "(id returned by spawn_subagent). The instruction is injected into its context before "
-            "its next model call, so you can steer, correct or narrow its work without cancelling it. "
+            "its next model call, so you can steer, correct or narrow its work without cancelling it.\n"
+            "You may call it MULTIPLE times on the same subagent — each message is queued and "
+            "delivered in order; the newest instruction wins when they conflict. "
+            "This is also how you ANSWER a subagent's question (see its `report_to_leader` message): "
+            "the reply reaches the waiting subagent and unblocks it. "
             "Use cancel_subagent to stop it entirely. Finished subagents cannot receive instructions."
         ),
         "parameters": {
@@ -231,7 +268,8 @@ REPORT_TO_LEADER_SCHEMA = {
             "The message reaches the main agent's context before its next model call, and is also "
             "visible in your own thread. "
             "kind=\"progress\" (default): fire-and-forget status update — keep working afterwards. "
-            "kind=\"question\" with wait=true: block, up to timeout_s, until the main agent replies. "
+            "kind=\"question\" with wait=true: block until the main agent replies (no time limit by default — "
+            "the main agent may need to check with the user first, which can take a while). "
             "Every subagent runs in the background, so any of them may wait this way — use it when you "
             "genuinely cannot proceed without a decision."
         ),
@@ -249,7 +287,10 @@ REPORT_TO_LEADER_SCHEMA = {
                 },
                 "timeout_s": {
                     "type": "integer",
-                    "description": "Max seconds to wait for a reply when wait=true (default 300).",
+                    # plan-549-2281（复盘）：与实现口径对齐——等待**默认不设上限**（主代理可能还要问用户，
+                    # 用户可能很久才回），timeout_s 仅在调用方显式给出时生效。此前文案写死默认值，
+                    # 模型会误以为到时无回复即失败而提前放弃。
+                    "description": "Only if you explicitly need a cap: max seconds to wait when wait=true. Omit it to wait without a time limit (recommended).",
                 },
             },
             "required": ["message"],
@@ -294,6 +335,12 @@ SUBAGENT_FORBIDDEN: frozenset[str] = frozenset({
     "interrupt_subsession", "message_main", "message_peer",
     "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
     "send_to_subagent", "resume_subagent",
+    # plan-549-2281：子代理不得进入计划模式、也不得创建/使用工作流。工作流工具不在
+    # tool_registry 里（子代理原本天然拿不到），但「类型工具白名单」「自定义权限模式」
+    # 都能把名字塞回来——这里显式列出，与上方子代理工具同一道防线。
+    # 用字面量而非 import workflow.tools：避免与 workflow 包形成循环导入。
+    "plan_workflow", "start_workflow", "workflow_status", "resume_workflow",
+    "cancel_workflow", "amend_workflow", "decide_workflow", "request_write_scope",
 })
 
 
@@ -308,9 +355,14 @@ def strip_for_subagent(tool_schemas: list[dict]) -> list[dict]:
 def _spawn_schema(explore_only: bool) -> dict:
     """spawn_subagent schema；只读/计划模式下替换为「只读探索」版本（v36）。
 
-    explore_only=True 时：描述改为仅支持只读探索子任务，并移除 explore 参数（只读由
-    运行时强制、无需模型传参）。plan-541-2264：只读/计划模式下同样只有后台派发，
+    explore_only=True 时：描述改为仅支持只读探索子任务，并移除 explore / mode / purpose
+    参数（只读由运行时强制、无需模型传参）。plan-541-2264：只读/计划模式下同样只有后台派发，
     参数面不再存在任何调度开关。
+
+    plan-560-2311 C3：受限变体此前只 pop 掉 `explore`，`mode`（enum readonly/agent）与
+    `purpose`（enum operator）仍暴露在参数面里。运行时会兜住（mode 被强制只读、operator
+    被显式拒绝），但「模型看得到的参数」与「真正生效的参数」不一致，模型会反复传一个
+    必然被拒的值。这里把三者一并移除，并在描述里写明「只读由运行时强制」，与运行时同口径。
     """
     if not explore_only:
         return SPAWN_SUBAGENT_SCHEMA
@@ -331,8 +383,9 @@ def _spawn_schema(explore_only: bool) -> dict:
         "\n## When NOT to use\n"
         "- A single-fact lookup where you already know the file, symbol or value — search directly.\n"
         "\n## Mode note\n"
-        "- The current permission mode is READ-ONLY / PLAN: only read-only exploration is "
-        "available. NEVER ask the subagent to modify, write or create files — it will be rejected.\n"
+        "- The current permission mode is READ-ONLY / PLAN: the runtime forces read-only, so this "
+        "tool takes NO mode / purpose argument. NEVER ask the subagent to modify, write or create "
+        "files — it will be rejected.\n"
         "\n## How to dispatch\n"
         "- Dispatch returns immediately: you are NOT blocked. The conclusion comes back as a completion "
         "report pushed to you automatically; use collect_results(wait=true) only when you need it now.\n"
@@ -344,7 +397,11 @@ def _spawn_schema(explore_only: bool) -> dict:
         "- Use collect_results / subagent_inspect when you need more detail."
     )
     props = fn["parameters"]["properties"]
-    props.pop("explore", None)  # 仍由运行时强制只读，无需模型传参
+    # plan-560-2311 C3：三个能力开关在受限变体里都不该出现——只读由运行时强制（explore），
+    # 可写派发（mode）与操控子代理（purpose=operator）在本模式下必被拒。
+    props.pop("explore", None)
+    props.pop("mode", None)
+    props.pop("purpose", None)
     return schema
 
 
@@ -391,7 +448,7 @@ def append_subagent_tools(tool_schemas: list[dict],
 
     v36 (plan-321-1600 R1): 四种权限模式都支持子代理——
     - explore_only=True（只读/计划模式）：仅暴露只读探索子代理（spawn 描述换成
-      只读探索版；隐藏 explore 参数，只读由运行时强制），general 不参与本模式；
+      只读探索版；隐藏 explore / mode / purpose 参数，只读由运行时强制），general 不参与本模式；
     - allowed：白名单模式下的子代理工具子集（None = 全量）——设置页未勾选的
       子代理工具不暴露，勾选真正生效。
 
@@ -441,6 +498,4 @@ def append_subagent_tools(tool_schemas: list[dict],
     if allow_collect and _permitted("send_to_subagent") and "send_to_subagent" not in names:
         out.append(SEND_TO_SUBAGENT_SCHEMA)
         names.add("send_to_subagent")
-    return out
-
     return out

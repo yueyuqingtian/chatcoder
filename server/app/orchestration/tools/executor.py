@@ -37,11 +37,13 @@ logger = logging.getLogger(__name__)
 
 
 # plan-248-1258 M3.1: 写盘类工具名 → 变更文件路径参数名（多个时按 args.edits[].path）
+# plan-560-2311 D9：补 filePath / file 两个别名——模型与 MCP 风格客户端常用这两个键名，
+# 漏了就会取不到路径、退化成「整工作区索引失效」（下次检索要全量重建）。
 _WRITE_TOOLS = {
-    "fs_write": ("path", "file_path", "filepath"),
-    "editor_apply_diff": ("path", "file_path", "filepath"),
-    "multi_file_edit": (),  # 路径在 edits[].path
-    "apply_patch": ("path", "file_path", "filepath"),
+    "fs_write": ("path", "file_path", "filepath", "filePath", "file"),
+    "editor_apply_diff": ("path", "file_path", "filepath", "filePath", "file"),
+    "multi_file_edit": (),  # 路径在 edits[].path（含个键别名与 sole_path，见下方）
+    "apply_patch": ("path", "file_path", "filepath", "filePath", "file"),
 }
 
 
@@ -49,6 +51,11 @@ def _notify_symbol_index(tool_name: str, args: dict, ctx: ToolContext) -> None:
     """写盘成功 → 通知符号索引失效该文件（已开启索引的工作区会在下一轮自动增量）。
 
     同步、无异常外抛：索引维护绝不能影响工具结果返回。
+
+    plan-560-2311 D9：`multi_file_edit` 分支改用 `multi_edit._EDIT_PATH_KEYS`（与工具自身
+    的解析口径同源，避免两边漂移），并处理「只有一个文件时 edit 可省 path」的 sole_path
+    情形——此前这类 edits 取不到路径，直接落到 `notify_file_changed(workspace, None)`
+    整工作区失效。
     """
     workspace = getattr(ctx, "workspace_root", None)
     if not workspace:
@@ -60,10 +67,31 @@ def _notify_symbol_index(tool_name: str, args: dict, ctx: ToolContext) -> None:
 
         paths: list[str] = []
         if tool_name == "multi_file_edit":
-            edits = args.get("edits")
-            if isinstance(edits, list):
-                paths = [str(e.get("path")) for e in edits
-                         if isinstance(e, dict) and e.get("path")]
+            from app.orchestration.tools.multi_edit import _EDIT_PATH_KEYS, _coerce_edits
+
+            edits = _coerce_edits(args.get("edits"))
+            if edits:
+                # sole_path：本次只涉及一个文件时，缺 path 的 edit 复用它（与工具内一致）
+                _known: list[str] = []
+                for e in edits:
+                    for key in _EDIT_PATH_KEYS:
+                        v = e.get(key)
+                        if isinstance(v, str) and v.strip():
+                            if v.strip() not in _known:
+                                _known.append(v.strip())
+                            break
+                _sole = _known[0] if len(_known) == 1 else ""
+                for e in edits:
+                    _p = ""
+                    for key in _EDIT_PATH_KEYS:
+                        v = e.get(key)
+                        if isinstance(v, str) and v.strip():
+                            _p = v.strip()
+                            break
+                    if not _p:
+                        _p = _sole
+                    if _p and _p not in paths:
+                        paths.append(_p)
         else:
             for key in _WRITE_TOOLS[tool_name]:
                 v = args.get(key)
@@ -131,6 +159,21 @@ _TOOL_NAME_HINTS: dict[str, str] = {
     "webfetch": "web_fetch", "fetch": "web_fetch", "websearch": "web_search", "search_web": "web_search",
     "ask": "ask_user_question", "askuser": "ask_user_question", "ask_followup_question": "ask_user_question",
 }
+
+
+def _approval_summary(ctx: ToolContext, label: str) -> str:
+    """审批卡摘要文案（plan-549-2281）。
+
+    子代理的牌面必须能看出「是哪个派发在等」：子会话下线后所有并行执行都走子代理，
+    只写 agent 名字不足以让用户判断上下文，因此带上任务标题。
+    """
+    if getattr(ctx, "is_subagent", False):
+        title = str(getattr(ctx, "subagent_title", "") or "").strip()
+        who = f"子代理 #{ctx.agent_id}"
+        if title:
+            who += f"「{title}」"
+        return f"{who} 申请{label}"
+    return f"{ctx.agent_name} 申请{label}"
 
 
 def _unknown_tool_error(tool_name: str) -> str:
@@ -335,7 +378,10 @@ class ServerToolExecutor(ToolExecutor):
                 "approval_mode": normalize_approval_mode(getattr(ctx, "approval_mode", None)),
                 # plan-75-332: 本 turn 的思考深度——审批卡「解释」默认沿用（未在设置中指定专用档位时）
                 "reasoning_effort": getattr(ctx, "reasoning_effort", None),
-                "summary": f"{ctx.agent_name} 申请{decision.label}",
+                # plan-549-2281：子代理的审批卡必须能看出是哪个派发在等。子会话下线后所有
+                # 并行执行都走子代理，卡上只写 agent 名字无法让用户判断上下文，因此带上任务标题。
+                "subagent_title": str(getattr(ctx, "subagent_title", "") or ""),
+                "summary": _approval_summary(ctx, decision.label),
                 # plan-522-2209：调用方身份——审批等待策略据此豁免静默超时（子任务的审批
                 # 可能发生在用户并未停留的会话里，超时自动拒绝会让用户两头都看不到）
                 "is_subagent": bool(getattr(ctx, "is_subagent", False)),

@@ -24,12 +24,8 @@ REPORT_PREVIEW_CHARS = 1500
 
 __all__ = [
     "REPORT_PAGE_CHARS", "REPORT_PREVIEW_CHARS", "ReportPage", "SUBSESSION_REPORT_FLAG",
-    "continuation_hint", "page_of", "paging_hint", "tool_ref",
+    "page_of", "paging_hint", "tool_ref",
 ]
-
-
-def continuation_hint(page: TextPage, subsession_id: int) -> str:
-    """子会话结论的续读提示。"""
-    return paging_hint(
-        page, tool_ref("get_subsession_progress", subsession_id=subsession_id, report_offset="{offset}"),
-    )
+# plan-549-2281：continuation_hint 已删除——它是子会话结论的续读提示，硬编码
+# `get_subsession_progress`（已不存在的工具）。子代理结论的续读走
+# collect_results(report_offset=…)，提示由 collect_results 自己的结果文案给出。

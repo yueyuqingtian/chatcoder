@@ -24,6 +24,7 @@ import { Ta3QuotaSection } from "./Ta3QuotaSection";
 import { KiroQuotaSection } from "./KiroQuotaSection";
 import { ProviderSideList } from "./ProviderSideList";
 import { ProviderAvatar } from "./ProviderAvatar";
+import { OAUTH_FORMATS } from "../chat/modelGroups";
 
 /** 非阻塞提示：Electron 中 window.alert 是原生模态框，关闭后会破坏窗口焦点
  * （返回会话后输入框无法聚焦），统一改用全局 Toast。 */
@@ -34,8 +35,8 @@ function notify(msg: string) {
 const REASONING_OPTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const PROVIDER_OPTS = ["openai", "anthropic", "commandcode", "openai_compatible", "azure_openai", "google", "deepseek", "qwen", "zhipu", "moonshot", "yi", "baichuan", "minimax", "custom"];
 
-/** 账号登录类供应商（无 Base URL/Key，走 OAuth） */
-const OAUTH_FORMATS = new Set(["ta3", "workbuddy", "trae", "kiro"]);
+// 账号登录类供应商（无 Base URL/Key，走 OAuth）的集合 OAUTH_FORMATS 定义在 chat/modelGroups——
+// plan-20261025-composer：输入框模型浮层的「API / 账号」标签与这里共用同一口径
 const OAUTH_DEFAULT_BASE: Record<string, string> = {
   ta3: "https://lc.yinhaiyun.com/newcoder",
   workbuddy: "https://copilot.tencent.com",
@@ -414,6 +415,9 @@ export function ModelsPanel() {
   const [credentials, setCredentials] = useState<ProviderCredentialOut[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailProviderId, setDetailProviderId] = useState<number | null>(null);
+  /** plan-565-2323 G2：账号列表请求失败的原因。空态据此区分「真的没有账号」与「加载失败」，
+   *  此前两者都走「暂无账号」，把一次请求失败显示成了没有账号。 */
+  const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const detailRequestId = useRef(0);
   /** plan-537-2245：详情滚动容器。切换供应商时要回到顶部——此前不重置，
@@ -483,7 +487,10 @@ export function ModelsPanel() {
   const hasSideList = providers.length > 0;
 
   // workbuddy 供应商级积分合计（多账号时汇总展示在详情头部；全部未知时显示 --）
-  const creditValues = credentials.map((c) => c.credits).filter((v): v is number => v != null);
+  // plan-565-2323 G2：只统计**可用**账号——后端现在会返回停用行，把停用账号的积分算进去
+  // 会让用户以为总量还能用。
+  const activeCredentials = credentials.filter((c) => c.is_active !== false);
+  const creditValues = activeCredentials.map((c) => c.credits).filter((v): v is number => v != null);
   const totalCredits = creditValues.length > 0 ? creditValues.reduce((a, b) => a + Number(b), 0) : null;
   /** plan-41-225（右列照图）：主区密码框绑定的凭据（优先级最高的那条；无凭据时为 null） */
   const primaryCred = credentials.length > 0 ? credentials[0] : null;
@@ -496,12 +503,14 @@ export function ModelsPanel() {
       setDetailLoading(false);
       setProviderModels([]);
       setCredentials([]);
+      setCredentialsError(null);
       return;
     }
     const cached = detailCache.current.get(p.id);
     if (cached && !force) {
       setProviderModels(cached.models);
       setCredentials(cached.credentials);
+      setCredentialsError(null);
       setDetailProviderId(p.id);
       setDetailLoading(false);
       return;
@@ -514,6 +523,8 @@ export function ModelsPanel() {
       setDetailLoading(true);
       setProviderModels([]);
       setCredentials([]);
+      // 上一次的失败状态属于上一家供应商，切过来时必须清掉，否则会在新空态里闪一下「加载失败」
+      setCredentialsError(null);
     }
     setDetailProviderId(p.id);
     try {
@@ -522,11 +533,35 @@ export function ModelsPanel() {
         api.listProviderCredentials(p.id),
       ]);
       if (requestId !== detailRequestId.current) return;
-      const models = modelsResult.status === "fulfilled" ? modelsResult.value : [];
-      const nextCredentials = credentialsResult.status === "fulfilled" ? credentialsResult.value : [];
-      detailCache.current.set(p.id, { models, credentials: nextCredentials });
-      setProviderModels(models);
-      setCredentials(nextCredentials);
+      // plan-565-2323 G2：失败的一侧不再折成空数组落库。此前任何一侧失败都被当成「空数据」写进
+      // detailCache，之后非 force 刷新一直命中空缓存，界面长期显示「暂无账号」——而供应商其实
+      // 还有账号（停用的账号原本也被后端过滤，两处叠加后彻底看不出问题）。
+      // 现在只落成功的数据，失败侧保留原值，失败本身交给页内提示 + 重试入口表达。
+      const models = modelsResult.status === "fulfilled" ? modelsResult.value : null;
+      const nextCredentials = credentialsResult.status === "fulfilled" ? credentialsResult.value : null;
+      if (models) setProviderModels(models);
+      if (nextCredentials) setCredentials(nextCredentials);
+      if (credentialsResult.status === "rejected") {
+        const reason = String(credentialsResult.reason ?? "请点击重试");
+        setCredentialsError(reason);
+        // 复用面板既有的全局 Toast（notify）；凭据区另有常驻的失败行 + 重试按钮
+        notify(`账号列表加载失败：${reason}`);
+      } else {
+        setCredentialsError(null);
+      }
+      if (models && nextCredentials) {
+        detailCache.current.set(p.id, { models, credentials: nextCredentials });
+      } else if (models || nextCredentials) {
+        // 只有一侧成功：能合并到既有缓存就合并；没有既有缓存就**不落库**——
+        // 写入含空数组的不完整缓存会被后续非 force 刷新长期命中，正是这次要修的病灶。
+        const base = detailCache.current.get(p.id);
+        if (base) {
+          detailCache.current.set(p.id, {
+            models: models ?? base.models,
+            credentials: nextCredentials ?? base.credentials,
+          });
+        }
+      }
     } finally {
       if (requestId === detailRequestId.current) setDetailLoading(false);
     }
@@ -582,6 +617,17 @@ export function ModelsPanel() {
     } catch (e) { setProviders(prevProviders); notify(String(e)); }
   };
 
+  /** plan-565-2323 G3：手动复位凭据（清冷却与错误，恢复为可用）。
+   *  此前「暂缓使用」的账号**没有任何入口**能变回可用，用户只能等它自己好或删掉重建。 */
+  const handleResetCredential = async (c: ProviderCredentialOut) => {
+    try {
+      await api.resetProviderCredential(c.id);
+      await loadDetail(selected, true, true);
+      // 左列徽标（可用 / 停用数）同步——复位会改变可用数
+      await load();
+    } catch (e) { notify(String(e)); }
+  };
+
   // ── workbuddy 积分：余额查询结果直接回写 UI，避免写引擎异步落库造成刷新后仍为空 ──
   const loadCredits = useCallback(async (p: ProviderOut, refresh = false) => {
     if (p.api_format !== "workbuddy") return;
@@ -630,12 +676,28 @@ export function ModelsPanel() {
   }, [selectedId, selected?.api_format, detailLoading, loadCredits]);
 
   const handleCheckin = async (p: ProviderOut, credentialId?: number) => {
+    // plan-565-2323 G2：不带 id 的批量签到只能作用于**可用**账号——后端不带 credential_id 时
+    // 会给该供应商的全部凭据（含手动停用的）发签到请求。原实现会替用户去动已停用的账号，
+    // 与「停用」的语义相违。所以这里由前端按可用账号逐个调用；无凭据的旧数据仍走不带 id 的路径
+    // （后端会回落到 provider 级账号，不能因为前端过滤把这个兼容路径弄没）。
+    let targets: number[] | null = null;
+    if (credentialId != null) {
+      targets = [credentialId];
+    } else if (credentials.length > 0) {
+      targets = activeCredentials.map((c) => c.id);
+      if (targets.length === 0) {
+        notify("该供应商的账号全部处于停用状态，请先启用至少一个账号");
+        return;
+      }
+    }
     setBusy(true);
     try {
-      const r = await api.workbuddyCheckin(p.id, credentialId);
-      const okCount = r.results.filter((x) => x.status === "claimed").length;
-      const already = r.results.filter((x) => x.status === "already_claimed").length;
-      const failed = r.results.filter((x) => !["claimed", "already_claimed"].includes(x.status));
+      const batches = targets == null ? [await api.workbuddyCheckin(p.id)]
+        : await Promise.all(targets.map((id) => api.workbuddyCheckin(p.id, id)));
+      const results = batches.flatMap((r) => r.results);
+      const okCount = results.filter((x) => x.status === "claimed").length;
+      const already = results.filter((x) => x.status === "already_claimed").length;
+      const failed = results.filter((x) => !["claimed", "already_claimed"].includes(x.status));
       notify(`签到完成：成功 ${okCount} 个${already ? `，今日已签 ${already} 个` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
       await loadCredits(p, true);
       await loadDetail(p, true);
@@ -994,8 +1056,17 @@ export function ModelsPanel() {
                     <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(null); setShowCredForm(true); }}><IconPlus size={12} /> 添加 Key</button>
                   )}
                 </div>
-                {/* plan-271-1364 M3.2: 取用策略切换（多凭据时才显示） */}
-                <Collapse open={credentials.length > 1}>
+                {/* plan-565-2323 G2：刷新失败常驻提示——有旧数据时也要能看出「这不是最新状态」 */}
+                {credentialsError && credentials.length > 0 && (
+                  <div className="models-inline-row" style={{ marginBottom: 8 }}>
+                    <span className="models-hint" style={{ padding: 0, color: "var(--warning)" }}>账号列表刷新失败，下面是上次的数据</span>
+                    <button className="btn btn-ghost btn-xs" onClick={() => void loadDetail(selected, true, true)}>重试</button>
+                  </div>
+                )}
+                {/* plan-271-1364 M3.2: 取用策略切换（多凭据时才显示）
+                    plan-565-2323 G2：按**可用**账号数判定——列表里已包含停用行，
+                    「有两条但都停用」时显示取用策略毫无意义。 */}
+                <Collapse open={activeCredentials.length > 1}>
                   <div className="models-inline-row" style={{ marginBottom: 8 }}>
                     <span className="models-hint" style={{ padding: 0 }}>取用策略</span>
                     <Segmented
@@ -1031,6 +1102,12 @@ export function ModelsPanel() {
                         </div>
                       </div>
                       <div className="models-cred-actions">
+                        {/* plan-565-2323 G3：暂缓/冷却中的账号可一键复位（清冷却与错误） */}
+                        {(c.demoted || c.status === "cooldown") && c.is_active !== false && (
+                          <Tooltip content="清除冷却与错误，恢复为可用">
+                            <button className="btn btn-ghost btn-xs" onClick={() => void handleResetCredential(c)}>复位</button>
+                          </Tooltip>
+                        )}
                         {selected.api_format === "workbuddy" && (
                           <>
                             <Tooltip content="刷新积分余额">
@@ -1038,10 +1115,23 @@ export function ModelsPanel() {
                                 <IconRefresh size={12} />
                               </button>
                             </Tooltip>
-                            <button className="btn btn-ghost btn-xs" onClick={() => handleCheckin(selected, c.id)} disabled={busy} title="为该账号签到">签到</button>
+                            {/* plan-565-2323 G2：停用账号不参与签到（它不在取用池里，签到只会白耗一次请求） */}
+                            <button
+                              className="btn btn-ghost btn-xs"
+                              onClick={() => handleCheckin(selected, c.id)}
+                              disabled={busy || c.is_active === false}
+                            >签到</button>
                           </>
                         )}
-                        <Sw checked={c.is_active} onChange={async (v) => { try { await api.updateProviderCredential(c.id, { is_active: v }); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); } }} />
+                        <Sw checked={c.is_active} onChange={async (v) => {
+                          // plan-565-2323 G2：停用行照常渲染（后端已返回全部凭据），关掉的账号再点一下即启用；
+                          // 左列徽标的可用/停用数会跟着变，所以启停后补一次供应商列表刷新。
+                          try {
+                            await api.updateProviderCredential(c.id, { is_active: v });
+                            await loadDetail(selected, true, true);
+                            await load();
+                          } catch (e) { notify(String(e)); }
+                        }} />
                         {!OAUTH_FORMATS.has(selected.api_format) && (
                           <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</button>
                         )}
@@ -1064,20 +1154,37 @@ export function ModelsPanel() {
                     </div>
                   ))}
                   {credentials.length === 0 && (
-                    <div className="navpage-empty">
-                      {selected.api_format === "workbuddy"
-                        ? "暂无账号，点上方「登录新账号」添加（支持多账号轮转）"
-                        : "暂无凭据，点击「添加 Key」新增（或使用账号登录）"}
-                    </div>
+                    credentialsError ? (
+                      // plan-565-2323 G2：加载失败不能显示成「暂无账号」——那会把一次请求失败
+                      // 变成「账号没了」的错觉，用户只会去重新登录。此处只给失败与重试。
+                      <div className="navpage-empty">
+                        账号列表加载失败，点击刷新重试
+                        <div style={{ marginTop: 8 }}>
+                          <button className="btn btn-ghost btn-xs" onClick={() => void loadDetail(selected, true, true)}>
+                            <IconRefresh size={12} /> 刷新
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="navpage-empty">
+                        {selected.api_format === "workbuddy"
+                          ? "暂无账号，点上方「登录新账号」添加（支持多账号轮转）"
+                          : "暂无凭据，点击「添加 Key」新增（或使用账号登录）"}
+                      </div>
+                    )
                   )}
                 </div>
                 {selected.api_format === "workbuddy" && (
                   <div className="models-inline-row" style={{ marginTop: 8 }}>
-                    <button className="btn btn-primary btn-xs" disabled={busy} onClick={() => handleCheckin(selected)}>
+                    <button
+                      className="btn btn-primary btn-xs"
+                      disabled={busy || (credentials.length > 0 && activeCredentials.length === 0)}
+                      onClick={() => handleCheckin(selected)}
+                    >
                       {busy ? "签到中…" : "Buddy 加油站 · 签到领取积分"}
                     </button>
-                    {/* 积分余额（多账号合计）+ 实时刷新 */}
-                    <Tooltip content="workbuddy 积分余额（多账号时为合计）">
+                    {/* 积分余额（多账号合计；停用账号不计入）+ 实时刷新 */}
+                    <Tooltip content="workbuddy 积分余额（不含停用账号）">
                       <span className="models-credits-head">
                         积分 {totalCredits != null ? formatCredits(totalCredits) : "--"}
                         <Tooltip content="刷新积分余额">
@@ -1087,7 +1194,11 @@ export function ModelsPanel() {
                         </Tooltip>
                       </span>
                     </Tooltip>
-                    <span className="models-hint" style={{ padding: 0 }}>打开软件后会自动后台签到，此处可手动补签。</span>
+                    <span className="models-hint" style={{ padding: 0 }}>
+                      {credentials.length > 0 && activeCredentials.length === 0
+                        ? "账号全部停用，启用后才会签到与计入积分"
+                        : "打开软件后会自动后台签到，此处可手动补签。"}
+                    </span>
                   </div>
                 )}
               </div>

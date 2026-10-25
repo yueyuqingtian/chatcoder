@@ -29,14 +29,14 @@ import { CodeView } from "./CodeView";
 import { ToolGlyph } from "../iconkit/ToolGlyphs";
 import { ChatCollapse } from "./ChatCollapse";
 import { SubsessionQuestionRow } from "./SubsessionQuestionRow";
-import { SUBSESSION_NOTICE_TOOLS } from "../../utils/subsessionQuestion";
-import { toolVerb, runningVerb, toolDisplayName } from "./toolLabels";
+import { SUBSESSION_NOTICE_TOOLS, SUBAGENT_NOTICE_TOOLS } from "../../utils/subsessionQuestion";
+import { toolLabel } from "./toolLabels";
 import { ClampBlock } from "./ClampBlock";
 import { Tooltip } from "../ui/Tooltip";
 import {
   IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
   IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
-  IconSpinner, IconX, IconImage, IconChevronRight,
+  IconSpinner, IconX, IconImage, IconChevronRight, IconCheck,
   IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist, IconCopy, IconInfo,
 } from "../icons";
 
@@ -130,8 +130,9 @@ function leafSummary(leaf: ToolLeaf): string {
     return `共 ${todos.length} 项清单`;
   }
   if (leaf.tool === "ask_user_question") {
+    // plan-20261025-shell：行内直接给出第一个问题（题数放到行尾计数），比「已询问 N 个问题」更有信息量
     const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
-    return qs.length > 0 ? `已询问 ${qs.length} 个问题` : "向用户发起询问";
+    return qs[0]?.question?.split("\n")[0] || "向用户发起询问";
   }
   if (leaf.tool.startsWith("browser_")) return browserSummary(leaf);
   const cmd = leaf.args?.command ?? leaf.args?.cmd;
@@ -140,6 +141,63 @@ function leafSummary(leaf: ToolLeaf): string {
   if (typeof q === "string" && q) return q;
   return "";
 }
+
+/** plan-20261025-shell（需求 1）：行尾计数 / 状态（清单进度「2/7」、问题数、后台命令结束态），灰色小字。 */
+function leafMeta(leaf: ToolLeaf): string {
+  if (leaf.tool === "todo_write") {
+    const todos = (leaf.args?.todos as Array<{ status?: string }> | undefined) || [];
+    if (todos.length === 0) return "";
+    return `${todos.filter((t) => t.status === "completed").length}/${todos.length}`;
+  }
+  if (leaf.tool === "ask_user_question") {
+    const n = ((leaf.args?.questions as unknown[] | undefined) || []).length;
+    return n > 1 ? `${n} 题` : "";
+  }
+  if (leaf.tool === "bg_command_stopped") return "已停止";
+  if (leaf.tool === "bg_command_done") return leaf.ok === false ? "失败" : "已结束";
+  return "";
+}
+
+/** 读文件 / 搜索类：合并行里全是它们时，动作词为「查阅」 */
+const LOOKUP_TOOLS = new Set([
+  ...SEARCH_TOOLS, "fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "outline",
+  "symbol_search", "feature_lookup", "skill_view", "compaction_index", "compaction_view", "git_diff",
+]);
+
+/** 合并行的动作词：含命令 → 执行；全是网页操作 → 浏览；全是读文件 / 搜索 → 查阅；其余 → 操作 */
+function clusterVerb(leaves: ToolLeaf[]): string {
+  if (leaves.some((l) => RUN_TOOLS.has(l.tool))) return "执行";
+  if (leaves.every((l) => l.tool.startsWith("browser_"))) return "浏览";
+  if (leaves.every((l) => LOOKUP_TOOLS.has(l.tool))) return "查阅";
+  return "操作";
+}
+
+/** 展开卡片顶部的命令头（plan-20261025-shell 需求 1）：提示符 + 完整命令 + 复制。
+ *  复制成功后图标原位换成对勾，按钮宽度不变。 */
+const CommandHead = memo(function CommandHead({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(t);
+  }, [copied]);
+  return (
+    <div className="tc-cmd">
+      <span className="tc-cmd-ps" aria-hidden>$</span>
+      <code className="tc-cmd-text">{text}</code>
+      <Tooltip content={copied ? "已复制" : "复制命令"} side="top">
+        <button
+          type="button"
+          className="ui-icon-btn size-xs tc-cmd-copy"
+          aria-label="复制命令"
+          onClick={(e) => { e.stopPropagation(); void navigator.clipboard?.writeText(text).then(() => setCopied(true)); }}
+        >
+          {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+        </button>
+      </Tooltip>
+    </div>
+  );
+});
 
 /** v19: +N -M 数字滚动动效组件（值变化时旧数字上移出新数字） */
 const ChangeStat = memo(function ChangeStat({ additions, deletions }: { additions: number; deletions: number }) {
@@ -564,6 +622,12 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const expandable = hasOutput || isWrite || leaf.ok === null || isCommand;
   const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];
   const summary = path ? "" : leafSummary(leaf);
+  const label = toolLabel(leaf.tool);
+  // 补充说明：只在没有对象（文件 / 命令 / 查询词）时出现；连接器 / 未知工具的名称本身是信息，始终显示
+  const noun = !path && label.noun && (label.alwaysNoun || !summary) ? label.noun : "";
+  const meta = leafMeta(leaf);
+  /** 命令类工具展开区的命令头：行内只放得下首行，完整命令在展开卡片顶部给出（可复制） */
+  const cmdText = isCommand ? String(leaf.args?.command ?? leaf.args?.cmd ?? "").trim() : "";
   const showsLive = leaf.ok === null && liveOutput != null && liveOutput.length > 0;
   /** 展开区是否有任何实际内容；没有时渲染提示卡（此前只剩 .tc-output 上下边框贴成的一根细线） */
   const hasBody = showsLive || grepHits.length > 0 || leaf.tool.startsWith("db_") || leaf.tool === "ask_user_question"
@@ -607,9 +671,8 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
       <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")}
           data-tool-state={ok === null ? "running" : interruptTag ? "noted" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
-        <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>
-          {ok === null ? runningVerb(leaf.tool) : toolVerb(leaf.tool)}
-        </span>
+        {/* plan-20261025-shell（需求 1）：两字动作词，运行中与完成态同一个词（运行态 = 流光 + 行尾转圈） */}
+        <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>{label.verb}</span>
         {path && (
           <Tooltip content={`${path}（点击查看${isWrite ? "变更" : "文件"}）`}>
             <span className="tc-filelink" onClick={(e) => void openFilePreview(e, path)}>
@@ -619,8 +682,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           </Tooltip>
         )}
         {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
-        {!path && toolDisplayName(leaf.tool) && <span className="tc-tool-name">{toolDisplayName(leaf.tool)}</span>}
+        {noun && <span className="tc-tool-name">{noun}</span>}
         {!path && summary && <Tooltip content={summary}><span className="tc-query">{summary}</span></Tooltip>}
+        {meta && <span className="tc-meta">{meta}</span>}
         {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
             plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
         {(() => {
@@ -658,6 +722,8 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
             />
           ) : (
             <>
+              {/* plan-20261025-shell（需求 1）：命令头——完整命令（多行原样）在卡片顶部，与输出之间一条细分隔 */}
+              {cmdText && <CommandHead text={cmdText} />}
               {/* v7(H): 写操作但无 path（如 change_stat 路径缺失）时显示实时结果概要 */}
               {isWrite && path == null && liveResult?.change_stat && (
                 <pre className="tc-plain tc-live">已变更 +{liveResult.change_stat.additions} -{liveResult.change_stat.deletions}</pre>
@@ -776,25 +842,27 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   // S8c：轮播节拍改用共享秒级 ticker（原为各自 1200ms setInterval）。
   const tick = useRunningTicker(running);
 
+  // plan-20261025-shell（需求 1）：「查阅 · 1 搜索, 2 文件」——两字动作词 + 间隔点 + 分类计数
   const summary = useMemo(() => {
     const search = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;
     const run = leaves.filter((l) => RUN_TOOLS.has(l.tool)).length;
-    const read = leaves.filter((l) => ["fs_read", "fs_list", "view_image", "read_attachment"].includes(l.tool)).length;
+    const read = leaves.filter((l) => ["fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "outline"].includes(l.tool)).length;
     const web = leaves.filter((l) => l.tool.startsWith("browser_")).length;
     const other = leaves.length - search - run - read - web;
     const parts: string[] = [];
-    if (web > 0) parts.push(`${web} 网页操作`);
+    if (web > 0) parts.push(`${web} 网页`);
     if (search > 0) parts.push(`${search} 搜索`);
-    if (read > 0) parts.push(`${read} 读取`);
-    if (run > 0) parts.push(`${run} 运行`);
+    if (read > 0) parts.push(`${read} 文件`);
+    if (run > 0) parts.push(`${run} 命令`);
     if (other > 0) parts.push(`${other} 调用`);
     return parts.join(", ") || `${leaves.length} 次调用`;
   }, [leaves]);
+  const verb = useMemo(() => clusterVerb(leaves), [leaves]);
 
   const rolling = rollingPool[Math.min(tick % Math.max(1, rollingPool.length), rollingPool.length - 1)];
   const rollingPath = rolling ? leafPath(rolling) : null;
   const rollingText = rolling
-    ? `${runningVerb(rolling.tool)} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
+    ? `${toolLabel(rolling.tool).verb} ${rollingPath ? splitFilePath(rollingPath).name : leafSummary(rolling)}`.trim()
     : "";
 
   return (
@@ -804,11 +872,12 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
         <span className="tc-icon"><IconOperationCluster size={16} /></span>
         {running ? (
           <span className="tc-verb-roll" key={tick}>
-            <span className="tc-verb text-shine">{rollingText || "正在执行"}</span>
+            <span className="tc-verb text-shine">{rollingText || verb}</span>
           </span>
         ) : (
           <>
-            <span className="tc-verb">已执行 {leaves.length} 个操作</span>
+            <span className="tc-verb">{verb}</span>
+            <span className="tc-sep" aria-hidden>·</span>
             <span className="tc-explore-summary">{summary}</span>
           </>
         )}
@@ -854,7 +923,8 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
       <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")}
           data-tool-state={running ? "running" : failed ? "fail" : "done"} onClick={() => setExpanded(!expanded)}>
         <span className="tc-icon"><IconFileWrite size={16} /></span>
-        <span className={"tc-verb" + (running ? " text-shine" : "")}>{running ? "正在编辑" : `已编辑 ×${leaves.length}`}</span>
+        {/* plan-20261025-shell（需求 1）：「编辑 文件名 目录 ×3 +N -M」——次数放到对象之后作计数 */}
+        <span className={"tc-verb" + (running ? " text-shine" : "")}>编辑</span>
         {path && (
           <span className="tc-filelink">
             <FileIcon name={path} size={16} />
@@ -862,6 +932,7 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
           </span>
         )}
         {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
+        <span className="tc-meta">×{leaves.length}</span>
         {(add > 0 || del > 0) && <ChangeStat additions={add} deletions={del} />}
         {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
@@ -889,7 +960,8 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
               ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
               // plan-20261021-subq-row：子会话提问是单叶子条目（时间线单独生成，不会并入聚合行）；
               // plan-20261022-release-ci：子会话汇报 / 结论同一行版式
-              : SUBSESSION_NOTICE_TOOLS.has(n.leaf.tool)
+              // plan-549-2281：子代理的提问 / 进度上报也走这一行（它已接替子会话的通知角色）
+              : (SUBSESSION_NOTICE_TOOLS.has(n.leaf.tool) || SUBAGENT_NOTICE_TOOLS.has(n.leaf.tool))
                 ? <SubsessionQuestionRow key={`l${i}`} leaf={n.leaf} />
                 : <LeafRow key={`l${i}`} leaf={n.leaf} />,
       )}

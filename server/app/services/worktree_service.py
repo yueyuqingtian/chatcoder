@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = 30
 
 
+def _purge_tool_outputs_of(session_ids: list[int]) -> None:
+    """清理这些会话的长工具输出落盘目录（plan-560-2311 E1）。
+
+    本模块的级联删除走 `purge_session_children` 而非 `delete_session_permanent`，
+    漏掉了 `uploads/_tool_outputs/{sid}` 的清理，磁盘上按已删会话 id 一直累积。
+    必须在写事务外调用（文件系统操作）；单个会话失败只记日志，不阻断其余会话。
+    """
+    for sid in session_ids:
+        try:
+            session_service.purge_session_tool_outputs(int(sid))
+        except Exception:  # noqa: BLE001
+            logger.debug("[worktree] 清理工具输出目录失败 sid=%s", sid, exc_info=True)
+
+
 async def _git(cwd: str, *args: str) -> tuple[bool, str, str]:
     """在工作目录执行 git，返回 (ok, stdout, stderr)。"""
     try:
@@ -856,6 +870,9 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
 
     deleted_sessions = 0
     if session_ids:
+        # plan-562-2318 H4：删除前清理运行态统一走 session_service.prepare_session_removal
+        # （取消执行 / 工作流、终止后台命令、清失败计数与 fs_read 缓存），本模块不再各写一份。
+        await session_service.prepare_session_removal(session_ids)
         # 逐个走 session_service.delete_session_permanent：它已按外键依赖自底向上清理
         # messages / tool_calls / rollback_writes / turn_snapshots / audit_logs / tasks / agents / turns
         for sid in session_ids:
@@ -888,10 +905,20 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         if row is not None:
             s.delete(row)
         s.commit()
-        return {"dropped_sessions": len(leftover), "purged": counts}
+        # plan-560-2311 E1：把实际删掉的会话 id 交给事务外清理工具输出目录
+        return {"dropped_sessions": len(leftover), "purged": counts, "purged_sessions": leftover}
 
     dropped = await run_write_locked(_drop, label=f"worktree.remove_project.{worktree_project_id}")
     deleted_sessions += int((dropped or {}).get("dropped_sessions", 0))
+    # plan-560-2311 E1：`_drop` 绕开 `delete_session_permanent` 直接调 purge_session_children，
+    # 漏掉了工具输出落盘目录（uploads/_tool_outputs/{sid}）清理。写事务内不做磁盘 IO，
+    # 因此放到提交之后，逐会话走 session_service 的公开入口。
+    leftover_sessions = [int(x) for x in (dropped or {}).get("purged_sessions") or []]
+    if leftover_sessions:
+        # plan-562-2318 H4：兜底分支同样要清运行态——漏掉的话后台命令仍占端口、
+        # 工作流运行时仍挂着已删的行，read_cache 也按已删 id 残留。
+        await session_service.prepare_session_removal(leftover_sessions)
+    _purge_tool_outputs_of(leftover_sessions)
 
     logger.info("工作树已删除: id=%s path=%s branch=%s(删除=%s) 级联会话=%d",
                 worktree_project_id, wt.path, branch, branch_deleted, deleted_sessions)
@@ -960,6 +987,22 @@ async def cleanup_stale_worktrees(db: AsyncSession) -> dict:
 
     ids = [w[0] for w in stale]
 
+    # plan-562-2318 H4：删除前清理运行态统一走 session_service.prepare_session_removal。
+    # 必须在写事务之前做（取消执行 / 终止后台命令都是异步操作，写事务闭包是同步函数）；
+    # 事务内会重新查询一次会话 id，新出现的差集在事务外再补一次清理。
+    prepared: set[int] = set()
+    try:
+        prepared = {
+            int(x)
+            for x in (
+                await db.execute(_select(_S.id).where(_S.project_id.in_(ids)))
+            ).scalars().all()
+        }
+    except Exception:  # noqa: BLE001 — 查不到就当没有会话，下面的写事务会再查一次
+        logger.warning("[worktree] 查询自愈会话失败(继续清理)", exc_info=True)
+    if prepared:
+        await session_service.prepare_session_removal(sorted(prepared))
+
     def _purge(s):
         # 会话及其全部子表（含 artifacts→tasks）走公共清理，避免再次踩外键坑
         sids = [int(x) for x in s.execute(
@@ -976,9 +1019,17 @@ async def cleanup_stale_worktrees(db: AsyncSession) -> dict:
             if row is not None:
                 s.delete(row)
         s.commit()
-        return {"sessions": len(sids), "purged": counts}
+        return {"sessions": len(sids), "purged": counts, "purged_sessions": sids}
 
     res = await run_write_locked(_purge, label="worktree.cleanup_stale")
+    purged_sessions = [int(x) for x in (res or {}).get("purged_sessions") or []]
+    late = [sid for sid in purged_sessions if sid not in prepared]
+    if late:
+        # 事务里才发现的会话（执行期间新建）也补一次运行态清理
+        await session_service.prepare_session_removal(late)
+    # plan-560-2311 E1：同上，写事务外清工具输出目录
+    _purge_tool_outputs_of(purged_sessions)
+
     logger.info("[worktree] 已自愈失效工作树 %d 个: %s", len(stale),
                 [(w[1], w[2]) for w in stale])
     return {"ok": True, "cleaned": len(stale),

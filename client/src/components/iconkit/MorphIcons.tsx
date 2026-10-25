@@ -31,9 +31,9 @@ export function IconPlusX({ open, size = 16, strokeWidth = 1.9, className }: Mor
 }
 
 /** 发送 ↔ 停止 ↔ 排队：
- *  send  —— 粗短上箭头（箭身短、箭翼开阔，32px 圆按钮里重心居中）；
- *  stop  —— 圆角实心方块（约占 32px 圆的三成，太小会显得空）；
- *  queue —— 同 send 图形（排队语义由按钮的浅灰底色与提示文案表达，不另画图形）。 */
+ *  send  —— 粗短上箭头（箭身短、箭翼开阔，32px 按钮里重心居中）；
+ *  stop  —— 圆角实心方块（约占 32px 按钮的三成，太小会显得空）；
+ *  queue —— 同 send 图形、同底色（排队语义只由提示文案表达：灰底会被读作「不能发送」）。 */
 export function IconSendStop({ mode, size = 16, className }: MorphBase & { mode: "send" | "stop" | "queue" }) {
   return (
     <span className={"ic-morph ic-sendstop" + (className ? ` ${className}` : "")} data-mode={mode} style={{ width: size, height: size }} aria-hidden>

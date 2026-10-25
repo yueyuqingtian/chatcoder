@@ -90,17 +90,6 @@ class SessionUpdate(BaseModel):
     approval_mode: str | None = None  # plan-75-332: 权限模式 ask / auto / full
 
 
-class SubsessionCreate(BaseModel):
-    """创建执行子会话（plan-156-619 S5）：创建即下发首条任务。"""
-
-    title: str
-    task: str
-    # 背景上下文：已完成什么、不要做什么。子会话看不到主会话对话，必须自包含
-    context: str | None = None
-    # 执行模式由调用方（主代理 / 用户）指定；空 = agent
-    mode: str | None = None
-
-
 class SessionOut(BaseModel):
     id: int
     project_id: int | None = None
@@ -353,7 +342,6 @@ class HookConfigCreate(BaseModel):
     matcher: str | None = None
     hook_type: str = "command"
     prompt: str | None = None
-    enabled: bool = True
     enabled: bool = True
 
 

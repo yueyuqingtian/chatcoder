@@ -7,10 +7,17 @@ fs_read(offset, limit) 精读，无需大范围扫描。
 实现：symbol_index_service 的 SQLite 符号索引（Python ast + 多语言正则提取），
 首次调用自动建索引，之后增量更新（仅重解析变化文件）。
 low risk 免审批，四种权限模式全部可用。
+
+plan-548-2276（阶段 4.3）：索引开关默认关闭是产品决定（用户能关的能力不能被悄悄打开），
+但此前未开启时只能让模型转告用户「请到设置页开启」——模型自己没法继续，只能中断任务。
+本模块新增 `symbol_index_enable`（low risk）作为可执行出口：模型可直接开启并触发后台建索引。
 """
+import logging
 from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
+
+logger = logging.getLogger(__name__)
 
 _KIND_LABEL = {
     "function": "函数", "method": "方法", "class": "类",
@@ -69,14 +76,14 @@ class SymbolSearchTool(Tool):
         # plan-248-1258 M3.3: 尊重「每工作区索引开关」——
         # 已启用：增量维护后检索；未启用：不自动建库（避免"默认关闭"失效），
         # 返回可执行的开启指引，让 AI 在会话中告知用户（需求：开启后 AI 能自动识别并使用）。
-        from app.services import symbol_index_manager as sim
-
         state = await self._state_async(workspace)
         if not state.get("enabled"):
             return ToolResult(
                 ok=False, output="",
                 error=(
-                    "该项目尚未开启代码符号索引。请在「设置 → 索引库」中为该工作目录开启索引，"
+                    "该项目尚未开启代码符号索引。"
+                    "现在可以直接调用 symbol_index_enable 为当前工作区开启"
+                    "（会在后台建立索引，无需让用户去设置页手动开）；"
                     "开启后即可用 symbol_search/outline 快速定位函数与文件结构。"
                 ),
                 data={"index_enabled": False, "workspace": workspace},
@@ -110,12 +117,6 @@ class SymbolSearchTool(Tool):
         return ToolResult(ok=True, output="\n".join(lines), data={"query": query, "count": len(hits)})
 
     # sqlite 为同步 IO：放线程池执行，避免阻塞事件循环
-    async def _index_async(self, workspace: str) -> dict:
-        import asyncio
-
-        from app.services import symbol_index_service as sis
-        return await asyncio.to_thread(sis.index_workspace, workspace)
-
     async def _state_async(self, workspace: str) -> dict:
         import asyncio
 
@@ -127,6 +128,61 @@ class SymbolSearchTool(Tool):
 
         from app.services import symbol_index_service as sis
         return await asyncio.to_thread(sis.search_symbols, workspace, query, **kw)
+
+
+class SymbolIndexEnableTool(Tool):
+    """为当前工作区开启符号索引并触发后台建立（plan-548-2276 阶段 4.3）。
+
+    只开启当前工作区，不改变全局默认；重复调用幂等（symbol_index_manager.enable 本身幂等）。
+    """
+
+    name = "symbol_index_enable"
+    risk_level = "low"
+    # 会写索引开关状态并派发后台 worker，不是只读操作 → 不参与并发
+    concurrency_safe = False
+    description = (
+        "为当前工作区开启代码符号索引并触发后台建立；"
+        "开启后可用 symbol_search / outline 快速定位。"
+    )
+
+    def function_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        workspace = str(ctx.workspace_root or "")
+        if not workspace:
+            return ToolResult(ok=False, output="", error="无工作区上下文", error_code="ARG_INVALID")
+
+        from app.services import symbol_index_manager as sim
+
+        try:
+            # enable 是 async 且内部已负责建库/派发 worker，这里直接 await；
+            # 不阻塞等待索引完成——大仓库全量解析可能几分钟，同步等等于卡死会话。
+            state = await sim.enable(workspace)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[symbol_index_enable] 开启失败 ws=%s", workspace, exc_info=True)
+            return ToolResult(
+                ok=False, output="",
+                error=f"开启代码符号索引失败：{e}", error_code="EXEC_FAILED",
+            )
+
+        status = str(state.get("status") or "")
+        if status == "ready":
+            output = "该项目已开启代码符号索引且索引已就绪，可直接使用 symbol_search / outline。"
+        else:
+            output = (
+                "已为当前工作区开启代码符号索引，后台正在建立"
+                f"（状态：{status or 'indexing'}）。可稍后重试 symbol_search；"
+                "首次索引大仓库需要数秒到数分钟，期间可继续用 fs_grep / codebase_search。"
+            )
+        return ToolResult(ok=True, output=output, data={"index_enabled": True, **state})
 
 
 class OutlineTool(Tool):
@@ -175,7 +231,11 @@ class OutlineTool(Tool):
         if not state.get("enabled"):
             return ToolResult(
                 ok=False, output="",
-                error=("该项目尚未开启代码符号索引。请在「设置 → 索引库」中开启后使用 outline 查看文件结构。"),
+                error=(
+                    "该项目尚未开启代码符号索引。"
+                    "可直接调用 symbol_index_enable 为当前工作区开启后，"
+                    "再用 outline 查看文件结构（无需让用户去设置页）。"
+                ),
                 data={"index_enabled": False},
             )
 

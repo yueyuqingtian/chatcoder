@@ -564,6 +564,10 @@ class ModelRegistry:
                     if chosen is None:
                         # 凭据全部停用/冷却中：明确失败，绝不回落到模型行旧 key 或 auth 兜底，
                         # 否则「停用某个 key/账号后仍被调用」（用户反馈现象）。
+                        # plan-565-2323 G4：区分「全部被手动停用」与「取不到 token」——前者
+                        # 用户只需回设置页打开开关，笼统报不可用会让人以为是凭据坏了
+                        if not any(getattr(c, "is_active", True) for c in creds):
+                            return None, "provider_credentials_all_disabled"
                         return None, "provider_credential_unavailable"
                     if api_format in ("workbuddy", "trae", "kiro"):
                         if api_format == "workbuddy":

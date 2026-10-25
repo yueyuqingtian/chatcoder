@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -24,6 +25,93 @@ from app.orchestration.tools.registry import tool_registry
 from app.persistence.database import async_session_factory, commit_with_retry, run_write_locked
 
 logger = logging.getLogger(__name__)
+
+# plan-565-2323 G6：瞬时故障保活的上限之一——连续保活轮次上限。
+# 没有上限时「瞬时故障 → 继续重试 → 把任务重写回 in_progress」会无限空转，
+# 上游凭据错误也永不判死（事故：重试三次后仍在跑，面板与消息流一直显示执行中）。
+# 另一个上限是累计保活时长，复用 settings.subagent_wait_timeout_s（同口径，不另造配置）。
+_KEEPALIVE_MAX_ROUNDS = 10
+# plan-565-2323 G10：停滞阈值兜底值——与工作流节点子代理同源
+# （workflow/executor_subagent.STALL_TIMEOUT_SEC = 600）。
+_STALL_TIMEOUT_FALLBACK_SEC = 600.0
+# plan-565-2323 G10：停滞终态的固定文案（前端卡片、任务备注与主代理通知都直接展示）
+_STALL_ERROR = "子代理长时间无活动，已停止"
+
+
+def _keepalive_total_timeout() -> float:
+    """plan-565-2323 G6：累计保活时长上限（秒），0 = 不限制。
+
+    口径与「主代理等待后台子代理收工」同源：两者都在容忍“子代理多久不产出”，
+    各造一个配置只会让两处口径漂移，所以直接复用 subagent_wait_timeout_s。
+    """
+    try:
+        from app.core.config import settings
+
+        return max(0.0, float(getattr(settings, "subagent_wait_timeout_s", 0.0) or 0.0))
+    except Exception:  # noqa: BLE001 — 配置读取失败不能影响子代理运行
+        return 0.0
+
+
+def _stall_timeout() -> float:
+    """plan-565-2323 G10：停滞看门狗阈值（秒）——与工作流节点子代理同口径（默认 600）。"""
+    try:
+        from app.core.config import settings
+
+        val = float(getattr(settings, "subagent_stall_timeout_s", 0.0) or 0.0)
+    except Exception:  # noqa: BLE001 — 配置读取失败回落到固定兜底值
+        return _STALL_TIMEOUT_FALLBACK_SEC
+    return val if val > 0 else _STALL_TIMEOUT_FALLBACK_SEC
+
+
+def _touch_activity(handle: "SubagentHandle") -> None:
+    """plan-565-2323 G10：刷新子代理最后一次活动时间（步骤回调 / 每次模型调用前）。"""
+    handle.last_activity_at = time.monotonic()
+
+
+def _stall_verdict(handle: "SubagentHandle", timeout: float) -> str:
+    """plan-565-2323 G16：停滞看门狗的**单次判定**——抽成纯函数便于回归测试。
+
+    返回 `"waiting"` / `"idle"` / `"stall"`：
+      · `"waiting"`：句柄处于正常等待（瞬时故障保活恢复，或提问后等主代理/用户答复）。
+        此时**无论 idle 多久都不判停滞**——等答复按用户口径没有时间上限，主代理可能正在
+        问用户。旧实现只豁免这一条通道却仍被 `wait_reply` 的 600s 超时卡住，两者阈值相同，
+        看门狗必然先杀掉子代理，这是本缺陷的直接成因。终止不靠时间，靠取消信号。
+      · `"idle"`：仍在阈值内，继续观察。
+      · `"stall"`：确实停滞，由调用方 cancel 驱动任务并按失败终态收尾。
+    """
+    if handle.waiting:
+        return "waiting"
+    idle = time.monotonic() - (handle.last_activity_at or time.monotonic())
+    return "stall" if idle >= timeout else "idle"
+
+
+async def _turn_alive(turn_id: int | None, *, allow_missing: bool = False) -> bool:
+    """plan-565-2323 G6：只读确认所属 turn 仍存活（turn 行存在且状态仍为 running）。
+
+    allow_missing：首轮允许“查不到”。spawn 与 turn 落库并发时该行可能尚不可见，
+    此时不能把子代理误判为失活。查询本身失败一律按存活处理——读不到状态
+    不能成为误杀子代理的理由。
+    """
+    if turn_id is None:
+        return True
+    from sqlalchemy import select
+
+    from app.persistence.models.turn import Turn as _TurnRow
+
+    try:
+        async with async_session_factory() as s:
+            status = (await s.execute(
+                select(_TurnRow.status).where(_TurnRow.id == turn_id)
+            )).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 — 读失败不影响子代理继续执行
+        logger.debug("[subagent] turn 存活检查失败 turn=%s", turn_id, exc_info=True)
+        return True
+    if status is None:
+        if allow_missing:
+            logger.debug("[subagent] turn %s 暂未查到，首轮不判定失活", turn_id)
+            return True
+        return False
+    return str(status) == "running"
 
 
 @dataclass
@@ -71,6 +159,12 @@ class SubagentHandle:
     resumable: bool = False
     # waiting：瞬时故障后保活等待恢复中
     waiting: bool = False
+    # plan-565-2323 G10：最后一次活动时间（单调时钟）。普通子代理此前没有心跳，
+    # 上游卡住时无从判定“停滞”；由 _on_step 与每次模型调用前刷新。
+    last_activity_at: float | None = None
+    # plan-565-2323 G10：停滞看门狗是否已判定停滞——驱动循环据此落 failed 终态
+    # （而不是“可续跑的 paused”，停滞是异常终止）
+    stall_detected: bool = False
     # cancel_requested：用户显式取消（cancel_subagent）→ 终态取消；否则中断一律视为暂停
     cancel_requested: bool = False
     # pause_reason：暂停原因文案（主代理中断 / 主代理已结束），写入检查点与卡片备注
@@ -99,9 +193,9 @@ class SubagentManager:
         self._completion_queue: list[dict] = []
         self._notified: set[int] = set()
         # plan-330-1648 M4: 双向通信——主代理 → 子代理的待注入指令 inbox
-        # （agent_id → 待投递指令列表）与“提问等待答复”事件（wait=true 的子代理挂起）。
+        # （agent_id → 待投递指令列表）。提问的「等待答复」由 subagent_comm 承担
+        # （plan-549-2281：旧 _reply_waiters 机制已随 wait_for_reply 一并删除）。
         self._inboxes: dict[int, list[str]] = {}
-        self._reply_waiters: dict[int, asyncio.Event] = {}
         # 子代理 → 主代理的上报回调（engine 启动 turn 时注册：写入主代理注入队列）
         self._leader_notify = None
         # 后台子代理终态回调（engine 启动 turn 时注册：turn 已结束时据此自动唤醒主代理）
@@ -129,6 +223,8 @@ class SubagentManager:
             handoff_summary=handoff_summary,
             context_snapshot=context_snapshot or {},
             started_at=time.monotonic(),
+            # plan-565-2323 G10：心跳起点与派发时刻一致（首轮判定不会立刻超时）
+            last_activity_at=time.monotonic(),
             # plan-330-1648 M2: 记录生效的模型/深度（设置覆盖 → 会话 → 主代理已在上游解析完）
             model_id=getattr(agent, "model_id", None),
             reasoning_effort=reasoning_effort,
@@ -159,17 +255,47 @@ class SubagentManager:
 
         - 成功：status=done，清空检查点；
         - 瞬时故障（网关/超时/空响应/流丢帧）且设置中的重试次数>0：按最后一个重试间隔等待，
-          从检查点原地续跑（已完成步骤不重做），直到恢复或主代理中断；
+          从检查点原地续跑（已完成步骤不重做），直到恢复 / 达到保活上限 / 主代理中断；
         - 主代理中断（取消信号 / CancelledError）：status=paused，保存检查点（可续跑）；
         - 用户显式取消（cancel_subagent）：status=cancelled，清空检查点；
+        - 长时间无活动（停滞看门狗）：status=failed，文案「子代理长时间无活动，已停止」；
         - 其余失败：status=failed，保留检查点（可由“重试”或 resume_subagent 续跑）。
+
+        plan-565-2323 G6/G7/G10：出口收紧——保活有上限、turn 失活即收尾、
+        任何出口（正常/异常/取消）都必定落一个终态并写库，绝不把 handle 留在 running。
         """
         sid = self.session_id
         spec = dict(handle.run_spec or {})
         handle.live_messages = messages
         attempt_messages = messages
+        # plan-565-2323 G6：保活计数——连续轮次 + 累计时长（时长复用 subagent_wait_timeout_s）
+        keepalive_rounds = 0
+        keepalive_since = time.monotonic()
+        round_index = 0
+        _touch_activity(handle)
+
+        # plan-565-2323 G10：停滞看门狗。run_agent_loop 单次调用内部可能长时间不返回，
+        # 只在循环入口检查发现不了“卡住”，因此另起一个轮询任务，随本驱动一起结束。
+        watchdog = asyncio.create_task(self._stall_watchdog(handle))
+
+        def _injected_inputs(_aid: int = agent_id) -> list[dict]:
+            # plan-565-2323 G10：run_agent_loop 每次模型调用前都会取注入指令，顺带刷新心跳
+            _touch_activity(handle)
+            return self.drain_agent_inputs(_aid)
+
         try:
             while True:
+                # plan-565-2323 G6：每轮先确认所属 turn 仍存活。owner_active 只是进程内标志，
+                # turn 收尾异常或进程重启后它仍可能为 True，只看它会让保活循环无人看管地空转。
+                # 工作流节点子代理的生命周期由工作流运行时掌控（可跨 turn 继续），跳过该判定。
+                if not handle.internal and not await _turn_alive(
+                    turn_id, allow_missing=round_index == 0
+                ):
+                    # 所属轮次已结束：与主代理收尾同语义——暂停可续跑，不把子代理单独留在运行中
+                    handle.pause_reason = "所属轮次已结束"
+                    await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
+                    return
+                round_index += 1
                 if task_id is not None:
                     await _sync_task(sid, task_id, "in_progress", None)
                 try:
@@ -184,10 +310,15 @@ class SubagentManager:
                             task_id=task_id, model_id=spec.get("model_id"),
                             reasoning_effort=spec.get("reasoning_effort"),
                             subagent_mode=spec.get("subagent_mode"),
-                            injected_inputs_provider=(lambda _aid=agent_id: self.drain_agent_inputs(_aid)),
+                            injected_inputs_provider=_injected_inputs,
                             # plan-541-2264：不再携带 sync 标记——所有子代理都是后台执行，
                             # report_to_leader(wait=true) 对所有子代理都合法，无需死锁防护。
-                            subagent_comm={"manager": self, "agent_id": agent_id},
+                            subagent_comm={
+                                "manager": self, "agent_id": agent_id,
+                                # plan-549-2281：提问正文带上任务标题——主代理据此判断上下文，
+                                # 答复方也不用再反查 handle。
+                                "task_title": str(spec.get("task_title") or ""),
+                            },
                             reply_language=spec.get("reply_language", "auto"),
                             reply_language_source=spec.get("reply_language_source", "user"),
                             checkpoint_sink=lambda msgs, _h=handle: _on_step(_h, msgs),
@@ -212,55 +343,162 @@ class SubagentManager:
                     handle.waiting = False
                     # plan-workflow-collab：工作流节点子代理完成后仍保留上下文——返工 / 复审要在同一子代理里
                     # 继续（进程重启后从这里还原），普通子代理完成即清空
-                    await _persist_agent_state(
-                        agent_id, "done",
-                        _checkpoint_payload(handle, spec, "done") if handle.internal else None,
-                    )
-                    await _sync_task(sid, task_id, "done", (out.text or "")[:300] or None,
-                                     agent_id=agent_id, token_usage=getattr(out, "tokens", 0) or 0)
-                    await self._after_terminal(handle, notify=True)
+                    await asyncio.shield(self._finish_done(handle, agent_id=agent_id, task_id=task_id,
+                                                           spec=spec, out=out))
                     logger.info("[subagent] %s 完成 status=done", agent_id)
                     return
 
                 if handle.cancel_requested:
-                    await self._finish_cancelled(handle, agent_id=agent_id, task_id=task_id)
+                    await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
                     return
                 interrupted = out.kind == "cancelled" or bool(cancel_event and cancel_event.is_set())
                 if interrupted:
-                    await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
-                                              reason=handle.pause_reason or "主代理已中断")
+                    handle.pause_reason = handle.pause_reason or "主代理已中断"
+                    await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
                     return
                 if out.transient:
                     waits = _retry_plan()
                     if waits and self.owner_active:
-                        # 保活：重试耗尽仍是瞬时故障——不判死，按最后一个间隔继续尝试恢复
+                        # plan-565-2323 G6：保活必须有上限。旧实现「瞬时故障 → 无限 continue」，
+                        # 且每轮把任务重写回 in_progress，上游凭据错误时永不判死。
+                        keepalive_rounds += 1
+                        alive_s = time.monotonic() - keepalive_since
+                        limit_s = _keepalive_total_timeout()
+                        hit_rounds = keepalive_rounds >= _KEEPALIVE_MAX_ROUNDS
+                        hit_time = limit_s > 0 and alive_s >= limit_s
+                        if hit_rounds or hit_time:
+                            if hit_rounds:
+                                reason = (f"连续 {keepalive_rounds} 次因同一错误失败，已停止"
+                                          f"（最近错误：{(out.error or '瞬时故障')[:200]}）")
+                            else:
+                                reason = (f"连续保活 {int(alive_s)} 秒仍未恢复，已停止"
+                                          f"（共失败 {keepalive_rounds} 次，最近错误："
+                                          f"{(out.error or '瞬时故障')[:200]}）")
+                            await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id,
+                                                            spec=spec, error=reason)
+                            return
+                        # 保活：重试耗尽仍是瞬时故障——在上限内按最后一个间隔继续尝试恢复
                         handle.waiting = True
+                        # 保活等待属正常等待，不计停滞（与工作流节点子代理同口径）
+                        _touch_activity(handle)
                         await _sync_task(sid, task_id, "in_progress",
                                          "网络或网关异常，等待恢复后自动续跑（进度已保留）")
-                        logger.warning("[subagent] %s 瞬时故障保活等待恢复: %s", agent_id, (out.error or "")[:200])
+                        logger.warning("[subagent] %s 瞬时故障保活等待恢复(第 %d 轮/已 %.0fs): %s",
+                                       agent_id, keepalive_rounds, alive_s, (out.error or "")[:200])
                         alive = await _wait_retry_interval(cancel_event, _retry_wait_seconds(len(waits)))
                         handle.waiting = False
                         if not alive:
-                            await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
-                                                      reason=handle.pause_reason or "主代理已中断")
+                            handle.pause_reason = handle.pause_reason or "主代理已中断"
+                            await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id,
+                                                            spec=spec)
                             return
+                        _touch_activity(handle)
                         attempt_messages = _sanitize_messages(list(handle.live_messages or attempt_messages))
                         continue
                     # 未配置重试：瞬时故障也不判死，保存检查点等待主代理/用户续跑
-                    await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
-                                              reason=out.error or "网络或网关故障")
+                    handle.pause_reason = handle.pause_reason or (out.error or "网络或网关故障")
+                    await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
                     return
-                await self._finish_failed(handle, agent_id=agent_id, task_id=task_id, spec=spec,
-                                          error=out.error or "未知原因")
+                await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                                error=out.error or "未知原因")
                 return
         except asyncio.CancelledError:
-            # 任务被取消：主代理中断/结束（暂停）或用户显式取消（终态）。收尾后正常结束任务。
+            # 任务被取消：停滞看门狗（failed）/ 用户显式取消（cancelled）/ 主代理中断或结束（暂停）
             handle.waiting = False
-            if handle.cancel_requested:
-                await self._finish_cancelled(handle, agent_id=agent_id, task_id=task_id)
+            if handle.stall_detected and not handle.cancel_requested:
+                # plan-565-2323 G10：停滞不是「可续跑的暂停」——清掉残留暂停原因，走 failed 终态
+                handle.pause_reason = ""
+                await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id,
+                                                spec=spec, error=_STALL_ERROR)
             else:
-                await self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
-                                          reason=handle.pause_reason or "主代理已中断")
+                if not handle.cancel_requested:
+                    handle.pause_reason = handle.pause_reason or "主代理已中断"
+                await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
+        finally:
+            # plan-565-2323 G10：看门狗随驱动结束一起收掉（它只在 running 期间有意义）
+            watchdog.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await watchdog
+            # plan-565-2323 G7：兜底——正常 return / 未预期异常 / 取消这三种出口都不能把 handle
+            # 留在 running，否则内存与库里会永远显示“运行中”（面板没有终止入口、重启后依旧在跑）。
+            # 终态判据顺序由 _finalize_unfinished 固定：显式取消 → 暂停 → 失败。
+            await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                            error=handle.error or "子代理驱动意外结束，已停止")
+
+    async def _stall_watchdog(self, handle: "SubagentHandle") -> None:
+        """plan-565-2323 G10：停滞看门狗——超过阈值无任何活动即停掉驱动任务（终态落 failed）。
+
+        阈值与工作流节点子代理（workflow/executor_subagent.STALL_TIMEOUT_SEC）同源同口径；
+        保活等待（handle.waiting）属正常等待，不计停滞，同样与工作流节点保持一致。
+
+        plan-565-2323 G16：`waiting` 现在覆盖**两种**正常等待——瞬时故障保活恢复，以及
+        「子代理提问后等主代理/用户答复」（`agent_loop._run_report_to_leader` 在等答复前置真）。
+        后者按用户口径**不设时间上限**：主代理可能正在问用户，用户可能很久才回。等答复期间
+        看门狗只续命、不判死，终止靠取消信号（用户「终止」/ turn 收尾 / 管理器销毁）。
+        只负责“停任务”，终态由驱动循环的取消分支落库（看门狗自己写库会与收尾路径抢状态）。
+        """
+        timeout = _stall_timeout()
+        interval = max(5.0, min(30.0, timeout / 4))
+        while True:
+            await asyncio.sleep(interval)
+            if handle.status != "running":
+                return
+            # plan-565-2323 G16：判定抽到 `_stall_verdict`（纯函数、可单测），这里只做动作。
+            verdict = _stall_verdict(handle, timeout)
+            if verdict == "waiting":
+                _touch_activity(handle)
+                continue
+            if verdict == "idle":
+                continue
+            idle = time.monotonic() - (handle.last_activity_at or time.monotonic())
+            logger.warning("[subagent] %s 停滞 %.0f 秒无活动，停止子代理并按失败终态收尾",
+                           handle.agent_id, idle)
+            handle.stall_detected = True
+            task = handle.task
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+            return
+
+    async def _finalize_unfinished(self, handle: "SubagentHandle", *, agent_id: int,
+                                   task_id: int | None, spec: dict, error: str = "") -> None:
+        """plan-565-2323 G7：给仍处于 running 的句柄补一个终态并落库（幂等）。
+
+        判据顺序固定，不可颠倒：显式取消 → cancelled；暂停原因 → paused；其余 → failed。
+        先看 pause_reason 会把用户显式取消记成「暂停可续跑」，界面与模型都会以为还能恢复
+        ——事故里的残留状态正是这种「看起来还在跑」。
+        终态写库用 asyncio.shield 包裹：stop 连点、turn 收尾与 stop 并发时的二次取消
+        不能打断写库（旧实现被打断后库里仍是 running，重启后依旧显示运行中）。
+        """
+        if handle.status != "running":
+            return
+        if handle.cancel_requested:
+            coro = self._finish_cancelled(handle, agent_id=agent_id, task_id=task_id)
+        elif handle.pause_reason:
+            coro = self._finish_paused(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                       reason=handle.pause_reason)
+        else:
+            coro = self._finish_failed(handle, agent_id=agent_id, task_id=task_id, spec=spec,
+                                       error=error or handle.error or "子代理驱动意外结束，已停止")
+        try:
+            await asyncio.shield(coro)
+        except asyncio.CancelledError:
+            # 二次取消：shield 内的收尾任务仍在后台继续写库，这里不再向上抛
+            logger.warning("[subagent] %s 终态收尾被再次取消，写库已由 shield 保护", agent_id)
+
+    async def _finish_done(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
+                           spec: dict, out) -> None:
+        """plan-565-2323 G7：成功终态的落库与收尾（状态 / 任务 / 通知三件事一并完成）。
+
+        单独抽成协程是为了能被 asyncio.shield 整体包住：stop 恰好落在成功收尾期间时，
+        二次取消不会把“已完成但没写库”的子代理留在 running。正常无取消时行为与改前一致。
+        """
+        await _persist_agent_state(
+            agent_id, "done",
+            _checkpoint_payload(handle, spec, "done") if handle.internal else None,
+        )
+        await _sync_task(self.session_id, task_id, "done", (out.text or "")[:300] or None,
+                         agent_id=agent_id, token_usage=getattr(out, "tokens", 0) or 0)
+        await self._after_terminal(handle, notify=True)
 
     async def _finish_paused(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
                              spec: dict, reason: str) -> None:
@@ -307,6 +545,15 @@ class SubagentManager:
             await write_behind.get(self.session_id, handle.turn_id).flush()
         except Exception:
             logger.debug("[subagent] flush turn buffer failed agent=%s", handle.agent_id, exc_info=True)
+        # plan-560-2311 B4：终态即清掉该子代理的待答复提问。四个终态（done/paused/failed/
+        # cancelled）都走本函数。不清的话主代理还会在 send_to_subagent 里 resolve_question
+        # 成功并得到「it resumes immediately」——实际已无等待方，指令静默丢失。
+        try:
+            from app.orchestration import subagent_comm
+
+            subagent_comm.clear_agent(self.session_id, handle.agent_id)
+        except Exception:  # noqa: BLE001 — 清理失败不能阻断收尾
+            logger.debug("[subagent] 提问登记清理失败 agent=%s", handle.agent_id, exc_info=True)
         if notify and not handle.internal:
             self._enqueue_completion(handle)
             self.notify_finished(handle)
@@ -338,15 +585,13 @@ class SubagentManager:
         """主代理向运行中的子代理追加指令（send_to_subagent）。
 
         返回 False 表示子代理不存在或已结束——指令无法投递（调用方转述给模型）。
+        plan-549-2281：提问的答复由 subagent_comm.resolve_question 精确唤醒等待方，
+        这里只承担「普通指令」的注入（旧 wait_for_reply/_reply_waiters 机制已删除）。
         """
         h = self._handles.get(agent_id)
         if h is None or h.status != "running" or h.task is None or h.task.done():
             return False
         self._inboxes.setdefault(agent_id, []).append(message)
-        # 若该子代理正挂着等答复（report_to_leader wait=true），唤醒它
-        ev = self._reply_waiters.get(agent_id)
-        if ev is not None:
-            ev.set()
         return True
 
     def drain_agent_inputs(self, agent_id: int) -> list[dict]:
@@ -386,25 +631,6 @@ class SubagentManager:
             cb(agent_id, message, kind)
         except Exception:
             logger.debug("[subagent] 上报主代理失败 agent=%s", agent_id, exc_info=True)
-
-    async def wait_for_reply(self, agent_id: int, timeout_s: float = 300.0) -> str | None:
-        """子代理提问后等待主代理答复（report_to_leader wait=true）。
-
-        返回答复文本；超时返回 None（调用方提示“按最佳判断继续”）。
-        注意：只有后台子代理可等待——同步（主代理阻塞等待）场景会死锁，工具层已拒绝。
-        """
-        ev = self._reply_waiters.get(agent_id)
-        if ev is None:
-            ev = asyncio.Event()
-            self._reply_waiters[agent_id] = ev
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=max(1.0, float(timeout_s)))
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            self._reply_waiters.pop(agent_id, None)
-        items = self._inboxes.pop(agent_id, [])
-        return "\n".join(items) if items else "(main agent replied without content)"
 
     def get(self, agent_id: int) -> SubagentHandle | None:
         return self._handles.get(agent_id)
@@ -447,11 +673,6 @@ class SubagentManager:
             return 0
         return sum(1 for h in self._handles.values() if h.turn_id == turn_id and not h.internal)
 
-    def queue_leader_note(self, text: str) -> None:
-        """plan-330-1648 M4: turn 已结束（后台子代理续跑）时，把子代理上报/提问挂到
-        完成通知队列，随下一轮 turn 启动的 drain_completions() 一并送达主代理。"""
-        self._completion_queue.append({"agent_id": 0, "text": text})
-
     def _enqueue_completion(self, handle: SubagentHandle) -> None:
         """子代理进入终态时入队一条完成通知（v36 plan-321-1600 M3）。"""
         if handle.agent_id in self._notified:
@@ -476,10 +697,7 @@ class SubagentManager:
             return []
         notes = [str(n["text"]) for n in self._completion_queue]
         for n in self._completion_queue:
-            # plan-330-1648 M4: agent_id=0 是“非归属某子代理”的上报转发（见 queue_leader_note）
-            _aid = int(n.get("agent_id") or 0)
-            if _aid:
-                self._notified.add(_aid)
+            self._notified.add(int(n.get("agent_id") or 0))
         self._completion_queue = []
         return notes
 
@@ -569,6 +787,25 @@ class SubagentManager:
     def agent_ids(self) -> list[int]:
         return list(self._handles.keys())
 
+    async def _write_terminal_state(self, handle: "SubagentHandle", status: str, note: str) -> None:
+        """plan-565-2323 G7：把已定的终态补写进库（幂等，不重复广播、不重复通知）。
+
+        供两条自愈路径使用：cancel_all 取消之后、cancel 发现内存已是终态时。
+        取消是终态且不可续跑（清掉检查点）；其它终态只补状态，避免把可续跑的进度清掉。
+        """
+        task_id = (handle.run_spec or {}).get("task_id")
+        try:
+            if status == "cancelled":
+                await _persist_agent_state(handle.agent_id, "cancelled", None)
+            else:
+                await _persist_agent_status_only(handle.agent_id, status)
+            # tasks 表没有 paused 状态：与 _finish_paused 同口径落 failed
+            task_status = "failed" if status == "paused" else status
+            await _sync_task(self.session_id, task_id, task_status, note, agent_id=handle.agent_id)
+        except Exception:  # noqa: BLE001 — 自愈写库失败不能影响取消流程
+            logger.warning("[subagent] 终态补写失败 agent=%s status=%s", handle.agent_id, status,
+                           exc_info=True)
+
     async def cancel(self, agent_id: int) -> str:
         """取消单个仍在运行的子代理（v36 plan-321-1600 M3，对齐 ZCode 的 TaskCancel）。
 
@@ -578,6 +815,10 @@ class SubagentManager:
         if h is None:
             return "not_found"
         if h.status != "running" or h.task is None or h.task.done():
+            # plan-565-2323 G7：内存已是终态也补写一次库里的终态（幂等）——
+            # 模型侧 cancel_subagent 因此能自愈“库里残留 running”的脏数据（重启后仍然转圈）。
+            if h.status in ("done", "failed", "paused", "cancelled"):
+                await self._write_terminal_state(h, h.status, (h.summary or h.error or "终态补写")[:300])
             return "not_running"
         # plan-91-394: 显式取消为终态（区别于主代理中断的暂停）
         h.cancel_requested = True
@@ -585,18 +826,35 @@ class SubagentManager:
         await asyncio.gather(h.task, return_exceptions=True)
         h.status = "cancelled"
         h.error = h.error or "已取消"
+        # plan-565-2323 G7：再补写一次（幂等）——驱动收尾若被二次取消打断，这里兜住库里的终态
+        await self._write_terminal_state(h, "cancelled", "用户中断")
         return "cancelled"
 
     async def cancel_all(self) -> None:
-        """取消并等待该会话所有尚未结束的子代理任务。"""
+        """取消并等待该会话所有尚未结束的子代理任务，并把终态写进库。
+
+        plan-565-2323 G7：旧实现只改内存 status、从不落库——重启后 agents/tasks 仍是 running，
+        会话永远显示「子任务运行中」且没有终止入口（事故主因之一）。
+        """
         pending = [h.task for h in self._handles.values() if h.task is not None and not h.task.done()]
+        for handle in self._handles.values():
+            if handle.status == "running":
+                # 显式取消（区别于 turn 收尾的暂停）：驱动循环据此落 cancelled 而不是 paused
+                handle.cancel_requested = True
         for task in pending:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         for handle in self._handles.values():
-            if handle.status == "running":
-                handle.status = "cancelled"
+            if handle.status != "running":
+                continue
+            # 僵尸 handle（task 早已 done 但状态停在 running）或收尾没写成：没人会再为它收尾，
+            # 这里直接定终态并补写库，保证任何路径都不留下 running。
+            handle.status = "cancelled"
+            handle.waiting = False
+            handle.resumable = False
+            await self._write_terminal_state(handle, "cancelled", "用户中断")
+            await _broadcast_subagent_failed(self.session_id, handle.agent_id, "用户中断", "cancelled")
 
 
 
@@ -650,8 +908,13 @@ def _dump_message(m) -> dict | None:
 
 
 def _on_step(handle: "SubagentHandle", msgs: list) -> None:
-    """每个执行步骤开始时的回调：登记最新消息引用，并通知可选的监听者（工作流增量检查点）。"""
+    """每个执行步骤开始时的回调：登记最新消息引用，并通知可选的监听者（工作流增量检查点）。
+
+    plan-565-2323 G10：顺便刷新活动时间——步骤回调是“子代理确实在推进”的最可靠信号，
+    停滞看门狗据此判定是否长时间无活动。
+    """
     handle.live_messages = msgs
+    _touch_activity(handle)
     listener = handle.on_step
     if listener is not None:
         try:
@@ -706,6 +969,28 @@ async def _persist_agent_state(agent_id: int, status: str, checkpoint: dict | No
         await run_write_locked(_patch, label=f"subagent.state.{agent_id}")
     except Exception:
         logger.warning("[subagent] 子代理状态落库失败 agent=%s status=%s", agent_id, status, exc_info=True)
+
+
+async def _persist_agent_status_only(agent_id: int, status: str) -> None:
+    """plan-565-2323 G7：只改 agents.status，不动检查点。
+
+    补写已终态（done/failed/paused）时必须用它：_persist_agent_state 会把 checkpoint_json
+    一并覆盖，而 paused/failed 的检查点是可续跑的唯一凭据，不能因一次幂等补写被清掉。
+    """
+    from app.persistence.models.agent import Agent as _AgentRow
+
+    def _patch(s):
+        row = s.get(_AgentRow, agent_id)
+        if row is None:
+            return
+        row.status = status
+        s.commit()
+
+    try:
+        await run_write_locked(_patch, label=f"subagent.status.{agent_id}")
+    except Exception:
+        logger.warning("[subagent] 子代理状态补写失败 agent=%s status=%s", agent_id, status,
+                       exc_info=True)
 
 
 async def _sync_task(session_id: int, task_id: int | None, status: str, note: str | None,
@@ -770,6 +1055,8 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     handle.waiting = False
     handle.pause_reason = ""
     handle.started_at = time.monotonic()
+    handle.last_activity_at = handle.started_at
+    handle.stall_detected = False
     handle.run_spec = spec
     handle.tool_schemas = _build_tool_schemas(spec.get("tool_names"))
     handle.live_messages = messages
@@ -845,6 +1132,8 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     live.waiting = False
     live.pause_reason = ""
     live.started_at = time.monotonic()
+    live.last_activity_at = live.started_at
+    live.stall_detected = False
     live.live_messages = messages
     manager._notified.discard(agent_id)
     manager._completion_queue = [
@@ -918,8 +1207,25 @@ def peek_subagent_manager(session_id: int) -> SubagentManager | None:
     return _managers.get(session_id)
 
 
+def peek_all_managers() -> dict[int, SubagentManager]:
+    """只读快照全部会话级管理器（plan-560-2311 B1）。
+
+    返回浅拷贝：调用方可能需要在遍历中清理，直接暴露 `_managers` 会在遍历时撞上 RuntimeError。
+    不创建任何条目——engine 的存活性判定用它，判定不能有副作用。
+    """
+    return dict(_managers)
+
+
 def cleanup(session_id: int) -> None:
     _managers.pop(session_id, None)
+    # plan-560-2311 B4：管理器销毁时清掉该会话残留的待答复提问——
+    # 否则主代理后续的 send_to_subagent 会对一个已不存在的子代理“成功答复”（假唤醒）。
+    try:
+        from app.orchestration import subagent_comm
+
+        subagent_comm.clear_session(session_id)
+    except Exception:  # noqa: BLE001 — 清理失败不能阻断管理器销毁
+        logger.debug("[subagent] 提问登记清理失败 session=%s", session_id, exc_info=True)
 
 
 async def _broadcast_subagent_failed(session_id: int, agent_id: int, error: str, status: str) -> None:
@@ -1038,11 +1344,37 @@ def _first_meaningful_paragraph(text: str, limit: int = 300) -> str:
     return ""
 
 
+def format_completion_row(handle: "SubagentHandle") -> str:
+    """plan-549-2281：完成通知的**用户可见**行文案（mailbox 落库成行，前端渲染「子代理已结束」）。
+
+    与 `_format_completion_note`（模型注入，带 collect_results 引导）分开：
+    面向用户的行不写工具调用话术；头部格式与提问 / 进度上报一致
+    （`【子代理已完成 subagent#N「标题」】`），前端 parseSubagentNotice 据此解析来源与标题。
+
+    plan-560-2311 B2：本函数只供**消息流展示**（`engine._on_subagent_finished` 调 mailbox.publish）。
+    该 mailbox 落库项已不再参与历史回放、也不再注入模型——模型侧通道唯一是
+    `_format_completion_note` / `_completion_queue`，两个函数不要互换用途。
+    """
+    title = handle.task_title or "(未命名子任务)"
+    if handle.status == "done":
+        body = _first_meaningful_paragraph(handle.findings or handle.summary or "")
+        head = f"【子代理已完成 subagent#{handle.agent_id}「{title}」】"
+        return f"{head}{body}" if body else head
+    if handle.status == "cancelled":
+        return f"【子代理已取消 subagent#{handle.agent_id}「{title}」】"
+    head = f"【子代理失败 subagent#{handle.agent_id}「{title}」】"
+    return f"{head}{(handle.error or '未知原因')[:200]}"
+
+
 def _format_completion_note(handle: "SubagentHandle") -> str:
     """子代理完成通知文案（v36 plan-321-1600 M3）。
 
     形如：[子代理 #140 已完成] 任务标题：结论首段（files: 2，risks: 0）。
     该文本经 injected_inputs_provider 注入主代理上下文，使其不必轮询 collect_results。
+
+    plan-560-2311 B2：本函数是子代理完成通知的**唯一模型通道**（`_enqueue_completion` →
+    `drain_completions`）。mailbox 的 `SUBAGENT_COMPLETION` 已改为纯展示、不进模型上下文，
+    不要再把本函数的文本发给 mailbox，否则模型会收到两份。
     """
     title = handle.task_title or "(未命名子任务)"
     if handle.status == "done":

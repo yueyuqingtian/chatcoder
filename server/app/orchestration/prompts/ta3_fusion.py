@@ -11,7 +11,10 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def _local_now() -> str:
@@ -63,15 +66,14 @@ CHATCODER_ADDENDUM_FULL_ACCESS = """## 流程规范（本环境附加）
 6. 执行类任务按需验证：由你判断风险与已完成的工作量——风险较大（共享契约或类型、数据结构与迁移、依赖变更、并发与持久化逻辑、大范围重写）或未验证的改动已经堆得很多时，先跑一次最相关的检查再继续叠加；局部、低风险的小改动（文案、样式、同模块替换）不必中途验证。交付前对整个改动统一验证一次；失败时先读完整错误定位根因，不要盲目重试。
 7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
 
-# 只读模式（read-only）：仅允许查看/搜索/分析
+# 只读模式（read-only / plan）：仅允许查看/搜索/分析。
+# plan-562-2318 A23：旧版把「改完复查」「交付前自查可运行性」「后台进程管理」「交付前统一验证」
+# 一并套进来，与第 2 条「禁止写入文件、运行命令」直接矛盾（只读会话根本不产生改动与进程）。
+# 这里只保留平台托管、能力边界与汇报要求三条，不再出现指向不存在动作的句子。
 CHATCODER_ADDENDUM_READONLY = """## 流程规范（本环境附加）
 1. 本环境由 chatcoder 工作台托管：任务拆解、上下文压缩由平台自动完成。
 2. 当前为【只读模式】：仅允许读取、搜索、分析代码或文档；禁止写入文件、运行命令、应用补丁。
-3. 修改文件后应复查关键变更（重新 Read 确认），并遵循项目现有代码风格与目录结构，不引入未使用的依赖。
-4. 重要决策与关键改动添加简短注释；交付前自查可运行性（编译/测试）。
-5. 长驻进程（dev server、watch、后端服务）必须以后台模式启动（Bash 的 waitForCompletion=false），用完必须用 BashKill 主动停止；会自己结束的后台命令跑完后系统会主动回报，不必轮询。
-6. 执行类任务按需验证：由你判断风险与已完成的工作量——风险较大（共享契约或类型、数据结构与迁移、依赖变更、并发与持久化逻辑、大范围重写）或未验证的改动已经堆得很多时，先跑一次最相关的检查再继续叠加；局部、低风险的小改动（文案、样式、同模块替换）不必中途验证。交付前对整个改动统一验证一次；失败时先读完整错误定位根因，不要盲目重试。
-7. 最终结论在主窗口以清晰摘要汇报：改了什么、如何验证。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
+3. 最终结论在主窗口以清晰摘要汇报：看了什么、结论是什么、依据是什么。回复用{lang_label}、简洁直接，不使用表情符号或装饰符号。"""
 
 
 def _normalize_lang(language: str | None) -> str:
@@ -79,38 +81,71 @@ def _normalize_lang(language: str | None) -> str:
     return language if language in ("zh", "en") else "auto"
 
 
+def _mode_kind(mode: str | None) -> str:
+    """模式名 → 判定档（plan-560-2311 C5）。
+
+    事实源在 `permission_profile_service.resolve_mode_kind`（与审批层、能力矩阵、
+    agent_loop 护栏、context_manager 同一份口径）。延迟 import，避免配置读取
+    在提示词模块加载期就发生；配置层异常时退回原名（旧行为）。
+    """
+    raw = str(mode or "").strip()
+    try:
+        from app.services.permission_profile_service import resolve_mode_kind
+
+        return resolve_mode_kind(raw)
+    except Exception:  # noqa: BLE001 — 配置层异常时按原名判定
+        logger.warning("[ta3] 模式归一失败 mode=%s(按原名判定)", raw, exc_info=True)
+        return raw
+
+
 def _build_addendum(execution_mode: str = "agent", approval_mode: str = "ask",
                     language: str = "auto") -> str:
     """按「执行模式 × 权限模式」选择流程规范段。
 
-    plan-75-332: 参数由 sandbox_mode 改为两条正交轴——
-    - approval_mode == "full"（完全访问）→ 免询问版规范；
-    - execution_mode == "readonly"（只读模式）→ 仅读版规范；
-    - 其余保持默认（写操作按权限模式裁决）。
+    plan-75-332: 参数由 sandbox_mode 改为两条正交轴。
+
+    plan-562-2318 A24：两条轴正交，**执行模式的硬边界优先**。此前先判
+    `approval_mode == "full"`，导致「只读执行模式 + 完全访问权限模式」拿到完全访问版
+    规范（写着 Write/Edit/Bash 无需审批、直接生效），与审批层对只读模式的硬拒绝相矛盾。
+    当前判定顺序：
+    1. execution_mode 判定档为 readonly / plan → 仅读版规范（不管权限模式是什么）；
+    2. 否则 approval_mode == "full"（完全访问）→ 免询问版规范；
+    3. 其余 → 默认规范（写操作按权限模式裁决）。
+
+    plan-560-2311 C5：只读判定走**判定档**（按 kind 归一，事实源在
+    `permission_profile_service.resolve_mode_kind`）。此前按模式名等值比较，自定义
+    kind=readonly 模式拿不到仅读版规范——ta3 会话里会拿到「可以写文件」的规范，
+    与审批层的硬拒绝自相矛盾。
 
     language（plan-19-82）：回复语言句按本轮语言动态生成（中文→简体中文；英文→English；
     auto→跟随用户消息），不再写死中文。
     """
     from app.orchestration.prompts.language import language_label
 
-    if approval_mode == "full":
-        tpl = CHATCODER_ADDENDUM_FULL_ACCESS
-    elif execution_mode == "readonly":
+    if _mode_kind(execution_mode) in ("readonly", "plan"):
+        # 只读与计划在流程规范上同档：都不许写业务文件（计划文档的例外由审批边界单独放行，
+        # 不需要在规范段里另写一份，避免两处口径漂移）
         tpl = CHATCODER_ADDENDUM_READONLY
+    elif approval_mode == "full":
+        tpl = CHATCODER_ADDENDUM_FULL_ACCESS
     else:
         tpl = CHATCODER_ADDENDUM
     return tpl.format(lang_label=language_label(_normalize_lang(language)))
 
 # 子代理引导（启用子代理时追加）
-# plan-73-322: 补派发方式纪律——与内部通道主提示词的派发口径一致（优先异步、完成自动推送
-# 无需轮询、同步仅在强依赖时使用），修复 ta3 会话「调研一律同步阻塞」的引导偏差。
+# plan-549-2281：子会话下线后，子代理是唯一的并行执行通道（调研 + 实现）。
+# 旧文本有两处已失效：① 教模型「强依赖时用 SubAgent 同步等待」——同步派发已整体下线
+# （出站只发 SubAgentAsync）；② 通篇不提「团队协作只有主代理一条线」，与内部通道口径不一致。
 SUBAGENT_GUIDE_SECTION = """## 子代理使用
-SubAgent 用于并行调研多个相互独立的课题（如前端 + 后端 + 协议同时排查）。同一轮最多 2-3 个，
-单文件读取、单关键词搜索等琐碎调研必须自己用直接工具调用完成，不得派发。子代理返回结论后
-由你串行整合并亲自验证关键事实。
-派发方式优先异步：结论不急需时用 SubAgentAsync（subagent_type=Explore 为只读调研）后台派发，
-立即返回、完成后结果自动推送，不要轮询；仅当下一步强依赖结论且子任务很小时，才用 SubAgent
-同步等待（该组合会阻塞主流程）。已派发给子代理的工作不要自己重复做。"""
+SubAgent 是唯一的并行执行通道（不存在子会话）：既能做只读调研，也能做可写实现。
+`subagent_type=Explore` 为只读调研（对应内部 readonly 模式）；其余 / 缺省为可写（agent 模式）。
+同一轮的派发量以「单会话同时运行上限」为准（设置 →「子代理」；每次派发结果会回带上限/占用/剩余），超出的派发会被立即拒绝；剩余为 0 时不要再派，先把已有结果收回来。单文件读取、单关键词搜索等琐碎调研必须自己用直接工具调用完成，不得派发。
+写入范围互不相交的实现工作可以派出去——实现可以委派，不必自己逐处改。
+派发方式：一律用 SubAgentAsync 后台派发，立即返回、完成后结果自动推送，不要轮询；
+仅当下一步强依赖结论时才用 TaskQuery 取回（传入 SubAgentAsync 返回的 taskId）。
+已派发给子代理的工作不要自己重复做；它的结论由你串行整合并亲自验证关键事实。
+子代理的权限模式（要不要审批）继承当前会话；它需要决策时会向你提问，用 SendToSubagent 答复。
+子代理永远不进计划模式、不用工作流工具、也不能再派子代理。"""
 
 
 def build_runtime_snapshot(workspace: str = "") -> str:

@@ -5,11 +5,13 @@
  *  · 胶囊（收缩态）悬浮在右上角，**不让位**——消息列与输入框保持居中排版，胶囊只盖在右侧留白上；
  *  · 展开卡片体量大，才按需让位：内容列只在右缘真的会被遮住时左移（几何见 useContentColumnGeometry）。
  *
- * 【三形态】
- * · expanded：完整卡片，栏目可分别折叠；
+ * 【形态】
+ * · expanded：完整卡片停靠在右上角，栏目可分别折叠；
+ * · floating：放不下停靠卡片时（窄窗口 / 右面板展开），用户展开的卡片悬浮在内容之上、不让位
+ *             （plan-20261025-shell 需求 4：此前会自动收回胶囊甚至隐藏，窄窗口里打不开）；
  * · capsule ：单行胶囊，只显示优先级最高的一项（进程 > 工作流 > 子代理 > 计划 > git），
- *             尾部 `+N` 表示还有几个栏目有内容；
- * · hidden  ：五项全无，或宿主窄到连胶囊都会盖住半个消息列。
+ *             尾部 `+N` 表示还有几个栏目有内容；窄到完整胶囊会盖住正文时收成只剩图标的小圆钮；
+ * · hidden  ：各栏目都没有内容（或几何尚未测量）。
  *
  * 【胶囊 ↔ 卡片的形变（plan-20261019-toolcard-v2）】
  * 两种形态共用同一个外壳 `.tcard-shell`：用户点胶囊 / 收起按钮时，外壳的宽、高、圆角在两种尺寸之间过渡
@@ -40,7 +42,7 @@ import {
   useSectionsOf, useToolCardStore, useWantExpanded,
   type ToolCardDefaultForm, type ToolCardSection,
 } from "../../../store/toolCard";
-import { pickForm, type ToolCardFit, type ToolCardForm } from "./useToolCardFit";
+import { isCardForm, pickForm, type ToolCardFit, type ToolCardForm } from "./useToolCardFit";
 import { useToolCardData, type ToolCardData } from "./useToolCardData";
 import { GitToolSection } from "./GitToolSection";
 import {
@@ -73,8 +75,26 @@ function otherCount(data: ToolCardData, present: ToolCardSection[], top: ToolCar
   }).length;
 }
 
-/** 胶囊摘要：一行字的「图标 + 主信息」，随栏目变化。 */
-function CapsuleSummary({ section, data }: { section: ToolCardSection; data: ToolCardData }) {
+/** 胶囊摘要：一行字的「图标 + 主信息」，随栏目变化。
+ *  compact（plan-20261025-shell）：窄到完整胶囊会盖住半个消息列时只留图标，收成一枚小圆钮。 */
+function CapsuleSummary({ section, data, compact = false }: { section: ToolCardSection; data: ToolCardData; compact?: boolean }) {
+  if (compact) {
+    if (section === "process" && data.process) {
+      const { done, total } = data.process;
+      return (
+        <span className="tcard-ic">
+          <IconRingProgress value={total > 0 ? done / total : 0} size={16} strokeWidth={2}
+            indicatorColor="var(--accent)" trackColor="color-mix(in srgb, var(--text-1) 14%, transparent)" />
+        </span>
+      );
+    }
+    const icon = section === "workflow" ? <IxWorkflow size={16} />
+      : section === "subagent" ? <IconCpu size={16} />
+      : section === "bgtask" ? <IconTerminal size={16} />
+      : section === "plan" ? <IconListChecks size={16} />
+      : <IconGitBranch size={16} />;
+    return <span className="tcard-ic">{icon}</span>;
+  }
   if (section === "process" && data.process) {
     const { done, total, currentTitle } = data.process;
     return (
@@ -105,12 +125,16 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
     );
   }
   if (section === "subagent" && data.subagent) {
-    const running = data.subagent.running.length;
+    const { running, pending, finished } = data.subagent;
+    // 失败 / 已停止的不算「已完成」（与右面板摘要的子代理状态一致）
+    const text = running.length > 0 ? "子代理执行中"
+      : pending.length > 0 ? "子代理待开始"
+      : finished.every((s) => s.state === "done") ? "子代理已完成" : "子代理已结束";
     return (
       <>
         <span className="tcard-ic"><IconCpu size={16} /></span>
-        <span className="tcard-cap-num">{running || data.subagent.finished.length}</span>
-        <span className="tcard-cap-text">{running > 0 ? "子代理执行中" : "子代理已完成"}</span>
+        <span className="tcard-cap-num">{running.length || pending.length || finished.length}</span>
+        <span className="tcard-cap-text">{text}</span>
       </>
     );
   }
@@ -151,13 +175,40 @@ function CapsuleSummary({ section, data }: { section: ToolCardSection; data: Too
   return null;
 }
 
+/** 栏目头计数的语气（plan-20261025-shell）：进行中用强调色、全部完成用成功色，其余中性——
+ *  对齐参考卡片的「进程 7/7」：一眼看出这一栏是在跑还是已收尾，不必展开。
+ *  plan-20261025-progress-keep：已停止 / 待续接 / 已结束仍有未完成项的清单保持中性，不冒充「在跑」；
+ *  子代理有失败或已停止的不标成功色（与右面板摘要一致）。 */
+function sectionTone(section: ToolCardSection, data: ToolCardData): "run" | "done" | undefined {
+  if (section === "process" && data.process) {
+    if (data.process.done >= data.process.total) return "done";
+    return data.process.phase === "running" || data.process.hasRunning ? "run" : undefined;
+  }
+  if (section === "subagent" && data.subagent) {
+    if (data.subagent.running.length > 0) return "run";
+    if (data.subagent.pending.length > 0) return undefined;
+    return data.subagent.finished.every((s) => s.state === "done") ? "done" : undefined;
+  }
+  if (section === "workflow" && data.workflow) return data.workflow.open.length > 0 ? "run" : "done";
+  if (section === "bgtask" && data.bgtask) return "run";
+  return undefined;
+}
+
 /** 栏目头右侧的紧凑计数（折叠态也能看出概况）。 */
 function sectionMeta(section: ToolCardSection, data: ToolCardData): string {
   if (section === "plan") return data.plan?.awaiting ? "待确认" : "";
-  if (section === "process") return data.process ? `${data.process.done}/${data.process.total}` : "";
+  if (section === "process") {
+    if (!data.process) return "";
+    const count = `${data.process.done}/${data.process.total}`;
+    // 状态词与右面板摘要的总览行一致（待续接 / 已停止），两处说法不再各说各的
+    if (data.process.carried) return `待续接 ${count}`;
+    if (data.process.phase === "interrupted") return `已停止 ${count}`;
+    return count;
+  }
   if (section === "subagent") {
     if (!data.subagent) return "";
     if (data.subagent.running.length > 0) return `${data.subagent.running.length} 运行中`;
+    if (data.subagent.pending.length > 0) return `${data.subagent.pending.length} 待开始`;
     return `${data.subagent.finished.length}`;
   }
   if (section === "workflow") {
@@ -266,7 +317,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   useLayoutEffect(() => {
     const req = morphFromRef.current;
     const animate = req != null && performance.now() - req.at < MORPH_REQUEST_TTL
-      && (form === "expanded") === (req.to === "expanded");
+      && isCardForm(form) === (req.to === "expanded");
     onFormChange?.(form, animate);
   }, [form, onFormChange]);
 
@@ -275,15 +326,15 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   useLayoutEffect(() => {
     const req = morphFromRef.current;
     if (!req) return;
-    if (form !== "expanded" && form !== "capsule") { morphFromRef.current = null; return; }
+    if (form === "hidden") { morphFromRef.current = null; return; }
     if (performance.now() - req.at > MORPH_REQUEST_TTL) { morphFromRef.current = null; return; }
-    if ((form === "expanded") !== (req.to === "expanded")) return; // 形态没按请求变（放不下）：留着等它过期
+    if (isCardForm(form) !== (req.to === "expanded")) return; // 形态没按请求变：留着等它过期
     morphFromRef.current = null;
     const el = shellRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     setMorph({
-      dir: form === "expanded" ? "expanding" : "collapsing",
+      dir: isCardForm(form) ? "expanding" : "collapsing",
       fromW: req.w, fromH: req.h, toW: r.width, toH: r.height,
     });
   }, [form]);
@@ -312,7 +363,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   }, [entering]);
 
   // 收起 / 隐藏时关掉浮层，避免它悬空残留
-  useEffect(() => { if (form !== "expanded") setMenuOpen(false); }, [form]);
+  useEffect(() => { if (!isCardForm(form)) setMenuOpen(false); }, [form]);
 
   const onShellAnimationEnd = (e: AnimationEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
@@ -322,10 +373,12 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
 
   if (form === "hidden" || sessionId == null) return null;
 
-  const isCard = form === "expanded";
+  const isCard = isCardForm(form);
+  const floating = form === "floating";
   const showCapsule = form === "capsule" || morph?.dir === "expanding";
   const showCard = isCard || morph?.dir === "collapsing";
-  const canExpand = fit.expandedShortfall <= 0;
+  /** plan-20261025-shell：完整胶囊会盖住半个消息列时收成只剩图标的小圆钮（此前直接隐藏，窄窗口里找不到工具卡） */
+  const compact = fit.capsuleShortfall > 0;
 
   const top = CAPSULE_PRIORITY.find((s) => present.includes(s)) ?? present[0];
   const rest = otherCount(data, present, top);
@@ -353,15 +406,14 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
   const capsule = (
     <button
       type="button"
-      className={"tcard-capsule" + (capsuleLeaving ? " is-leaving" : "")}
-      onClick={() => { if (canExpand) requestForm("expanded"); }}
+      className={"tcard-capsule" + (capsuleLeaving ? " is-leaving" : "") + (compact ? " is-compact" : "")}
+      onClick={() => requestForm("expanded")}
       aria-label="展开会话工具"
-      aria-disabled={!canExpand}
       tabIndex={capsuleLeaving ? -1 : undefined}
       aria-hidden={capsuleLeaving || undefined}
     >
-      <CapsuleSummary section={top} data={data} />
-      {rest > 0 && <span className="tcard-cap-more">+{rest}</span>}
+      <CapsuleSummary section={top} data={data} compact={compact} />
+      {rest > 0 && !compact && <span className="tcard-cap-more">+{rest}</span>}
     </button>
   );
 
@@ -411,7 +463,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
                 onClick={() => toggleSection(sessionId, section)}
               >
                 <span className="tcard-sec-label">{SECTION_LABEL[section]}</span>
-                <span className="tcard-sec-meta">{sectionMeta(section, data)}</span>
+                <span className="tcard-sec-meta" data-tone={sectionTone(section, data)}>{sectionMeta(section, data)}</span>
                 <IconChevronDown size={13} className={"tcard-sec-caret" + (open ? " is-open" : "")} />
               </button>
               {/* plan-20261019-motion-sweep：栏目展开 / 收起走 Collapse（高度过渡 + 淡入淡出，收起结束才卸载） */}
@@ -440,6 +492,8 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
         ref={shellRef}
         className={
           "tcard-shell " + (isCard ? "is-card" : "is-capsule")
+          + (floating ? " is-floating" : "")
+          + (compact && !isCard ? " is-compact" : "")
           + (morph ? ` is-morphing is-${morph.dir}` : "")
           + (entering && !morph ? " is-entering" : "")
         }
@@ -447,7 +501,7 @@ export function SessionToolCard({ fit, onFormChange }: SessionToolCardProps) {
         onAnimationEnd={onShellAnimationEnd}
       >
         {showCapsule && (capsuleLeaving ? capsule : (
-          <Tooltip content={canExpand ? "展开会话工具" : "窗口较窄，放大窗口后可展开"} side="bottom">
+          <Tooltip content={compact ? "展开会话工具（悬浮显示）" : "展开会话工具"} side="bottom">
             {capsule}
           </Tooltip>
         ))}

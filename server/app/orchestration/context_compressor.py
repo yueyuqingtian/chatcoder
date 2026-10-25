@@ -343,8 +343,87 @@ def _build_transcript(messages: list) -> str:
     return "\n".join(lines)
 
 
+# plan-548-2277：压缩的同一次调用顺带产出一份「会话记忆」。
+# 分工：摘要每轮都进上下文，必须短（≤3000 字符、8 段）；记忆只在需要时被检索，可以详细。
+_MAX_SESSION_MEMORIES = 12
+_MAX_MEMORY_TEXT = 1200
+_MIN_MEMORY_TEXT = 20
+_MEMORY_KINDS = ("fact", "convention", "pitfall", "decision")
+
+
+def _parse_session_memories(block: str) -> list[dict]:
+    """解析 <session-memory> 里的 JSON 数组；任何非法情况都返回空列表。
+
+    记忆是压缩的附加收益，绝不能因为它让压缩失败——所以这里全程吞异常。
+    """
+    import json
+    import re
+
+    block = (block or "").strip()
+    if not block:
+        return []
+    data = None
+    try:
+        data = json.loads(block)
+    except Exception:
+        match = re.search(r"\[.*\]", block, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, list):
+        return []
+
+    out: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if len(text) < _MIN_MEMORY_TEXT:
+            continue
+        kind = str(item.get("kind") or "fact")
+        if kind not in _MEMORY_KINDS:
+            kind = "fact"
+        kws = item.get("keywords")
+        if isinstance(kws, str):
+            kws = [k.strip() for k in re.split(r"[,，、;；\s]+", kws) if k.strip()]
+        elif isinstance(kws, list):
+            kws = [str(k).strip() for k in kws if str(k).strip()]
+        else:
+            kws = []
+        out.append({"text": text[:_MAX_MEMORY_TEXT], "kind": kind, "keywords": kws[:8]})
+        if len(out) >= _MAX_SESSION_MEMORIES:
+            break
+    return out
+
+
+def _split_summary_and_memories(text: str, max_chars: int) -> tuple[str, list[dict]]:
+    """把模型输出拆成 (checkpoint 摘要, 会话记忆列表)。
+
+    模型只给摘要（没有 <session-memory> 段）是兼容路径，不是错误：
+    旧提示词、以及模型偶尔忘记第二段，都按「无记忆」处理，压缩照常成功。
+    """
+    from app.orchestration.prompts.summary import (
+        SESSION_MEMORY_CLOSE_TAG,
+        SESSION_MEMORY_OPEN_TAG,
+    )
+
+    raw = str(text or "")
+    start = raw.find(SESSION_MEMORY_OPEN_TAG)
+    if start < 0:
+        return raw.strip()[:max_chars], []
+    end = raw.find(SESSION_MEMORY_CLOSE_TAG, start + len(SESSION_MEMORY_OPEN_TAG))
+    block = raw[start + len(SESSION_MEMORY_OPEN_TAG): end if end >= 0 else len(raw)]
+    body = raw[:start]
+    if end >= 0:
+        body += raw[end + len(SESSION_MEMORY_CLOSE_TAG):]
+    return body.strip()[:max_chars], _parse_session_memories(block)
+
+
 async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_chars: int = 4000,
-                              workspace_dir: str | None = None, language: str = "auto") -> str:
+                              workspace_dir: str | None = None,
+                              language: str = "auto") -> tuple[str, list[dict]]:
     """LLM 生成结构化 checkpoint 摘要。
 
     优先 KV 缓存复用路径：把待压缩消息结构化为 user/assistant/tool 重放序列
@@ -353,9 +432,12 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
 
     plan-19-82：摘要语言由 language 参数**无条件**指定（旧版是让模型自行判断），
     避免中文会话产出英文 checkpoint 进而把回复语言带向英文。
+
+    plan-548-2277：返回值改为 (摘要, 会话记忆列表)。拆分失败时记忆为空列表，
+    摘要仍回退为整段响应——压缩永远不因记忆解析失败而失败。
     """
     if not messages:
-        return ""
+        return "", []
     try:
         replay: list[ChatMessage] = []
         pending_text: list[str] = []
@@ -394,7 +476,9 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
         if pending_text:
             replay.append(ChatMessage(role="assistant", content="\n".join(pending_text)))
         if not replay:
-            return ""
+            # plan-560-2311 A1：签名是 (摘要, 记忆) 二元组，返回单字符串会让调用方
+            # 的 `summary_text, _memories = await ...` 解包直接抛 ValueError。
+            return "", []
 
         # plan-53-258 R4: 辅助摘要请求同样携带用户配置的思考深度（此前完全不带）
         _effort, _thinking = resolve_reasoning(provider)
@@ -419,10 +503,12 @@ async def _summarize_with_llm(db: AsyncSession, provider, messages: list, max_ch
         )
         resp = await provider.chat(req)
         text = (resp.content or "").strip()
-        return text[:max_chars] if text else ""
+        if not text:
+            return "", []
+        return _split_summary_and_memories(text, max_chars)
     except Exception as e:
         logger.warning("[compressor] LLM 摘要失败，降级硬编码: %s", e)
-        return ""
+        return "", []
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +544,9 @@ async def compact_session(
 
     Args:
         language: 本轮回复语言（zh/en/auto），摘要与 checkpoint 文案按此生成。
+        fixed_overhead_tokens: 调用方实测的不可压缩固定开销（system/developer/工具规则）。
+            未传时按 0 处理——固定开销由调用方传入，不再从 shared_context 推断
+            （plan-562-2318 A29）。
 
     Returns:
         压缩结果 dict（含 compaction_id / shadowed_ids / saved_tokens /
@@ -509,11 +598,11 @@ async def compact_session(
     # 否则会出现「压不动却反复压缩」的空转。
     target_tokens = get_compact_target_tokens(context_window)          # 12%
     target_max_tokens = get_compact_target_max_tokens(context_window)  # 15%（达标线）
-    # 固定开销优先取调用方（agent_loop）实测值，缺省回退会话记录/0
-    if fixed_overhead_tokens is None:
-        fixed_overhead = _estimate_fixed_overhead(session)
-    else:
-        fixed_overhead = max(0, int(fixed_overhead_tokens))
+    # plan-562-2318 A29：固定开销只认调用方（agent_loop）实测值，未传按 0 处理。
+    # 旧实现缺省时回退读 shared_context["fixed_overhead_tokens"]，但全仓库没有任何
+    # 写入点，该分支恒 0 → post_compact_tokens / post_compact_ratio 系统性偏低
+    # （自报「已达标」，实际占用仍高）。既然拿不到真实值，就显式按 0 保守处理。
+    fixed_overhead = max(0, int(fixed_overhead_tokens or 0))
     overhead_over_target = fixed_overhead >= target_max_tokens
     if overhead_over_target:
         logger.warning(
@@ -538,6 +627,8 @@ async def compact_session(
     summaries: list[str] = []
     rounds = 0
     _llm_fail = 0  # 本次压缩内 LLM 连续失败次数（熔断用）
+    # plan-548-2277：各轮摘要顺带产出的会话记忆，压缩成功后统一归档
+    session_memories: list[dict] = []
     while rounds < max_rounds:
         # 剩余候选总量已 <= 可压缩预算 → 达标，停止
         # plan-282-0: 用「有效口径」（剥离旧 reasoning 后）判定，与真实出站一致。
@@ -551,12 +642,15 @@ async def compact_session(
         if not chunk:
             break
         summary_text = ""
+        # plan-562-2318 A27：本 chunk 的记忆先暂存，等摘要确实被采纳（该 chunk 进入
+        # shadowed_all）之后才并入 session_memories，见下方提交处。
+        _chunk_memories: list[dict] = []
         _chunk_chars = sum(len(str(getattr(m, "content", "") or "")) for m in chunk)
         # 熔断：本次压缩内 LLM 连续失败达上限后，剩余轮次直接用规则摘要，不再反复调用
         if provider is None or _llm_fail >= _LLM_FAIL_LIMIT:
             summary_text = _fallback_summary(chunk, language=language)
         else:
-            summary_text = await _summarize_with_llm(
+            summary_text, _chunk_memories = await _summarize_with_llm(
                 db, provider, chunk, max_chars=max_summary_chars,
                 workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)),
                 language=language,
@@ -580,6 +674,11 @@ async def compact_session(
             break
         shadowed_all.extend(chunk)
         summaries.append(summary_text)
+        # plan-562-2318 A27：记忆必须与摘要采纳同进同退——摘要被质量门放弃时该 chunk
+        # 不会被遮蔽、原文仍留在上下文里，若此时已把它的记忆并入 session_memories，
+        # 压缩成功后记忆与上下文重复，下一轮压缩还会把同一批消息再归档一次。
+        if _chunk_memories:
+            session_memories.extend(_chunk_memories)
         # 收缩候选：移除本轮已压缩的 span（保留区保留）
         remaining = remaining[:start_idx] + remaining[end_idx + 1:]
         rounds += 1
@@ -615,6 +714,21 @@ async def compact_session(
         latest_ctx = {}
     compaction_index = len(latest_ctx.get("compactions") or []) + 1
 
+    # plan-548-2277：压缩同一次调用产出的会话记忆先落库（origin=compaction）。
+    # 失败只记日志——记忆是附加收益，压缩本身已经成功，不能因它回滚或报错。
+    session_memory_count = 0
+    if session_memories:
+        try:
+            from app.services import memory_service
+
+            session_memory_count = await memory_service.save_memories(
+                db, session_id=session.id, turn_id=turn_id,
+                memories=[{**m, "scope": "session"} for m in session_memories],
+                origin="compaction",
+            )
+        except Exception:
+            logger.warning("[compressor] 会话记忆落库失败(非阻塞)", exc_info=True)
+
     # 落库：SUMMARY 消息（checkpoint 帧）
     from app.services.message_service import create_message
 
@@ -636,6 +750,8 @@ async def compact_session(
             "saved_tokens": saved_tokens,
             "rounds": rounds,
             "summary_tokens": max(1, len(summary_text.encode("utf-8")) // 4),
+            # plan-548-2277：本次归档的会话记忆条数（前端压缩卡展示入口，详情可检索）
+            "session_memory_count": session_memory_count,
         },
         turn_id=turn_id,
         broadcast=True,
@@ -732,25 +848,6 @@ async def compact_session(
     return result
 
 
-def _estimate_fixed_overhead(session) -> int:
-    """估算本会话不可压缩的固定开销（plan-19-82 步骤5）。
-
-    由「当前上下文构建口径」近似：系统提示 + developer 分层上下文 + 工具 schema。
-    这里用可测的部分保守估算——系统提示/规则/记忆等 developer 段长度无法在压缩器内
-    直接拿到消息列表，故以会话级 shared_context 记录的历史值 + 最近一次总结为准；
-    拿不到时退化为 0（此时按纯候选量判定，行为接近旧实现，不会更差）。
-    """
-    try:
-        ctx = getattr(session, "shared_context", None) or {}
-        if isinstance(ctx, dict):
-            v = ctx.get("fixed_overhead_tokens")
-            if isinstance(v, int) and v >= 0:
-                return v
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
-
-
 async def emergency_compact_session(
     db: AsyncSession, *, session, provider, context_window: int,
     used_tokens: int | None = None,
@@ -758,14 +855,17 @@ async def emergency_compact_session(
     agent_name: str = "main",
     turn_id: int | None = None,
     language: str = "auto",
+    fixed_overhead_tokens: int | None = None,
 ) -> dict | None:
     """溢出恢复压缩（trigger='context-overflow'）。
 
     与 pressure 压缩的区别：不按目标比例保留预算，只保留最近 6 个工具回合
     （对齐旧 emergency_compact 语义），强制做一次有效缩减。
     plan-19-82：新增 language 参数，摘要与 checkpoint 文案跟随本轮语言。
+    plan-560-2311 A4：fixed_overhead_tokens 与 compact_session 同源（调用方实测的
+    固定开销），保证两条路径的 post_compact_ratio 口径一致。
     """
-    from app.orchestration.context_memory import _fetch_main_messages
+    from app.orchestration.context_memory import _fetch_main_messages, _is_image_message
 
     ctx = session.shared_context or {}
     if not isinstance(ctx, dict):
@@ -782,10 +882,13 @@ async def emergency_compact_session(
     all_msgs = await _fetch_main_messages(
         db, session.id, limit=None,
         min_id=compacted_floor, include_ids=compacted_exceptions)
+    # plan-166-767: 跳过含图片附件的消息——图片一旦被遮蔽（compacted_ids）无法恢复，
+    # 切回多模态模型后历史图片块将丢失。与 compact_session 的候选过滤同口径（plan-560-2311 A3）。
     candidates = [
         m for m in all_msgs
         if m.id not in summarized_ids and m.id not in compacted_ids
         and m.msg_type in _COMPACT_KEEP_TYPES
+        and not _is_image_message(m)
     ]
     if len(candidates) < 4:
         return None
@@ -812,6 +915,9 @@ async def emergency_compact_session(
         trigger="context-overflow", language=language,
         # plan-527-2218: 传本次取数全集，提交时据此计算压缩水位
         all_msgs=all_msgs,
+        # plan-560-2311 A4：保留区（未被遮蔽的尾部候选）用于算压缩后真实占用
+        retained_messages=candidates[k:],
+        fixed_overhead_tokens=fixed_overhead_tokens,
     )
 
 
@@ -821,20 +927,29 @@ async def _commit_compaction(
     agent_id: int | None, agent_name: str, turn_id: int | None, trigger: str,
     language: str = "auto",
     all_msgs: list | None = None,
+    retained_messages: list | None = None,
+    fixed_overhead_tokens: int | None = None,
 ) -> dict | None:
     """共享提交逻辑：摘要 → SUMMARY 消息 → compacted_ids → 广播。
 
     plan-19-82：language 参数控制摘要语言与 checkpoint 前言语言。
     plan-527-2218：all_msgs 为本次压缩的取数全集，用于计算压缩水位；缺省时不更新
     水位（宁可不优化，也不能把未被遮蔽的消息挡在下界之外）。
+    plan-560-2311 A4：retained_messages / fixed_overhead_tokens 用于和 compact_session
+    同口径估算压缩后真实占用（保留区 + 固定开销 + 摘要）；缺省时保留区按 0。
+    plan-562-2318 A29：固定开销同样只认调用方入参，未传按 0 处理，不再从
+    shared_context 推断（该键无任何写入点，读取只会静默恒 0）。
     """
     shadowed_ids = [m.id for m in shadowed]
     shadowed_tokens = messages_token_total(shadowed)
 
+    session_memory_count = 0
+    # plan-562-2318 A28：记忆先暂存在局部变量，等「摘要非空、压缩确实继续」之后再落库。
+    emergency_memories: list[dict] = []
     if provider is None:
         summary_text = _fallback_summary(shadowed, language=language)
     else:
-        summary_text = await _summarize_with_llm(
+        summary_text, emergency_memories = await _summarize_with_llm(
             db, provider, shadowed,
             workspace_dir=resolve_workspace_root(getattr(session, "workspace_root", None)),
             language=language)
@@ -844,6 +959,23 @@ async def _commit_compaction(
     if not summary_text:
         logger.warning("[compressor] session=%s 摘要为空，跳过压缩", session.id)
         return None
+
+    # plan-549-2281 复盘修复：紧急压缩（overflow 路径）产出的会话记忆原先赋值后
+    # 被静默丢弃——与主压缩路径（pressure）不一致，细节归档在这里断档。
+    # plan-562-2318 A28：落库必须晚于「摘要为空则放弃」判断——否则压缩失败返回 None
+    # 时记忆已经写进库，重试会重复写一遍。与 compact_session 的「先判成功再归档」同口径。
+    # 与主路径同口径落库（origin=compaction，失败只记日志不回滚）。
+    if emergency_memories:
+        try:
+            from app.services import memory_service
+
+            session_memory_count = await memory_service.save_memories(
+                db, session_id=session.id, turn_id=turn_id,
+                memories=[{**m, "scope": "session"} for m in emergency_memories],
+                origin="compaction",
+            )
+        except Exception:
+            logger.warning("[compressor] 紧急压缩会话记忆落库失败(非阻塞)", exc_info=True)
 
     compaction_id = "cp-" + uuid.uuid4().hex[:12]
     saved_tokens = max(0, shadowed_tokens - len(summary_text.encode("utf-8")) // 4)
@@ -874,6 +1006,8 @@ async def _commit_compaction(
             "shadowed_tokens": shadowed_tokens,
             "saved_tokens": saved_tokens,
             "summary_tokens": max(1, len(summary_text.encode("utf-8")) // 4),
+            # plan-548-2277：本次归档的会话记忆条数（前端压缩卡展示入口，详情可检索）
+            "session_memory_count": session_memory_count,
         },
         turn_id=turn_id,
         broadcast=True,
@@ -922,6 +1056,14 @@ async def _commit_compaction(
     await run_write_locked(_persist_ctx, label="compact.shared_ctx")
 
     summary_tokens = max(1, len(summary_text.encode("utf-8")) // 4)
+    # plan-560-2311 A4：压缩后占用与 compact_session（见其 `post_tokens` 口径）一致——
+    # 「保留区 + 固定开销 + 新 checkpoint 摘要」。旧写法 shadowed_tokens - saved_tokens
+    # 实际只等于摘要本身的 token，漏算保留区与固定开销，post_compact_ratio 因此
+    # 严重偏低（自报已达标、真实仍高位），与 pressure 路径口径矛盾。
+    remaining_tokens = estimate_effective_tokens(retained_messages or [])
+    # plan-562-2318 A29：与 compact_session 同口径——只认调用方实测值，未传按 0。
+    fixed_overhead = max(0, int(fixed_overhead_tokens or 0))
+    post_tokens = remaining_tokens + fixed_overhead + summary_tokens
     result = {
         "compaction_id": compaction_id,
         "index": compaction_index,
@@ -935,16 +1077,18 @@ async def _commit_compaction(
         "context_window": context_window,
         "ratio": round((used_tokens or 0) / context_window * 100, 1) if context_window else None,
         # plan-19-82: 与 compact_session 口径一致，供 agent_loop 计算 post_compact_ratio
-        "post_compact_tokens": shadowed_tokens - saved_tokens,
+        "fixed_overhead_tokens": fixed_overhead,
+        "post_compact_tokens": post_tokens,
         "post_compact_ratio": (
-            round((shadowed_tokens - saved_tokens) / context_window * 100, 1)
-            if context_window else None
+            round(post_tokens / context_window * 100, 1) if context_window else None
         ),
         # plan-238-1188: 同 compact_session——日志引用 summary_tokens，缺失会抛 KeyError。
         "summary_tokens": summary_tokens,
     }
     logger.info(
-        "[compressor] session=%s %s 压缩完成: index=%d %d 条消息 %d tokens -> %d tokens，节省 %d",
+        "[compressor] session=%s %s 压缩完成: index=%d %d 条消息 %d tokens -> %d tokens，节省 %d，"
+        "固定开销 %d，压缩后约 %d tokens (%.1f%%)",
         session.id, trigger, compaction_index, len(shadowed_ids), shadowed_tokens, summary_tokens, saved_tokens,
+        fixed_overhead, post_tokens, result["post_compact_ratio"] or 0,
     )
     return result

@@ -36,7 +36,9 @@ _SUMMARY_STRUCTURE = """## Primary Request and Intent
 
 COMPACTION_PROMPT = f"""You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.
 
-Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.
+Output the Markdown structure below as the FIRST block: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.
+
+Then emit the session-memory block described at the end of these rules.
 
 {_SUMMARY_STRUCTURE}
 
@@ -44,8 +46,37 @@ Rules:
 - Write concise Chinese engineering prose when the conversation is Chinese; preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments verbatim.
 - Capture user feedback and explicit instructions faithfully, especially corrections.
 - Do NOT mention this summarization request or that the context was compacted.
-- Output only the checkpoint text: do not call any tool or take any other action.
+- Do not call any tool. The only output is the checkpoint, followed by the session-memory block.
 - If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure."""
+
+
+# plan-548-2277：同一次压缩调用顺带产出一份「会话记忆」。
+# 分工是刻意的：摘要每轮都进上下文，必须短（≤3000 字符、8 段结构）；
+# 会话记忆只在需要时被检索，所以可以写得更详细（单条 200-1200 字符）。
+# 把细节直接塞进摘要会拉长常驻上下文，反而降低压缩收益——这正是本段存在的理由。
+COMPACTION_MEMORY_RULES = """
+## Second output — session memory (archive, not context)
+After the checkpoint, emit a `<session-memory>` block with the details that are too voluminous for
+the checkpoint but must not be lost: the reasoning behind decisions, rejected alternatives, exact
+error strings and how they were fixed, precise paths/commands/flags already established,
+unresolved questions, and the user's explicit constraints in the user's own words.
+
+Format — a strict JSON array, 0-12 items, each item:
+{"text": "<one self-contained detail, 200-1200 characters, same language as the checkpoint>",
+ "kind": "fact|convention|pitfall|decision",
+ "keywords": ["3-8 short search terms, Chinese and English both fine"]}
+
+Rules:
+- This block is NOT shown to you again; it is retrieved later by search. Write each item for a
+  reader who sees only that item: say what it is, why it matters, and what to do about it.
+- Do not restate what the checkpoint already covers in full — the checkpoint is the short version.
+- Return [] when nothing deserves archiving. Never invent facts.
+- Emit the checkpoint first, then the session-memory block. No other output.
+"""
+
+
+SESSION_MEMORY_OPEN_TAG = "<session-memory>"
+SESSION_MEMORY_CLOSE_TAG = "</session-memory>"
 
 
 def build_compaction_prompt(lang: str = "auto") -> str:
@@ -78,7 +109,7 @@ def build_compaction_prompt(lang: str = "auto") -> str:
         "syntax fragments verbatim.",
         lang_rule,
     )
-    return body
+    return body + COMPACTION_MEMORY_RULES
 
 
 # v30 前缀（英文原版，保持向后兼容导出）

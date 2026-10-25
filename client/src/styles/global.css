@@ -150,8 +150,7 @@ a { color: var(--accent); text-decoration: none; }
 .titlebar-right,
 .titlebar-more,
 .titlebar-folder-dropdown-wrap,
-.titlebar-menu,
-.titlebar-folder-menu {
+.titlebar-pop {
   -webkit-app-region: no-drag !important;
 }
 .titlebar { height: var(--titlebar-h); display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: default; }
@@ -182,15 +181,10 @@ a { color: var(--accent); text-decoration: none; }
   -webkit-app-region: no-drag !important;
   pointer-events: auto !important;
 }
-.titlebar-menu {
-  position: absolute;
-  left: 0;
-  top: 100%;
-  margin-top: 4px;
-  z-index: 100;
-  min-width: 120px;
-  -webkit-app-region: no-drag !important;
-}
+/* plan-20261025-popclip：标题栏菜单挂到 body（ui/Floating），外框由 .ui-floating 提供，这里只补内边距与宽度；
+   菜单会压在标题栏下沿附近，单独声明 no-drag，避免那一截落进窗口拖拽区 */
+.titlebar-pop { min-width: 150px; padding: var(--pop-pad); }
+.titlebar-pop.is-folder { min-width: 240px; }
 .titlebar-folder-dropdown-wrap {
   position: relative;
   flex-shrink: 0;
@@ -221,15 +215,6 @@ a { color: var(--accent); text-decoration: none; }
   opacity: 0.8;
   display: inline-flex;
   align-items: center;
-}
-.titlebar-folder-menu {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  margin-top: 4px;
-  z-index: 100;
-  min-width: 240px;
-  -webkit-app-region: no-drag !important;
 }
 .titlebar-folder-menu-item {
   display: flex;
@@ -666,7 +651,10 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 1px; /* v43: 紧凑密排，节距 = 8 + 1 = 9px（原 18px） */
+  /* plan-20261024-jumpfix：节距仍为 9px，但不再用 gap 撑开（原来 8px 可点区 + 1px 空隙）。
+     刻度行高 = 节距、按钮撑满行高，指针落在任意纵向位置都必命中某一条刻度，
+     消除「点在两刻度之间没反应 / 误命中相邻刻度」的盲区。 */
+  gap: 0;
   padding: 8px 4px;
   background: transparent;
 }
@@ -675,6 +663,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  width: 30px;
+  height: 9px;
 }
 .jump-tick-btn {
   display: flex;
@@ -682,7 +672,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   justify-content: flex-start;
   /* plan-282-1434（B4）：容纳 hover 时 16px 的最宽横条（原 24px 会被裁切） */
   width: 30px;
-  height: 8px;
+  /* plan-20261024-jumpfix：撑满行高（= 节距），使可点区连续无空缺 */
+  height: 100%;
   padding: 0;
   border: none;
   background: transparent;
@@ -1428,8 +1419,6 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 .composer-input::placeholder { color: var(--text-3); }
 .composer-right { display: flex; align-items: center; gap: 2px; flex-shrink: 1; min-width: 0; padding-bottom: 2px; }
-.composer-model-badge { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px; border-radius: var(--r-ctl); font-size: 12px; color: var(--text-2); cursor: pointer; border: none; background: transparent; transition: all var(--dur-fast); white-space: nowrap; height: 28px; min-width: 0; max-width: 100%; }
-.composer-model-badge:hover { background: var(--bg-hover); color: var(--text-1); }
 .composer-model-wrap { position: relative; min-width: 0; flex-shrink: 1; display: flex; }
 .composer-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 200px; max-height: 280px; overflow-y: auto; padding: 4px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-md); z-index: 1000; }
 .composer-model-menu { right: 0; left: auto; }
@@ -1842,10 +1831,10 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .automation-hint { font-size: 12px; color: var(--warning, #b45309); }
 .automation-actions { display: flex; align-items: center; gap: 10px; }
 .automation-create-wrap { position: relative; display: flex; }
-.automation-btn-primary { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: 8px 0 0 8px; background: var(--text-1); color: var(--bg-elevated); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: opacity var(--dur-fast); }
+/* 「新建自动化」是独立单按钮（不是分裂按钮的左段）：四角圆角一律走 --r-md 令牌。
+   旧实现残留了分裂按钮样式（左圆右直 8px 0 0 8px），右侧看得到直角。 */
+.automation-btn-primary { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--r-md); background: var(--text-1); color: var(--bg-elevated); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: opacity var(--dur-fast); }
 .automation-btn-primary:hover { opacity: 0.85; }
-/* 分裂按钮两段之间以间距分隔（不用竖线表达分组） */
-.automation-btn-caret { border-radius: 0 8px 8px 0; padding: 0 8px; margin-left: 2px; }
 .automation-create-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; min-width: 120px; }
 .automation-btn-ghost { height: 32px; padding: 0 14px; border-radius: var(--r-md); background: var(--bg-hover); color: var(--text-3); font-size: 13px; border: none; cursor: pointer; transition: all var(--dur-fast); }
 .automation-btn-ghost:hover { background: var(--bg-active); color: var(--text-1); }
@@ -2832,22 +2821,36 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   color: var(--text-1);
 }
 .approval-head-action { font-size: 13px; color: var(--text-2); }
-/* plan-522-2209：来源标注（仅在审批来自子会话时出现）——标题行末尾一行小字。
-   单行省略：窄宽度下先牺牲会话名，右侧「另有 N 项」是决策信息，必须完整保留。 */
-.approval-head-source {
-  font-size: 11.5px;
-  color: var(--text-3);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 1;
-}
+/* plan-549-2281 复盘修复：.approval-head-source（标题行末尾的来源小字）已随标题行标注
+   一起删除——来源信息由正文 .approval-source-line 承载，相邻两行不再重复 #N。 */
 /* 排队提示靠右，不抢标题行的工具名（plan-282-1530：多个审批依次处理时告知还有几项） */
 .approval-head-queue { margin-left: auto; font-size: 12px; color: var(--text-3); white-space: nowrap; }
 .approval-outside-hint {
   display: flex; align-items: center; gap: 6px;
   font-size: 11.5px; color: var(--warning);
+}
+/* plan-549-2281：审批主卡正文的来源行（「来自子代理 #N「任务标题」」）。
+   为什么放在正文而不是标题行：标题行只有一行的宽度，放不下任务标题；
+   来源是「谁在问」的说明，与标题行同级的正文行更不容易被挤掉。
+   层次用图标色 + 字号表达，不加左侧色条（项目规则禁止装饰性竖线）。 */
+.approval-source-line {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0;
+  font-size: 11.5px; line-height: 1.5;
+  color: var(--text-3);
+}
+.approval-source-line > svg { flex-shrink: 0; color: var(--info); }
+.approval-source-text {
+  display: flex; align-items: baseline; gap: 4px;
+  min-width: 0;
+}
+/* 标题单行省略：真正的全文在悬停提示里（Tooltip），这里不换行撑高卡片 */
+.approval-source-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
 }
 /* 命令原文：判断该不该放行的核心信息，等宽 + 浅底 + 可横向滚动 */
 .approval-cmd-block {
@@ -3714,22 +3717,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .settings-chip { padding: 3px 10px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: transparent; color: var(--text-2); font-size: 11px; cursor: pointer; transition: all var(--dur-fast); }
 .settings-chip:hover { border-color: var(--text-2); }
 .settings-chip.on { background: var(--bg-active); border-color: var(--text-1); color: var(--text-1); }
-/* v3.0 (plan-88): 子代理工具权限 checkbox 网格 */
-/* plan-41-227: 长工具名（mcp__* 系列）此前会撑破格子并溢出弹窗——列宽设下限、单元格内容省略 */
-.subagent-tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); gap: 6px; max-height: 220px; overflow-y: auto; padding: 2px; }
-.subagent-tool-cell { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: var(--r-sm); border: 1px solid var(--border); font-size: 11px; color: var(--text-2); cursor: pointer; user-select: none; transition: all var(--dur-fast); min-width: 0; overflow: hidden; }
-.subagent-tool-cell:hover { border-color: var(--text-2); }
-.subagent-tool-cell.on { background: var(--bg-active); border-color: var(--text-1); color: var(--text-1); }
-.subagent-tool-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
-.subagent-tool-risk { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--text-3); }
-/* v36: 设置中心「子代理」——并发与上限配置卡 */
-.subagent-limits { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-elevated); }
-.subagent-limits-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.subagent-limits-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
-.subagent-limits-row { display: flex; align-items: center; gap: 10px; }
-.subagent-limits-row label { font-size: 12px; color: var(--text-2); flex-shrink: 0; min-width: 140px; }
-.subagent-limits-input { width: 84px; flex-shrink: 0; }
-.subagent-limits-hint { font-size: 11px; color: var(--text-3); }
+/* plan-560-2311 E6：「子代理」设置页改版后，工具白名单网格（.subagent-tool-*）与并发上限配置卡
+   （.subagent-limits-*）都已无组件引用，样式随之删除，避免死代码误导后续改动。 */
 /* ═══════════════════════════════════════════════════════════
  * 弹窗组件（Modal / ConfirmDialog / 回滚确认等）
  * 统一迁移：移除内联 <style>，样式集中管理，毛玻璃/阴影令牌生效
@@ -3962,14 +3951,27 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
    plan-26-126 P2：同样取消系统 drag 区（原因见 .titlebar），保留布局与内边距不变。 */
 /* plan-128-518：.sb-head 退化为纯占位（控件由全局固定层 .nav-cluster 悬浮在此） */
 .sb-head { height: var(--titlebar-h); flex-shrink: 0; }
-/* 左上角导航控件组：绝对定位在窗口左上角，折叠 / 展开 / 设置页都不动。
+/* 左上角导航控件组：absolute 定位在窗口左上角，折叠 / 展开 / 设置页都不动。
    尺寸只有这一份：宽 --nav-cluster-w（标题栏让出的左侧宽度）、左内边距 10px、间距 4px、按钮 24px，最大化时跟随标题栏的 8px 外扩补偿。
    底色与底线不做「瞬时切换」：由左栏实时宽度 --pane-w 切出分界——分界左侧透明（透出左栏自身材质），
-   分界右侧才是标题栏同款底色与底线。分界与左栏右缘逐帧同位，顶部与下方不会错开。 */
+   分界右侧才是标题栏同款底色与底线。分界与左栏右缘逐帧同位，顶部与下方不会错开。
+
+   plan-565-2323 G13（固定层范式，新增固定层请照此复制）：
+     ① 顶层控件组一律 position: fixed，与 .win-cluster 同构，不参与普通流的拖拽区计算；
+     ② 容器 pointer-events: none（容器本身不拦截指针，空隙下方的卡片照常可拖可点）；
+     ③ 每个可交互元素（按钮 / logo）pointer-events: auto + 内联 WebkitAppRegion:"no-drag"；
+     ④ 这里同时兜底声明 no-drag !important——global.css:137-139 已记录过「仅靠父级 no-drag 的继承链
+        在部分环境下会被系统拖拽 hit-test 吞掉点击」，.nav-cluster 不在 .titlebar 清单内，必须自己强声明；
+     ⑤ 控件组的矩形不得与任何 -webkit-app-region: drag 的元素重叠（本次事故即 .sb-head 的 drag 罩住了它，
+        见 shell.css 的 .app-pane-left .sb-head 注释）。
+     遗留记录（plan-565-2323 G13，本轮不改）：.settings-page-overlay（本文件 2023 行附近，fixed、top:40、z-index 200）
+     在页面态会覆盖 [40,46] 的 6px 条带，与 .nav-cluster 盒底相交；目前不拦截按钮主体、不影响点击，
+     但它压在同一矩形上，属同一类隐患，纳入下轮整理。 */
 .nav-cluster {
-  position: absolute; left: 0; top: 0; z-index: 30;
+  position: fixed; left: 0; top: 0; z-index: 30;
   width: var(--nav-cluster-w); height: var(--titlebar-h); display: flex; align-items: center; gap: 4px;
-  padding: 0 10px; -webkit-app-region: no-drag;
+  padding: 0 10px; -webkit-app-region: no-drag !important;
+  pointer-events: none;
   background-image:
     linear-gradient(to right, transparent var(--pane-w), var(--border) var(--pane-w)),
     linear-gradient(to right, transparent var(--pane-w), var(--bg-panel) var(--pane-w));
@@ -3980,8 +3982,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* 最大化补偿与标题栏同源（plan-20261016-ux 问题 6）：只按实测外扩量下移 / 内缩，正常为 0，
    导航控件与标题栏始终同高、同一中线，左栏折叠 / 展开不影响其纵向位置 */
 .nav-cluster { padding-top: var(--win-inset-top, 0px); padding-left: calc(10px + var(--win-inset-left, 0px)); }
-.nav-cluster .sb-logo-img { margin: 0 4px 0 6px; }
-.nav-cluster button { -webkit-app-region: no-drag; }
+.nav-cluster .sb-logo-img { margin: 0 4px 0 6px; -webkit-app-region: no-drag !important; pointer-events: auto; }
+.nav-cluster button { -webkit-app-region: no-drag !important; pointer-events: auto; }
 /* 导航控件让出的左侧宽度：标题栏左缘的下限（见下方 .titlebar） */
 :root { --nav-cluster-w: 148px; }
 .titlebar-workspace { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: min(720px, 42vw); height: 100%; }
@@ -5024,6 +5026,12 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .subagent-panel-status-text { overflow: hidden; text-overflow: ellipsis; }
 /* v36 (plan-321-1600 M2): 头部元信息（用时 / 文件数 / 用量） */
 .subagent-panel-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* plan-565-2323 G8：终止按钮是操作而非元信息——不继承上面那条「元信息之间的 · 分隔点」，
+   与左侧内容之间由 margin-left:auto 推开（间距 ≥ 8px），自身不再加装饰。 */
+.subagent-panel-facts > .subagent-panel-stop::before { content: none; }
+.subagent-panel-facts > .subagent-panel-stop { margin-left: auto; }
+/* 终止确认弹窗的正文：窄弹窗里显式行高，避免两行文案挤在一起 */
+.subagent-stop-note { font-size: 13px; line-height: 1.6; color: var(--text-2); }
 /* v20: 消息体交给共享 message-flow 插件（自身不滚动，滚动由插件容器承担） */
 .subagent-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
 .subagent-panel-empty { padding: 24px 12px; text-align: center; color: var(--text-3); font-size: 12px; }

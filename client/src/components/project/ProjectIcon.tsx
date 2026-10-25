@@ -6,21 +6,23 @@ import { projectColorVar, projectIconKey } from "./projectMeta";
 
 const DEF_BY_KEY = new Map(PROJECT_ICON_DEFS.map((d) => [d.key, d]));
 
-export const ProjectIcon = memo(function ProjectIcon({ icon, color, size = 16, tile = false, tileSize, className }: {
+export const ProjectIcon = memo(function ProjectIcon({ icon, color, size = 16, tile = false, tileSize, mono = false, className }: {
   icon?: string | null;
   color?: string | null;
   size?: number;
   /** 块状（项目色淡底的圆角方块），用于名称输入框左侧 / 选择器预览 */
   tile?: boolean;
   tileSize?: number;
+  /** plan-20261025-shell（需求 3）：单色线稿（取宿主文字色、不画底色层），用于图标选择器里未选中的格子 */
+  mono?: boolean;
   className?: string;
 }) {
   const def = DEF_BY_KEY.get(projectIconKey(icon)) ?? PROJECT_ICON_DEFS[0];
   const box = tile ? (tileSize ?? Math.round(size * 1.75)) : size;
   return (
     <span
-      className={"proj-ic" + (tile ? " is-tile" : "") + (className ? ` ${className}` : "")}
-      style={{ ["--proj-c" as string]: projectColorVar(color), width: box, height: box }}
+      className={"proj-ic" + (tile ? " is-tile" : "") + (mono ? " is-mono" : "") + (className ? ` ${className}` : "")}
+      style={{ ...(mono ? {} : { ["--proj-c" as string]: projectColorVar(color) }), width: box, height: box }}
       aria-hidden
     >
       <svg width={size} height={size} viewBox="0 0 256 256" fill="currentColor">

@@ -14,6 +14,12 @@ plan-20261020-bgtask：
   · 用户在界面上手动停止的单独成类（BG_COMMAND_STOPPED）：只让会话知道，不叫醒空闲会话；
   · 落库消息带结构化条目 `bg_items`，前端据此渲染，不必从摘要文本里反向解析；
   · 进程启动 / 退出事件（bg.process.started / exited）由注册表即时广播，这里不再重复广播。
+
+plan-20261025-bgturn：通知落库时必须带上命令所属的 turn（`mailbox.publish(turn_id=...)`）。
+此前它恒为 None，而撤回只软删 `turn_id >= 目标轮` 的消息——用户「先停后台命令、再撤回该轮」之后，
+那条「[后台命令已被用户停止]」永远留在消息流里（已比对数据库确认）。现在两个口子都堵上：
+  · 落库带 turn_id，撤回时跟着一起软删；
+  · 合并窗口内该轮已被撤回的，直接不投递。
 """
 from __future__ import annotations
 
@@ -88,6 +94,47 @@ def _bg_items(items: list[dict]) -> list[dict]:
     ]
 
 
+async def _turn_revoked(turn_ids: set[int]) -> set[int]:
+    """这些 turn 里已被撤回（rolled_back）的集合（plan-20261025-bgturn）。
+
+    合并窗口（`MERGE_WINDOW_S`）内用户可能已经把那一轮撤回了：此时进程退出事件早晚会走到
+    这里，若照旧投递，就会在消息流里重新冒出一条属于已撤销轮的「后台命令已被用户停止」。
+    查库而不是只看内存标记——回滚可能发生在另一个请求里，也可能在窗口开启前。
+    查询失败时返回空集（宁可多一条通知，也不能让正常通知消失）。
+    """
+    if not turn_ids:
+        return set()
+    try:
+        from sqlalchemy import select
+
+        from app.persistence.database import async_session_factory
+        from app.persistence.models.turn import Turn
+
+        async with async_session_factory() as db:
+            res = await db.execute(
+                select(Turn.id).where(
+                    Turn.id.in_(list(turn_ids)),
+                    Turn.status == "rolled_back",
+                )
+            )
+            return {int(r) for r in res.scalars().all()}
+    except Exception:  # noqa: BLE001 — 查不到就当作未撤回
+        logger.warning("[bg.notify] 查询 turn 回滚状态失败 turns=%s", turn_ids, exc_info=True)
+        return set()
+
+
+def _batch_turn_id(items: list[dict]) -> int | None:
+    """一批条目同属一轮时返回该 turn，否则 None（plan-20261025-bgturn）。
+
+    落库消息只能带一个 turn_id，而合并窗口内可能混入不同轮的命令。同轮（绝大多数情况）
+    落上归属，撤回那一轮时能一起软删；跨轮时宁可保持 None，不能把后一轮的通知误挂到前一轮。
+    """
+    ids = {int(it["turn_id"]) for it in items if it.get("turn_id") is not None}
+    if len(ids) == 1 and all(it.get("turn_id") is not None for it in items):
+        return ids.pop()
+    return None
+
+
 async def _flush(session_id: int) -> None:
     try:
         await asyncio.sleep(MERGE_WINDOW_S)
@@ -100,6 +147,13 @@ async def _flush(session_id: int) -> None:
     items = [it for it in items if not bg_process_registry.is_observed(str(it.get("shell_id") or ""))]
     if not items:
         return
+    # plan-20261025-bgturn：本轮已被撤回的命令不再提示（进程停止的额外提示已由撤回流程终止）
+    revoked = await _turn_revoked({int(it["turn_id"]) for it in items if it.get("turn_id") is not None})
+    if revoked:
+        items = [it for it in items
+                 if it.get("turn_id") is None or int(it["turn_id"]) not in revoked]
+        if not items:
+            return
     stopped = [it for it in items if it.get("stopped_by") == "user"]
     finished = [it for it in items if it.get("stopped_by") != "user"]
 
@@ -112,6 +166,7 @@ async def _flush(session_id: int) -> None:
                 session_id=session_id,
                 text=_format(finished),
                 extra={"bg_items": _bg_items(finished)},
+                turn_id=_batch_turn_id(finished),
             )
         if stopped:
             await mailbox.publish(
@@ -119,6 +174,7 @@ async def _flush(session_id: int) -> None:
                 session_id=session_id,
                 text=_format_stopped(stopped),
                 extra={"bg_items": _bg_items(stopped)},
+                turn_id=_batch_turn_id(stopped),
             )
     except Exception:  # noqa: BLE001 — 投递失败只记日志，进程记录本身仍然可查
         logger.warning("[bg.notify] 投递失败 session=%s", session_id, exc_info=True)

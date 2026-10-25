@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import codecs
 import difflib
+import heapq
 import os
 import re
 from dataclasses import dataclass
@@ -128,6 +129,18 @@ class ReplaceResult:
     # exact / line_numbers / trailing_ws / indent —— 非 exact 时在工具输出里说明，便于模型下次写准
     strategy: str = "exact"
     error: str = ""
+    # plan-548-2277：命中区间（1-based，含首尾行）。replace_all 时给第一处。
+    # 供「先读后改」闸门判断模型是否读过目标区域——没有区间就无法判断“要改的那几行看过没”。
+    start_line: int = 0
+    end_line: int = 0
+    # plan-549-2281 复盘修复：replace_all 的**全部**命中区间（上限 50 处，闸门是启发式）。
+    # 此前闸门只校验第一处——其余替换位置未读过时静默放行；空列表 = 单处替换，
+    # 调用方回落到 start_line/end_line。
+    spans: list = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.spans is None:
+            self.spans = []
 
 
 STRATEGY_NOTES = {
@@ -332,24 +345,103 @@ def _format_snippet(file_lines: list[str], start: int, end: int) -> str:
     return "\n".join(f"{i + 1:>{width}}: {file_lines[i]}" for i in range(start, end))
 
 
+# ── 失配提示的相似行筛选（plan-568-2333 P7）─────────────────────────────────
+# 改造前：为文件**每一行**构造 SequenceMatcher 精算相似度（每行一次 O(p·s) 的比对）。
+# 文件上限 8MB、编辑链路又是同步执行，一次失败编辑可能把数秒 CPU 花在生成提示上，
+# 期间事件循环全程被阻塞。改为漏斗式筛选，只对少量真正可能命中的行做精算：
+#   ① 长度窗口：ratio = 2M/(p+s)，要 ≥ 阈值 0.6 时 s 必然落在 [3p/7, 7p/3] 内，
+#      这里取更宽的 [0.4p, 2.5p] 兜住临界值（数学上安全）；
+#   ② 字符交集：没有公共字符则 M = 0、比例必为 0，C 层 isdisjoint 一次判定；
+#   ③ 候选仍超限时先用 _near_score 廉价排序，只留前 _NEAREST_MAX_EXACT 条精算；
+#      再以累计比对规模 _NEAREST_DP_BUDGET 兜底，避免超长行（minified）吃光预算。
+# ①② 只丢掉「比例必然低于阈值」的行，所以「是否存在够相似的行」这一判定与原实现一致；
+# ③ 仅在超大候选集上退化为启发式，提示文案结构与片段展示格式均未改动。
+_NEAREST_MIN_RATIO = 0.6
+_NEAREST_TOP_N = 8
+_NEAREST_MAX_EXACT = 1500
+_NEAREST_DP_BUDGET = 8_000_000
+
+
+def _near_score(probe: str, s: str) -> int:
+    """廉价相似度打分（不构造 SequenceMatcher）：公共前后缀越长、长度越接近分越高。
+
+    只用来在候选过多时挑出送精算的那一批，不参与阈值判定。前后缀按字符逐个比较，
+    绝大多数行在前几个字符处就退出，成本远低于一次完整的序列比对。
+    """
+    a, b = len(probe), len(s)
+    lim = a if a < b else b
+    pref = 0
+    while pref < lim and probe[pref] == s[pref]:
+        pref += 1
+    suf = 0
+    while suf < lim - pref and probe[a - 1 - suf] == s[b - 1 - suf]:
+        suf += 1
+    return (pref + suf) * 8 - abs(a - b)
+
+
+def _nearest_line(file_lines: list[str], probe: str) -> tuple[int, float]:
+    """找与 probe 最相似的行：返回 (行下标, 相似度)；没有候选时返回 (-1, 0.0)。"""
+    p = len(probe)
+    if not p:
+        return -1, 0.0
+    lo = p * 2 // 5   # 0.4p：真实下界 3p/7 ≈ 0.43p，放宽避免漏掉临界行
+    hi = p * 5 // 2   # 2.5p：真实上界 7p/3 ≈ 2.33p，同样放宽
+    pchars = set(probe)
+    cands: list[int] = []
+    for i, line in enumerate(file_lines):
+        s = line.strip()
+        n = len(s)
+        if not n or n < lo or n > hi:
+            continue
+        if pchars.isdisjoint(s):
+            continue
+        if s == probe:
+            return i, 1.0   # 整行相同即最优，无需再比
+        cands.append(i)
+    if not cands:
+        return -1, 0.0
+    if len(cands) > _NEAREST_MAX_EXACT:
+        # 候选过多：先按廉价分取靠前的一批，保证精算次数有硬上限
+        cands = heapq.nlargest(
+            _NEAREST_MAX_EXACT, cands,
+            key=lambda i: _near_score(probe, file_lines[i].strip()),
+        )
+    # 按相似度降序保留前 _NEAREST_TOP_N 条（小顶堆）。堆顶即第 N 名，用它当剪枝阈值，
+    # 堆内最大值就是全局最相似的那一行——与改造前维护单点 best 的结果等价。
+    top: list[tuple[float, int]] = []
+    budget = _NEAREST_DP_BUDGET
+    exact = 0
+    for i in cands:
+        s = file_lines[i].strip()
+        cost = p * len(s)
+        # 至少精算一条候选，保证超长行文件仍有提示；其余受累计预算约束
+        if exact and cost > budget:
+            continue
+        budget -= cost
+        exact += 1
+        sm = difflib.SequenceMatcher(None, probe, s, autojunk=False)
+        floor = top[0][0] if len(top) >= _NEAREST_TOP_N else 0.0
+        if sm.real_quick_ratio() <= floor or sm.quick_ratio() <= floor:
+            continue
+        r = sm.ratio()
+        if len(top) < _NEAREST_TOP_N:
+            heapq.heappush(top, (r, -i))
+        elif (r, -i) > top[0]:
+            heapq.heapreplace(top, (r, -i))
+    if not top:
+        return -1, 0.0
+    best_r, neg_i = max(top)   # 同分时取更靠前的行，与「严格大于才更新」一致
+    return -neg_i, best_r
+
+
 def _nearest_hint(file_lines: list[str], old_lines: list[str]) -> str:
     """未命中时：找文件里与 old_text 首个非空行最相近的位置，给出原文片段与差异提示。"""
     probe_idx = next((k for k, l in enumerate(old_lines) if l.strip()), None)
     if probe_idx is None:
         return ""
     probe = old_lines[probe_idx].strip()
-    best_i, best_r = -1, 0.0
-    for i, line in enumerate(file_lines):
-        s = line.strip()
-        if not s:
-            continue
-        sm = difflib.SequenceMatcher(None, probe, s, autojunk=False)
-        if sm.real_quick_ratio() <= best_r or sm.quick_ratio() <= best_r:
-            continue
-        r = sm.ratio()
-        if r > best_r:
-            best_i, best_r = i, r
-    if best_i < 0 or best_r < 0.6:
+    best_i, best_r = _nearest_line(file_lines, probe)
+    if best_i < 0 or best_r < _NEAREST_MIN_RATIO:
         return "文件中没有找到相近的内容，请先用 fs_read 重新读取文件，确认要修改的位置与原文。"
     start = best_i - probe_idx
     span = len(old_lines)
@@ -397,6 +489,11 @@ def _whitespace_replace(content: str, old_text: str, new_text: str,
     out = content
     applied = 0
     last_start = len(out) + 1
+    # plan-549-2281 复盘修复：记录每个实际应用处「原文里的真实行区间」。此前 end_line
+    # 用 old_text.count("\n") 估算——该策略允许换行位置不同，文件里实际跨的行数可能与
+    # old_text 不一致，闸门区间会偏移；且 replace_all 只报第一处。区间按原 content 计算
+    # （从后往前替换，当前命中位置之前的下标在 content 与 out 中一致）。
+    applied_spans: list[tuple[int, int]] = []
     # 归一化命中位置 → 原文字符区间；从后往前替换，前面下标不受影响
     for i in sorted(hits, reverse=True):
         raw_start = pos[i]
@@ -414,10 +511,19 @@ def _whitespace_replace(content: str, old_text: str, new_text: str,
             if new_lines and _lead(new_lines[0]) == old_ind:
                 new_lines[0] = new_lines[0][len(old_ind):]
             new_lines = _reindent(new_lines, old_ind, file_ind)
+        applied_spans.append(
+            (_line_no_of(content, raw_start), _line_no_of(content, max(raw_start, raw_end - 1)))
+        )
         out = out[:raw_start] + "\n".join(new_lines) + out[raw_end:]
         applied += 1
         last_start = raw_start
-    return ReplaceResult(True, out, applied, "whitespace")
+    applied_spans.reverse()  # 收集时从后往前，倒回文件顺序
+    _first_span = applied_spans[0] if applied_spans else (0, 0)
+    return ReplaceResult(
+        True, out, applied, "whitespace",
+        start_line=_first_span[0], end_line=_first_span[1],
+        spans=applied_spans[:50],
+    )
 
 
 def apply_replacement(content: str, old_text: str, new_text: str, replace_all: bool = False) -> ReplaceResult:
@@ -436,7 +542,24 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
     # 1) 精确匹配
     count = content.count(old_text)
     if count == 1 or (count > 1 and replace_all):
-        return ReplaceResult(True, content.replace(old_text, new_text, -1 if replace_all else 1), count)
+        _first = content.find(old_text)
+        _start = _line_no_of(content, _first) if _first >= 0 else 0
+        # plan-549-2281 复盘修复：replace_all 时给出全部命中区间（供闸门逐处校验），
+        # 上限 50 处——闸门是启发式（默认 warn），超量的仓库级批量替换不必逐处数行号。
+        _spans: list[tuple[int, int]] = []
+        if replace_all:
+            _nl = old_text.count("\n")
+            _pos = content.find(old_text)
+            while _pos != -1 and len(_spans) < 50:
+                _s = _line_no_of(content, _pos)
+                _spans.append((_s, _s + _nl))
+                _pos = content.find(old_text, _pos + 1)
+        return ReplaceResult(
+            True, content.replace(old_text, new_text, -1 if replace_all else 1), count,
+            start_line=_start,
+            end_line=(_start + old_text.count("\n")) if _start else 0,
+            spans=_spans,
+        )
     if count > 1:
         idxs: list[int] = []
         pos = content.find(old_text)
@@ -505,6 +628,12 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
         # 从后往前替换，前面的下标不受影响；重叠窗口只取不重叠的部分
         applied = 0
         last_start = len(out) + 1
+        # plan-560-2311 D2：整行宽松匹配（trailing_ws / indent）此前没回填 spans——
+        # ReplaceResult 的第 4 个位置参数是 strategy，闸门于是在 replace_all 时回落到
+        # 单区间、只校验第一处；end_line 还写成 i + 1，把匹配窗口的行数 n 漏掉了。
+        # 区间按「真正执行过替换」的窗口收集：下面的 `if i + n > last_start: continue`
+        # 会跳过重叠窗口，被跳过的一处并没有改文件，不能算进闸门校验范围。
+        applied_spans: list[tuple[int, int]] = []
         for i in sorted(hits, reverse=True):
             if i + n > last_start:
                 continue
@@ -513,9 +642,16 @@ def apply_replacement(content: str, old_text: str, new_text: str, replace_all: b
                 k = next((j for j, l in enumerate(old_lines) if l.strip()), 0)
                 repl = _reindent(new_lines, _lead(old_lines[k]), _lead(file_lines[i + k]))
             out[i:i + n] = repl
+            applied_spans.append((i + 1, i + n))
             applied += 1
             last_start = i
-        return ReplaceResult(True, "\n".join(out), applied, strategy)
+        applied_spans.reverse()  # 收集时从后往前，倒回文件顺序
+        _first_span = applied_spans[0] if applied_spans else (min(hits) + 1, min(hits) + n)
+        return ReplaceResult(
+            True, "\n".join(out), applied, strategy,
+            start_line=_first_span[0], end_line=_first_span[1],
+            spans=applied_spans[:50],
+        )
 
     # 6) 跨行空白归一化：允许换行位置不同（模型把两行并成一行 / 把一行拆成多行）
     ws_res = _whitespace_replace(content, old_text, new_text, replace_all)

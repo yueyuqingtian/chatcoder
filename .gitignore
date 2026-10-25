@@ -222,6 +222,11 @@ scripts/
 # 前端构建脚本（设计规范守卫，npm run build 依赖）必须入库：上一条 scripts/ 会把它一并忽略，
 # 干净检出（GitHub Actions 打包）时 lint:design 找不到脚本，构建直接失败
 !/client/scripts/
+# 后端测试分级脚本同样会被忽略：它是日常「改完跑哪一档」的唯一入口，
+# 不入库的话干净检出后无法按 fast/file/changed/full 分级跑测（plan-549-2281）
+!/server/scripts/
+# 但该目录下有历史遗留的临时调试脚本，不入库
+/server/scripts/tmp_*
 dist_log.txt
 client/build_out.txt
 client/vite.config.js

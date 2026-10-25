@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════
  * 输入框 v3（plan-20261009-ui U2）
  *  · 输入卡：圆角 12、白底、极淡双层阴影；聚焦只加深边框与阴影（无品牌色描边）；
- *  · 工具条：左「+ · 附件 · 执行模式 · 权限」，右「模型 · 思考深度 · 上下文 · 发送」，控件统一 28~32px；
+ *  · 工具条：左「+ · 附件 · 执行模式 · 权限」，右「上下文 · 模型与思考深度 · 发送」，控件统一 28~32px；
  *  · 浮层：全部走 ui/Popover（圆角 14 / 内边距 6 / 菜单项 8）；
  *  · 排队托盘：输入卡上方独立托盘；工作区胶囊：输入卡左下。
  * 新类名统一 cc- 前缀，不与 global.css 旧规则互相覆盖。
@@ -62,7 +62,7 @@
 }
 .cc-icon-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 
-/* 胶囊按钮（执行模式 / 权限 / 思考深度）：28px 高、8px 圆角，无底色，悬停浅底 */
+/* 胶囊按钮（执行模式 / 权限 / 模型与思考深度）：28px 高、8px 圆角，无底色，悬停浅底 */
 .cc-chip {
   display: inline-flex;
   align-items: center;
@@ -92,17 +92,21 @@
 .cc-mode-chip.tone-accent:hover, .cc-mode-chip.tone-accent.is-open { background: color-mix(in oklab, var(--info) 16%, transparent); color: var(--info); }
 .cc-mode-chip.tone-muted { color: var(--text-3); }
 
-/* 模型选择触发器与胶囊同规格 */
-.cc-tools-right .composer-model-badge { height: 28px; padding: 0 9px; border-radius: var(--r-ctl); font-size: 12.5px; }
+/* 模型与思考深度触发器（plan-20261025-composer，参考图1）：纯文字「模型名 档位 ⌄」，不带图标——
+ * 模型名是主信息（随胶囊次深色 500），档位是附注（弱色 400），箭头示意可展开；全名与供应商在悬停提示里。 */
+.cc-model-name { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.cc-model-effort { flex-shrink: 0; color: var(--text-3); font-weight: 400; transition: color var(--dur-2) var(--ease-standard); }
+.cc-model-chip:hover .cc-model-effort, .cc-model-chip.is-open .cc-model-effort { color: var(--text-2); }
 
 /* 上下文圆环：命中区与其它图标按钮同高 */
 .cc-tools-right .composer-usage-ring { width: 28px; height: 28px; border-radius: var(--r-ctl); }
 
-/* 发送 / 停止 / 排队：同一枚 32px 圆，三态只换底色与图形（图形带弹簧形变，按钮位置与大小不变）
- *  · 发送：实心主色 + 箭头；输入为空时降为浅灰（禁用）；
+/* 发送 / 停止 / 排队：同一枚 32px 方正微圆角按钮（控件圆角令牌），三态只换图形（弹簧形变，位置与大小不变）
+ *  · 发送：实心主色 + 箭头；只有「空闲且没有可发送内容」时降为浅灰（禁用）；
  *  · 停止：实心主色 + 圆角方块——与发送同一视觉重量，不加外圈、不加循环动画
  *    （运行态已由消息流里的「处理中」与侧栏会话状态图标表达，按钮自己不必再动）；
- *  · 排队：浅灰底 + 深色箭头（次要：稍后发送），悬停才变实心；不描边。 */
+ *  · 排队：与发送完全同色——plan-20261025-composer：执行中输入文字后按钮由停止变回发送，
+ *    此前浅灰底被用户读作「不能发送」；「稍后发送」的语义交给悬停提示，不再靠灰底表达。 */
 .cc-send {
   position: relative;
   display: inline-flex;
@@ -113,7 +117,7 @@
   flex-shrink: 0;
   margin-left: 2px;
   border: none;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-ctl);
   background: var(--accent);
   color: var(--accent-contrast);
   cursor: pointer;
@@ -122,8 +126,6 @@
 .cc-send:hover:not(:disabled) { background: var(--accent-hover); transform: scale(1.06); }
 .cc-send:active:not(:disabled) { transform: scale(0.92); }
 .cc-send:disabled { background: var(--bg-active); color: var(--text-3); cursor: not-allowed; }
-.cc-send.is-queue { background: var(--bg-active); color: var(--text-1); }
-.cc-send.is-queue:hover:not(:disabled) { background: var(--accent); color: var(--accent-contrast); }
 
 /* ── 输入卡下方：工作区胶囊 ─────────────────────────────── */
 .cc-under { display: flex; align-items: center; gap: var(--sp-3); min-height: 26px; margin-top: 6px; padding: 0 2px; }
@@ -173,20 +175,26 @@
 .cc-approval-pop { width: 300px; }
 .cc-ws-pop { width: 340px; }
 
-/* 思考深度：分档滑块（参考图6） */
-/* plan-128-518：弹窗缩到 240px，标题行 + 带端点的滑块行 + 一行次要操作，不再显示刻度名与“推荐” */
-.cc-effort-pop { width: 240px; padding-bottom: 6px; }
-.cc-effort-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); padding: 10px 14px 0; }
-.cc-effort-title { font-size: 13px; color: var(--text-2); }
-.cc-effort-value { font-size: 14px; font-weight: 600; color: var(--text-1); }
-.cc-effort-slider { display: flex; align-items: center; gap: var(--sp-3); padding: 8px 14px 4px; }
-.cc-effort-slider .ui-step { flex: 1 1 auto; min-width: 0; }
-.cc-effort-end { flex: none; font-size: 11px; color: var(--text-3); }
-.cc-effort-manage { display: flex; align-items: center; justify-content: center; gap: 6px; width: calc(100% - 12px); margin: 4px 6px 0; height: 28px; border: 0; border-radius: var(--r-md); background: transparent; font: inherit; font-size: 12px; color: var(--text-3); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
-.cc-effort-manage:hover { background: var(--bg-hover); color: var(--text-1); }
+/* 模型与思考深度浮层（plan-20261025-composer，参考图2）：
+ * 当前供应商行（悬停展开旁边的供应商列表）→「模型」列表 → 思考深度滑块（最高档轨道里粒子流动）。
+ * 两层都是 ui/Floating（挂到 body，不被中间卡片的 overflow 裁掉）；Floating 本体不带内边距，
+ * 内边距写在内容盒上——主浮层据内容盒判定「点外部」，列表的边距区也要算在盒内。 */
+.cc-model-pop { width: 264px; padding: var(--pop-pad); }
+.cc-mp-prov-row { gap: 8px; }
+/* 供应商头像在 20px 下用小圆角：设置页的 8px 圆角放到这里几乎成了圆点 */
+.cc-mp-prov-row .prov-avatar { border-radius: var(--r-sm); }
+:is(.cc-model-pop, .cc-prov-pop) .pop-item-title { min-width: 0; }
+:is(.cc-model-pop, .cc-prov-pop) .ui-badge { flex-shrink: 0; }
+.cc-mp-models { max-height: min(264px, 38vh); }
+.cc-model-tags { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.cc-mp-effort { padding: 6px 10px 4px; }
+.cc-mp-effort-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: 12px; user-select: none; }
+.cc-mp-effort-title { color: var(--text-3); }
 /* 档位名切换：新值从下方轻轻升起（key 随档位变化重挂载，动画自动重放） */
-.cc-effort-value { display: inline-block; animation: cc-effort-swap var(--dur-spring) var(--spring-soft) both; }
+.cc-mp-effort-value { display: inline-block; font-size: 12.5px; font-weight: 600; color: var(--text-1); animation: cc-effort-swap var(--dur-spring) var(--spring-soft) both; }
 @keyframes cc-effort-swap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.cc-prov-pop { width: 224px; padding: var(--pop-pad); }
+.cc-prov-list { max-height: min(300px, 50vh); }
 
 /* ── 引用 / 附件 chips：胶囊 + 按类型着色 ──────────────── */
 .composer-refs { gap: 6px; padding: 0 0 8px; }
@@ -214,54 +222,53 @@
 .composer-attach-chip .remove { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: var(--r-pill); }
 .composer-attach-chip .remove:hover { background: var(--bg-active); }
 
-/* ── 排队托盘 ───────────────────────────────────────────── */
+/* ── 排队托盘（plan-20261025-shell 需求 9）───────────────────
+   像从输入卡背后抽出的抽屉：左右各比输入卡收进 12px、只有上圆角、底边压在输入卡顶边之下（-1px 叠住描边），
+   与输入卡连成一体而不是另起一张卡；条目不再各套一层描边小卡，序号弱化成灰色数字，层次只靠留白与悬停底色。
+   plan-20261025-composer：去掉标题行、条目收到 30px、托盘内边距收紧（底边 6px 含 1px 叠边）；
+   操作图标常显（弱色，悬停加深）——悬停才出现的按钮让人找不到操作。字号跟随对话字号。 */
 .cc-queue {
-  margin: 0 0 8px;
-  padding: 6px 6px 2px;
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-card);
+  position: relative;
+  z-index: 0;
+  margin: 0 12px -1px;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--r-card) var(--r-card) 0 0;
   background: var(--surface-tray);
   animation: mo-rise-in var(--dur-4) var(--spring-soft) both;
 }
-.cc-queue-head { display: flex; align-items: center; gap: 6px; padding: 2px 6px 6px; min-width: 0; }
-.cc-queue-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
-.cc-queue-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-3); }
-.cc-queue-clear {
-  flex-shrink: 0; height: 22px; padding: 0 8px; border: none; border-radius: var(--r-ctl);
-  background: transparent; color: var(--text-3); font-size: 11.5px; cursor: pointer;
-}
-.cc-queue-clear:hover { background: var(--bg-hover); color: var(--text-1); }
-.cc-queue-slot { margin-bottom: 4px; }
+.cc-queue-slot { margin: 0; }
 .cc-queue-slot > * { animation: mo-slide-in var(--dur-4) var(--spring-soft) both; }
 .cc-queue-item {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  min-height: 34px;
-  padding: 3px 4px 3px 8px;
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-ctl);
-  background: var(--surface-inset);
-  transition: border-color var(--dur-2) var(--ease-standard);
+  min-height: 30px;
+  padding: 1px 3px 1px 8px;
+  border-radius: var(--r-md);
+  background: transparent;
+  transition: background var(--dur-2) var(--ease-standard);
 }
-.cc-queue-item:hover { border-color: var(--border-hover); }
+.cc-queue-item:hover,
+.cc-queue-item:focus-within { background: var(--bg-hover); }
 .cc-queue-idx {
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
-  width: 20px; height: 20px; border-radius: var(--r-pill);
-  background: var(--bg-hover); color: var(--text-2);
-  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+  width: 16px;
+  color: var(--text-3);
+  font-size: calc(var(--fs-md, 13px) - 1.5px); font-weight: 500; font-variant-numeric: tabular-nums;
 }
-.cc-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text-1); }
-.cc-queue-attach { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.cc-queue-ops { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: 0.35; transition: opacity var(--dur-2) var(--ease-standard); }
-.cc-queue-item:hover .cc-queue-ops, .cc-queue-item:focus-within .cc-queue-ops { opacity: 1; }
-.cc-queue-sending { font-size: 11.5px; color: var(--info); padding: 0 6px; }
+.cc-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(var(--fs-md, 13px) - 0.5px); color: var(--text-1); }
+.cc-queue-attach { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: calc(var(--fs-md, 13px) - 1.5px); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cc-queue-ops { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+/* 行悬停已是 --bg-hover，按钮自身悬停再深一档，否则在悬停行里看不出按到了哪一枚 */
+.cc-queue-ops .ui-icon-btn:hover:not(:disabled) { background: var(--bg-active); }
+.cc-queue-sending { font-size: calc(var(--fs-md, 13px) - 1.5px); color: var(--text-3); padding: 0 6px; }
+/* 发送中：整行淡淡的流光 + 序号位换成转圈（操作区只剩「移除」与发送中说明） */
 .cc-queue-item.is-flushing {
-  border-color: color-mix(in oklab, var(--info) 35%, transparent);
-  background: linear-gradient(100deg, var(--surface-inset) 30%, color-mix(in oklab, var(--info) 10%, var(--surface-inset)) 50%, var(--surface-inset) 70%) 0 0 / 200% 100%;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in oklab, var(--text-1) 6%, transparent) 50%, transparent 70%) 0 0 / 200% 100%;
   animation: mo-shimmer 1.4s linear infinite;
 }
-.cc-queue-item.is-flushing .cc-queue-ops { opacity: 1; }
 
 /* 目标胶囊（输入卡内顶部）：与引用 chips 同一胶囊语言 */
 /* plan-128-518：目标胶囊配色改走 --accent，随主题世界变化（此前固定绿色） */
@@ -270,21 +277,19 @@
 .goal-pill-btn { width: 22px; height: 22px; }
 
 /* 窄面板收档：useToolbarFit 按工具条宽度写入 data-fit（空格分隔的已收起项），
- * 依次收起 模型名 → 思考深度文字 → 执行模式文字 → 权限文字 → 紧凑内边距 → 执行模式整枚，
- * 只剩图标，名称由悬停提示承接。
- * 右侧每个控件都不收缩（包括模型徽标）：只要允许收缩，最窄档就会被压成几像素宽、
- * 图标被裁掉一半，看起来像残影。宽度一律由收档规则控制，不做像素级压缩。 */
+ * 依次 模型名限宽 → 收起思考深度档位 → 执行模式文字 → 权限文字 → 紧凑内边距 → 最窄档，名称由悬停提示承接。
+ * plan-20261025-composer：模型触发器不带图标，模型名不能整段隐藏（只剩箭头就认不出是什么），只逐档限宽省略。
+ * 右侧每个控件都不收缩：只要允许收缩，最窄档就会被压成几像素宽、看起来像残影。宽度一律由收档规则控制。 */
 .cc-tools-right > .cc-anchor { flex-shrink: 0; }
-.cc-tools-right > .composer-model-wrap { flex-shrink: 0; }
-.cc-tools-right .mp-label { min-width: 56px; }
-.cc-toolbar[data-fit~="model"] .mp-label { display: none; }
-.cc-toolbar[data-fit~="effort"] .cc-effort-chip .cc-chip-label { display: none; }
+.cc-toolbar[data-fit~="model"] .cc-model-name { max-width: 120px; }
+.cc-toolbar[data-fit~="effort"] .cc-model-effort { display: none; }
 .cc-toolbar[data-fit~="mode"] .cc-mode-chip .cc-chip-label { display: none; }
 .cc-toolbar[data-fit~="approval"] .cc-approval-chip :is(.cc-chip-label, .cc-chip-caret) { display: none; }
 .cc-toolbar[data-fit~="tight"] { gap: 4px; }
-.cc-toolbar[data-fit~="tight"] :is(.cc-chip, .composer-model-badge) { padding: 0 7px; }
+.cc-toolbar[data-fit~="tight"] .cc-chip { padding: 0 7px; }
+.cc-toolbar[data-fit~="tight"] .cc-model-name { max-width: 88px; }
 
-/* ultra：右面板最小宽度（280px）时工具条只有约 209px，左右两组图标刚好填满，
+/* ultra：右面板最小宽度（280px）时工具条只有约 209px，左右两组刚好填满，
  * 字体略宽就会叠字。执行模式整枚收起——它的入口本就是「+」菜单（内含模式切换），
  * Shift+Tab 也能切，把位置让给附件与发送。 */
 .cc-toolbar[data-fit~="ultra"] { gap: 2px; }
@@ -292,6 +297,9 @@
 /* 上下文占用圆环是纯信息展示（非操作入口），最窄档让位给附件与发送；
  * 宽屏与主对话仍照常显示。 */
 .cc-toolbar[data-fit~="ultra"] .composer-usage { display: none; }
+/* 模型名收到 56px、展开箭头让位：触发器仍是一段可点的文字，全名与档位在悬停提示里 */
+.cc-toolbar[data-fit~="ultra"] .cc-model-name { max-width: 56px; }
+.cc-toolbar[data-fit~="ultra"] .cc-model-chip .cc-chip-caret { display: none; }
 
 /* 图标按钮最小可点区 24px（plan-20261009-ui U7：原 xs 档 22px 偏小） */
 .ui-icon-btn.size-xs { width: var(--ic-btn-xs); height: var(--ic-btn-xs); }
@@ -302,8 +310,10 @@
    横向位置**由内容列几何变量驱动**（与 .mf-list 同源，见 global.css「内容列定宽」段）：
    拖宽时列边缘逐帧移动，柄与列边缘同帧跟随；此前靠 JS 每帧回写 left，
    一旦几何改由 CSS 求解就会停在按下时的旧位置（用户反馈的问题）。 */
+/* 层级压在消息刻度（15）与工具卡（17）之下（plan-20261025-popclip）：窄窗口里它们会盖住列边缘，
+   重叠处点击归上层控件，柄只在露出的部分可拖 */
 .cw-handle {
-  position: absolute; z-index: 30; width: 16px; margin-left: -8px;
+  position: absolute; z-index: 14; width: 16px; margin-left: -8px;
   left: var(--content-col-left);
   display: flex; align-items: center; justify-content: center;
   cursor: col-resize; touch-action: none;

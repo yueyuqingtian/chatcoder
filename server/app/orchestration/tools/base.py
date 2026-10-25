@@ -52,6 +52,9 @@ class ToolContext:
     # 也看不到失败原因，只看到子任务莫名中断——这类审批不设静默超时。
     is_subagent: bool = False
     is_subsession: bool = False
+    # plan-549-2281：子代理的任务标题。审批卡据此显示「来自子代理 #N「标题」」，
+    # 让用户判断这张卡是哪个派发在等，而不是只看到一个 agent 名字。
+    subagent_title: str = ""
 
 
 # 失败类别：模型据此选择恢复动作（而不是只看到一段裸报错文本）

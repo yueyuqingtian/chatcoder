@@ -111,6 +111,62 @@ async def test_permanent_delete_cascades_to_side_sessions():
     assert client.get(f"/sessions/{child_id}").status_code == 404
 
 
+async def _add_sub_session(parent_id: int, project_id: int, title: str) -> int:
+    """造一条存量执行子会话（plan-549-2281 已下线创建入口，只能直接落库）。"""
+
+    def _op(s):
+        row = SessionRow(
+            title=title, project_id=project_id, side_parent_id=parent_id, side_kind="sub",
+        )
+        s.add(row)
+        s.flush()
+        sid = row.id
+        s.commit()
+        return sid
+
+    return await run_write_locked(_op, label="test.side.sub")
+
+
+async def test_permanent_delete_of_side_session_keeps_siblings_and_parent():
+    """plan-156-621 复盘修复：删除一条侧边对话不得连带删除同主会话下的执行子会话。
+
+    `child_session_service.list_children` 内部经 `root_parent_of`（`side_parent_id or id`）
+    归一，传入挂靠会话 id 会解析成**父会话 id**，返回的是父会话名下的全部执行子会话。
+    旧实现在永久删除分支里无条件级联，于是「删一条侧边对话」= 永久删除该主会话下所有
+    存量执行子会话（连带消息 / turn / 工具输出 / 附件目录 / 回滚快照），不可恢复。
+    """
+    project_id, parent_id = await _project_and_session()
+    client = TestClient(_app())
+    side_id = client.post(f"/sessions/{parent_id}/side-sessions").json()["id"]
+    sub_id = await _add_sub_session(parent_id, project_id, "执行子会话")
+    keeper_side = client.post(f"/sessions/{parent_id}/side-sessions").json()["id"]
+
+    res = client.delete(f"/sessions/{side_id}?permanent=true")
+    assert res.status_code == 200, res.text
+
+    # 被删的侧边对话确实没了
+    assert client.get(f"/sessions/{side_id}").status_code == 404
+    # 父会话、兄弟侧边对话、执行子会话都必须完好
+    assert client.get(f"/sessions/{parent_id}").status_code == 200
+    assert client.get(f"/sessions/{keeper_side}").status_code == 200
+    assert client.get(f"/sessions/{sub_id}").status_code == 200
+
+
+async def test_permanent_delete_of_root_still_cascades_to_sub_sessions():
+    """删除根主会话时，side / sub 两类挂靠会话仍要一并清理（plan-156-621 原意，不回退）。"""
+    project_id, parent_id = await _project_and_session()
+    client = TestClient(_app())
+    side_id = client.post(f"/sessions/{parent_id}/side-sessions").json()["id"]
+    sub_id = await _add_sub_session(parent_id, project_id, "执行子会话")
+
+    res = client.delete(f"/sessions/{parent_id}?permanent=true")
+    assert res.status_code == 200, res.text
+
+    assert client.get(f"/sessions/{parent_id}").status_code == 404
+    assert client.get(f"/sessions/{side_id}").status_code == 404
+    assert client.get(f"/sessions/{sub_id}").status_code == 404
+
+
 async def test_side_session_unknown_parent_is_404():
     res = TestClient(_app()).post("/sessions/999999/side-sessions")
     assert res.status_code == 404

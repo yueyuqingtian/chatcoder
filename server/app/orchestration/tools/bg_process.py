@@ -444,6 +444,28 @@ class BgProcessRegistry:
             await asyncio.gather(*(self.kill(i, by="system") for i in ids), return_exceptions=True)
         return len(ids)
 
+    async def kill_since(self, session_id: int, turn_id: int) -> list[str]:
+        """终止该会话里在 `turn_id` 及之后轮次启动、仍在运行的后台进程（plan-20261025-bgturn）。
+
+        撤回一轮等于撤销这一轮的一切：它启动的 dev server 等如果继续跑，就成了一条
+        「界面已经不存在这一轮、后台还在占端口」的孤儿进程，右上角后台任务栏也会留着它。
+        按 `by="system"` 终止——`_fire_on_exit` 对 system 直接返回，不再向会话投递
+        「被用户停止」通知：撤回语义下那条提示本身就是噪音。
+
+        返回被终止的 shell_id 列表（调用方只用于日志 / 结果说明）。
+        """
+        ids = [
+            e.shell_id for e in self._entries.values()
+            if e.session_id == session_id and e.returncode is None
+            and e.turn_id is not None and int(e.turn_id) >= int(turn_id)
+        ]
+        if not ids:
+            return []
+        await asyncio.gather(*(self.kill(i, by="system") for i in ids), return_exceptions=True)
+        logger.info("[bg.kill_since] session=%s turn=%s 终止后台命令 %d 个: %s",
+                    session_id, turn_id, len(ids), ",".join(ids))
+        return ids
+
     async def kill_all(self) -> int:
         """服务关停：终止全部运行中的后台进程，避免它们成为占着端口的孤儿。"""
         ids = [e.shell_id for e in self._entries.values() if e.returncode is None]

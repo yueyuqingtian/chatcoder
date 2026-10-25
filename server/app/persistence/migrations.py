@@ -164,6 +164,14 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("memory_entries", "candidate", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("memory_entries", "expires_at", "VARCHAR(40)"),
     ("memory_entries", "superseded_by", "BIGINT"),
+    # ========== memory_entries（plan-548-2276：检索键与来源）==========
+    # keywords 存 JSON 数组字符串（如 ["上下文压缩","compaction"]），旧行为 NULL；
+    # origin 区分写入通道 manual / extract / compaction，旧行按 manual 处理。
+    # keywords 允许 NULL（旧行没这列）；origin 与模型侧口径一致为 NOT NULL DEFAULT 'manual'——
+    # SQLite 的 ADD COLUMN 只要求默认值是常量，带 NOT NULL 也能补列、不重建表。
+    # plan-156-621 复盘修复：按旧 DDL（可空）加过列的库，由 _memory_origin_not_null 收紧。
+    ("memory_entries", "keywords", "TEXT"),
+    ("memory_entries", "origin", "VARCHAR(16) DEFAULT 'manual' NOT NULL"),
     # ========== providers（plan-248-1258 M2.3：供应商级代理）==========
     ("providers", "proxy_mode", "VARCHAR(12) DEFAULT 'inherit'"),
     ("providers", "proxy_url", "VARCHAR(255)"),
@@ -365,6 +373,77 @@ async def _cleanup_legacy_notnull_columns(db: AsyncSession) -> int:
     return cleaned
 
 
+_MEMORY_TABLE = "memory_entries"
+_MEMORY_TMP_TABLE = "memory_entries__nullable_tmp"
+
+
+def _retarget_index_sql(sql: str, source_table: str) -> str:
+    """把索引 DDL 里的表名换回主表（从临时表上取到的 DDL 指向旧表名）。"""
+    import re
+
+    return re.sub(
+        rf'(?is)(\bON\s+)["`\[]?{re.escape(source_table)}["`\]]?',
+        '\\1"memory_entries"', sql, count=1,
+    )
+
+
+async def _replay_memory_indexes(
+    db: AsyncSession, index_rows, *, source_table: str | None = None,
+) -> None:
+    """重放 memory_entries 的索引 DDL。
+
+    索引可能已随建表/换名自动重建、与当前结构等价，单条失败一律忽略；
+    `source_table` 非空时把 DDL 里的表名换回主表（恢复分支从临时表上取 DDL）。
+    """
+    for (idx_sql,) in index_rows:
+        stmt = str(idx_sql)
+        if source_table:
+            stmt = _retarget_index_sql(stmt, source_table)
+        try:
+            await db.execute(text(stmt))
+        except Exception:  # noqa: BLE001 — 索引重放不是数据完整性的一环
+            pass
+
+
+async def _restore_memory_entries_from_tmp(db: AsyncSession) -> bool:
+    """plan-549-2281：从「重建中断」的半态恢复 memory_entries。
+
+    `_memory_session_nullable` 的 SQLite 重建路径是「建临时表 → 拷贝 → DROP 主表 → RENAME」
+    四步。若在 DROP 之后、RENAME 之前崩溃（进程被杀 / 断电），主表已不存在而临时表持有
+    全部数据；旧实现在 `_table_exists` 上直接 return False，临时表既不恢复也不清理——
+    用户的记忆库等于静默丢掉，而且下一轮启动仍然读不到。
+
+    这里在存在性判定之前先把临时表接回主表并重放它的索引。幂等：主表存在或临时表
+    不存在时什么都不做（返回 False）。
+    """
+    if not settings.database_url.startswith("sqlite"):
+        return False
+    try:
+        if await _table_exists(db, _MEMORY_TABLE):
+            return False  # 主表在，无需恢复（也避免盖掉正常数据）
+        if not await _table_exists(db, _MEMORY_TMP_TABLE):
+            return False
+        index_rows = (await db.execute(text(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=:t AND sql IS NOT NULL"
+        ), {"t": _MEMORY_TMP_TABLE})).fetchall()
+        await db.execute(text(f'ALTER TABLE "{_MEMORY_TMP_TABLE}" RENAME TO "{_MEMORY_TABLE}"'))
+        await db.commit()
+        await _replay_memory_indexes(db, index_rows, source_table=_MEMORY_TMP_TABLE)
+        await db.commit()
+    except Exception as e:  # noqa: BLE001
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("迁移: memory_entries 半态恢复失败(非阻塞): %s", e)
+        return False
+    logger.warning(
+        "迁移: 检出记忆表重建中断的半态——已将临时表 %s 恢复为 %s 并重放索引（%d 条索引 DDL）",
+        _MEMORY_TMP_TABLE, _MEMORY_TABLE, len(index_rows),
+    )
+    return True
+
+
 async def _memory_session_nullable(db: AsyncSession) -> bool:
     """plan-537-2256：去掉 memory_entries.session_id 的 NOT NULL（幂等）。
 
@@ -377,6 +456,11 @@ async def _memory_session_nullable(db: AsyncSession) -> bool:
     去掉 NOT NULL、补上 ON DELETE SET NULL。非 SQLite 走 ALTER + 重建约束，失败只记 warning。
     """
     import re
+
+    # plan-549-2281：先尝试从「重建中断」的半态恢复（见 _restore_memory_entries_from_tmp）。
+    # 必须在 _table_exists 判定之前：半态下主表已不存在，旧实现在这里直接 return False，
+    # 临时表里的全部记忆既不恢复也不清理。
+    await _restore_memory_entries_from_tmp(db)
 
     if not await _table_exists(db, "memory_entries"):
         return False
@@ -460,7 +544,7 @@ async def _memory_session_nullable(db: AsyncSession) -> bool:
     rewritten = fk_pattern.sub(_fix_fk, rewritten, count=1)
 
     before = int((await db.execute(text("SELECT count(*) FROM memory_entries"))).scalar() or 0)
-    tmp = "memory_entries__nullable_tmp"
+    tmp = _MEMORY_TMP_TABLE
     tmp_sql = re.sub(
         r'(?is)^\s*CREATE\s+TABLE\s+["`\[]?memory_entries["`\]]?',
         f'CREATE TABLE "{tmp}"', rewritten, count=1,
@@ -479,11 +563,7 @@ async def _memory_session_nullable(db: AsyncSession) -> bool:
             raise RuntimeError(f"记忆表重建前后行数不一致：{before} → {after}")
         await db.execute(text('DROP TABLE "memory_entries"'))
         await db.execute(text(f'ALTER TABLE "{tmp}" RENAME TO "memory_entries"'))
-        for (idx_sql,) in index_rows:
-            try:
-                await db.execute(text(str(idx_sql)))
-            except Exception:  # 索引可能已随重建存在或与当前结构等价，忽略
-                pass
+        await _replay_memory_indexes(db, index_rows)
         await db.commit()
     except Exception:
         try:
@@ -492,6 +572,110 @@ async def _memory_session_nullable(db: AsyncSession) -> bool:
             pass
         raise
     logger.info("迁移: memory_entries 已重建，session_id 允许为空（%d 行）", before)
+    return True
+
+
+async def _memory_origin_not_null(db: AsyncSession) -> bool:
+    """plan-156-621 复盘修复：把 memory_entries.origin 收紧为 NOT NULL DEFAULT 'manual'（幂等）。
+
+    模型侧 `origin: Mapped[str]` 一直是隐式 NOT NULL，而迁移只加过可空的
+    `VARCHAR(16) DEFAULT 'manual'`：新建库由 create_all 建成 NOT NULL，升级库却是可空，
+    两份 schema 不一致，不经 ORM 的直插会落下 NULL（读取侧靠 `or "manual"` 兜底才没暴露）。
+
+    顺序固定为「先回填、后收紧」，绝不丢行：NULL 行一律回填成 'manual'，再做约束检查。
+    SQLite 不支持 ALTER COLUMN SET NOT NULL，按 `_memory_session_nullable` 同一套四步协议
+    重建（建临时表 → 拷数据 → 行数校验 → DROP + RENAME → 重放索引）；行数不一致立即回滚
+    并抛出，由调用方显式报错。列不存在、或已是 NOT NULL 时什么都不做。
+    """
+    import re
+
+    # 上一次重建若在 DROP 之后中断，先把临时表接回主表（与 session_id 改可空共用同一自救逻辑）
+    await _restore_memory_entries_from_tmp(db)
+
+    if not await _table_exists(db, _MEMORY_TABLE):
+        return False
+    meta = await _legacy_column_meta(db, _MEMORY_TABLE)
+    target = next((m for m in meta if m[0] == "origin"), None)
+    if target is None or target[2]:
+        # 列不存在（由 _MIGRATIONS 补，补的时候已带 NOT NULL）或已收紧：幂等返回
+        return False
+
+    if not settings.database_url.startswith("sqlite"):
+        try:
+            await db.execute(text(
+                "UPDATE memory_entries SET origin = 'manual' WHERE origin IS NULL"))
+            await db.execute(text(
+                "ALTER TABLE memory_entries ALTER COLUMN origin SET DEFAULT 'manual'"))
+            await db.execute(text(
+                "ALTER TABLE memory_entries ALTER COLUMN origin SET NOT NULL"))
+            await db.commit()
+            logger.info("迁移: memory_entries.origin 已收紧为 NOT NULL DEFAULT 'manual'")
+        except Exception as e:
+            logger.warning("迁移: memory_entries.origin 收紧失败(非阻塞): %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            return False
+        return True
+
+    rows = (await db.execute(text(
+        f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{_MEMORY_TABLE}'"
+    ))).fetchall()
+    create_sql = str(rows[0][0] or "") if rows else ""
+    if not create_sql:
+        return False
+
+    # 1) 定位 origin 列定义并补 NOT NULL（缺 DEFAULT 时一并补上）。
+    # 模式里用 (?:\([^)]*\)|[^,()])* 才能整体跳过 VARCHAR(16) 这类带括号的类型，
+    # 既有的 session_id 改写只用 [^,)]* 是因为它是无括号的 BIGINT。
+    pattern = re.compile(r'(?is)(["`\[]?origin["`\]]?\s+)((?:\([^)]*\)|[^,()])*)')
+
+    def _fix_column(m: "re.Match") -> str:
+        body = m.group(2)
+        if not re.search(r"(?is)\bdefault\b", body):
+            body = f"{body} DEFAULT 'manual'"
+        if not re.search(r"(?is)\bnot\s+null\b", body):
+            body = f"{body} NOT NULL"
+        return m.group(1) + body
+
+    rewritten, n = pattern.subn(_fix_column, create_sql, count=1)
+    if n == 0:
+        logger.warning("迁移: 未能定位 memory_entries.origin 列定义，跳过收紧约束")
+        return False
+
+    before = int((await db.execute(text(f"SELECT count(*) FROM {_MEMORY_TABLE}"))).scalar() or 0)
+    tmp = _MEMORY_TMP_TABLE
+    tmp_sql = re.sub(
+        rf'(?is)^\s*CREATE\s+TABLE\s+["`\[]?{_MEMORY_TABLE}["`\]]?',
+        f'CREATE TABLE "{tmp}"', rewritten, count=1,
+    )
+    # DROP TABLE 会连带删索引，重建后重放
+    index_rows = (await db.execute(text(
+        f"SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='{_MEMORY_TABLE}' "
+        "AND sql IS NOT NULL"
+    ))).fetchall()
+    try:
+        await db.execute(text(f'DROP TABLE IF EXISTS "{tmp}"'))
+        await db.execute(text(
+            f"UPDATE {_MEMORY_TABLE} SET origin = 'manual' WHERE origin IS NULL"))
+        await db.execute(text(tmp_sql))
+        await db.execute(text(f'INSERT INTO "{tmp}" SELECT * FROM "{_MEMORY_TABLE}"'))
+        after = int((await db.execute(text(f'SELECT count(*) FROM "{tmp}"'))).scalar() or 0)
+        if after != before:
+            # 绝不静默丢行：回滚后抛出，由调用方显式报错
+            raise RuntimeError(f"记忆表重建前后行数不一致：{before} → {after}")
+        await db.execute(text(f'DROP TABLE "{_MEMORY_TABLE}"'))
+        await db.execute(text(f'ALTER TABLE "{tmp}" RENAME TO "{_MEMORY_TABLE}"'))
+        await _replay_memory_indexes(db, index_rows)
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        raise
+    logger.info("迁移: memory_entries.origin 已收紧为 NOT NULL DEFAULT 'manual'（%d 行）", before)
     return True
 
 
@@ -562,6 +746,31 @@ async def run_migrations(db: AsyncSession) -> dict:
         # 行数校验不通过时 helper 已回滚（不丢行）；这里必须显式报错，不能悄悄放过
         logger.error("记忆表 session_id 改可空失败，记忆写入可能仍受 NOT NULL 限制: %s", e,
                      exc_info=True)
+        # plan-562-2318 H5：这条迁移失败的影响不只是「记忆写入」——旧库若仍是
+        # 「session_id NOT NULL + RESTRICT」，删除会话 / 删除项目会撞外键约束失败，
+        # 用户看到的是「点了永久删除但删不掉」。补一条**用户可读**的启动告警：
+        # 没有现成的对外诊断通道承载它，走 warning 级日志（控制台 + server.log 均可见）。
+        # 删除侧已改为显式 UPDATE 解绑（见 session_service.purge_session_children），
+        # 该告警只提示"可能"受影响，不代表删除一定失败。
+        logger.warning(
+            "启动警告：记忆表（memory_entries）的会话关联可能仍受 NOT NULL / RESTRICT 限制，"
+            "删除会话或删除项目可能失败。可重启应用让迁移重试，或备份数据后重建记忆表。"
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # plan-156-621 复盘修复: memory_entries.origin 收紧为 NOT NULL DEFAULT 'manual'（幂等）。
+    # 旧 DDL 只加过可空列，与模型侧隐式 NOT NULL 不一致；按旧 DDL 建过表的库在这里对齐。
+    # 放在 _memory_session_nullable 之后：那张表可能刚被重建过，此处再读到的就是最新 DDL。
+    try:
+        await _memory_origin_not_null(db)
+    except Exception as e:
+        # 非阻塞：origin 读取侧本就有 `or "manual"` 兜底，收紧失败不影响记忆读写，
+        # 但必须留下可诊断的日志（重启会重试）。
+        logger.warning("memory_entries.origin 收紧为 NOT NULL 失败(非阻塞，重启重试): %s", e,
+                       exc_info=True)
         try:
             await db.rollback()
         except Exception:

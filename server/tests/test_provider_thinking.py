@@ -337,6 +337,40 @@ class TestThinkingDegrade:
             {"thinking": {"type": "adaptive"}}, "max_tokens: field required",
         ) is None
 
+    def test_output_cap_learned_and_applied_to_next_request(self, monkeypatch):
+        """plan-549-2281 守卫承接：官方 128K 兜底遇到型号上限时自学，并应用到后续请求。
+
+        原用例随 test_subsession_wait_and_guards.py 删除而丢失——本文件此前只覆盖降级的
+        其它分支，「输出上限自学」这条防死循环守卫零覆盖，这里补回。"""
+        from app.models.providers import anthropic as anthropic_mod
+        from app.models.providers.anthropic import (
+            AnthropicProvider,
+            _degrade_thinking_payload,
+        )
+
+        monkeypatch.setattr(anthropic_mod, "_LEARNED_OUTPUT_CAPS", {})
+        payload = {
+            "model": "claude-sonnet-4-x", "max_tokens": 128_000,
+            "thinking": {"type": "enabled", "budget_tokens": 70_000},
+        }
+        msg = ("max_tokens: 128000 > 64000, which is the maximum allowed "
+               "number of output tokens for claude-sonnet-4-x")
+        degraded = _degrade_thinking_payload(payload, msg)
+        assert degraded is not None
+        assert degraded["max_tokens"] == 64_000
+        assert degraded["thinking"]["budget_tokens"] < 64_000  # 思考预算必须小于 max_tokens
+        assert anthropic_mod._LEARNED_OUTPUT_CAPS["claude-sonnet-4-x"] == 64_000
+        # 已无可收紧空间时不再重试，避免死循环
+        assert _degrade_thinking_payload(degraded, msg) is None
+
+        # 下一次请求直接按自学到的上限收紧；其它型号不受影响，仍是统一兜底
+        provider = AnthropicProvider(api_key="k", base_url="https://api.anthropic.com/v1",
+                                     model="claude-sonnet-4-x")
+        req = ChatRequest(model="claude-sonnet-4-x", messages=[ChatMessage(role="user", content="hi")])
+        assert provider._build_payload(req, stream=True)["max_tokens"] == 64_000
+        other = ChatRequest(model="claude-opus-5-5", messages=[ChatMessage(role="user", content="hi")])
+        assert provider._build_payload(other, stream=True)["max_tokens"] == 128_000
+
 
 class _FakeResponse:
     def __init__(self, payload: dict, status_code: int = 200, text: str = "") -> None:

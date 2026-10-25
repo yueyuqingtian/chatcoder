@@ -12,23 +12,23 @@
  * server/app/orchestration/tools/todo.py），**不回退到用户消息**。
  *
  * ── plan-282-1492（口径修正：结束的任务不再显示"还在跑"）──
- * 旧口径的判据是"**还有没有未完成项**"，于是只要 AI 漏标最后一项（很常见）或某次
- * todo_write 落库失败，DB 里就会留一个 running/pending 步骤；退出软件重新进入后，
- * 胶囊照样把它当"进行中进度"渲染——用户看到的是"任务明明跑完了，重启后最后一步
- * 还在执行"。现在判据改成**这一轮任务本身还活着吗**（phase）：
+ * 判据是**这一轮任务本身还活着吗**（phase），而不是"还有没有未完成项"：AI 漏标最后一项
+ * （很常见）时，DB 里会留一个 running 步骤，旧口径重启后照样把它当进行中渲染。
  *
  *   - running（该轮正在执行）→ 展示进度，"下一项"可按运行态兜底为进行中；
  *   - interrupted（用户主动停止）→ 保留未完成项的**警示展示**（不显示转圈），
  *     让用户知道还剩什么、可以继续（用户明确要求的续跑语义）；
- *   - concluded（已完成 / 失败 / 取消 / 回滚 / 待确认）→ **不展示进度**：
- *     任务已收口，残留的 running/pending 步骤只是账没对齐，不再当作进度。
+ *   - concluded（已完成 / 失败 / 取消 / 待确认）→ plan-20261025-progress-keep 起**保留整份清单**：
+ *     一轮结束后进程不再收起，直到之后的轮次制定了新清单才刷新；残留的「进行中」收口为待办、不转圈。
+ *     已回滚的轮次随回滚作废，不参与取数。
  *
- * 这一条同时覆盖胶囊与右面板（两处同源），因此"重启后残留进度"不会只在某处复发。
+ * 派生本身是纯函数（progressDerive.ts），这里只负责从 store 取数与记忆化。
+ * 这一条同时覆盖胶囊、工具卡与右面板（同源），因此口径不会只在某处分叉。
  */
 import { useMemo, useRef } from "react";
 import { useChatStore } from "../../store/chat";
-import { resolveSubsessionRows, type SubsessionRunState } from "./progressOwner";
-import type { TaskOut } from "../../api/client";
+import { resolveOwnerRows, resolveSubsessionRows, type OwnerRunState } from "./progressOwner";
+import { deriveProgress } from "./progressDerive";
 
 export type ProgressStatus = "pending" | "running" | "done" | "interrupted";
 
@@ -39,29 +39,17 @@ export interface ProgressRow {
   status: ProgressStatus;
   /** plan-282-1441：来源子代理 id（仅引擎步骤有）——右侧面板用它做"定位到执行消息"。 */
   agentId?: number | null;
-  /** plan-156-619 S6：执行该步骤的子会话 id（sessions.id）；null/缺省 = 主代理自己执行。
-   *  进程栏目据此显示「子会话」chip，点击可切换到该子会话。 */
+  /** plan-549-2281：执行该步骤的子代理 id；null/缺省 = 主代理自己执行。
+   *  升级前的历史步骤这里存的是子会话 id（前端无法凭数字区分），ownerKind 用来标明类型；
+   *  进程行据此显示归属 chip，只有在确实能跳转时才提供点击。 */
   owner?: number | null;
+  /** plan-549-2281：owner 的类型——subagent（新数据）/ subsession（升级前的历史数据）。
+   *  缺省时按运行态快照推导，两都推不出来就不加 chip。 */
+  ownerKind?: "subagent" | "subsession" | null;
 }
 
 /** 轮次活跃态——进度"是否还活着"的唯一判据（plan-282-1492）。 */
 export type TurnPhase = "running" | "interrupted" | "concluded";
-
-/** 是否为步骤任务（引擎的 group 不是步骤；request 是用户消息，也不计入进度）。 */
-function isStepTask(t: TaskOut): boolean {
-  return t.kind === "step" || (t.parent_task_id != null && t.kind !== "group");
-}
-
-/** 原始状态 → 展示状态。
- *  cancelled/failed 是"停止/异常后留下的未完成项"（task_service.cancel_turn_tasks 写 cancelled），
- *  语义是"还没做完、可以继续"，因此归为 interrupted（警示色），而不是 done。 */
-function normalizeStatus(status: string): ProgressStatus {
-  if (status === "in_progress") return "running";
-  if (status === "cancelled" || status === "failed") return "interrupted";
-  if (status === "done" || status === "completed") return "done";
-  if (status === "running") return "running";
-  return "pending";
-}
 
 export interface ProgressResult {
   rows: ProgressRow[];
@@ -70,38 +58,26 @@ export interface ProgressResult {
   done: number;
   /** 未完成项数量（含 running / pending / interrupted） */
   unfinished: number;
-  /** 该进度归属轮次的活跃态（plan-282-1492）：concluded 时 rows 必然为空。 */
+  /** 该清单所属轮次的活跃态（plan-282-1492）。concluded 时清单照常保留（plan-20261025-progress-keep）。 */
   phase: TurnPhase;
+  /** 续接清单：上一轮未完成、本轮模型尚未更新（界面统一标「待续接」，不再靠逐行备注识别） */
+  carried: boolean;
+  /** 清单所属轮次（无清单为 null） */
+  turnId: number | null;
+  /** 清单来自比正在运行的轮次更早、已结束的轮次：本轮还没制定新清单，暂时沿用之前的（续接清单不算） */
+  fromPrevious: boolean;
 }
 
-/** 子会话运行态修正（plan-20261020-progress）：实现放在无依赖的纯模块里，
- *  由本模块统一对外导出——胶囊 / 右面板 / 工具卡仍只需认 `taskProgress`。 */
-export { resolveSubsessionRows };
-export type { SubsessionRunState } from "./progressOwner";
+/** 执行者运行态修正（plan-20261020-progress）：实现放在无依赖的纯模块里，
+ *  由本模块统一对外导出——胶囊 / 右面板 / 工具卡仍只需认 `taskProgress`。
+ *  plan-549-2281：owner 语义从子会话改为子代理，旧名保留导出（`client/tests` 引用旧名）。 */
+export { resolveOwnerRows, resolveSubsessionRows };
+export type { OwnerRunState, SubsessionRunState } from "./progressOwner";
 
-/** 展示态兜底：把"接下来要执行的那一项"标为进行中。
+/** 读取当前会话的任务进度行（胶囊、工具卡与右面板唯一入口）。
  *
- * plan-282-1441（修复）：**必须由实际运行态门控**——否则"上次退出前其实已跑完、
- * 只是没来得及写终态"的清单，在重启进入软件后仍显示"最后一步还在执行"。
- * plan-282-1492：门控参数收敛为 `phase === "running"`（内部使用；调用方不再各自传参，
- * 避免两处口径再次分叉）。
- */
-function withRunningFallback(rows: ProgressRow[], activelyRunning: boolean): ProgressRow[] {
-  const out = rows.map((r) => ({ ...r }));
-  if (out.length === 0) return out;
-  if (!activelyRunning) return out;
-  if (out.some((r) => r.status === "running")) return out;
-  const idx = out.findIndex((r) => r.status === "pending");
-  if (idx >= 0) out[idx] = { ...out[idx], status: "running" };
-  return out;
-}
-
-/** 读取当前会话的任务进度行（胶囊与右面板唯一入口）。
- *
- * plan-282-1441（#10）：步骤来源**只认"最近一个含步骤的 turn"**，不再往前回溯。
- * plan-282-1492：在此基础上按该 turn 的活跃态收口——
- *  - 该轮已完成 → 不展示（不再命中上一轮陈旧步骤，也不展示本轮的漏标项）；
- *  - 该轮被停止 → 保留未完成项（警示色），便于用户知道还剩什么、继续干。
+ * plan-282-1441（#10）：步骤来源**只认"最近一个含步骤的 turn"**。
+ * plan-20261025-progress-keep：该轮结束后清单保留，之后的轮次制定新清单才替换；具体口径见 progressDerive.ts。
  */
 export function useProgressRows(enabled = true): ProgressResult {
   const tasks = useChatStore((s) => s.tasks);
@@ -114,7 +90,7 @@ export function useProgressRows(enabled = true): ProgressResult {
   /** plan-75-334 阶段3：不可见（面板隐藏）期间的冻结结果。 */
   const frozenRef = useRef<ProgressResult | null>(null);
 
-  // ── 本会话子会话的运行态（plan-20261020-progress）──
+  // ── 本会话执行者（子代理）的运行态（plan-20261020-progress · plan-549-2281）──
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   /** plan-20261023-ownerfix：AI 清单的归属会话（事件到达时记录）。 */
   const todosSessionId = useChatStore((s) => s.todosSessionId);
@@ -126,112 +102,52 @@ export function useProgressRows(enabled = true): ProgressResult {
     frozenSidRef.current = currentSessionId;
   }
   const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
-  /** 「id:运行态」签名：只在子会话新增 / 开始 / 结束时变化，子会话内部的每个事件都不变。
-   *  用它当进度派生的记忆化键——进度不需要随子会话的每一条 delta 重算。 */
-  const subsessionSig = useMemo(() => {
-    const list = currentSessionId != null ? subsessionsByParent[currentSessionId] : null;
-    if (!list || list.length === 0) return "";
-    return list.map((c) => `${c.id}:${c.has_running ? 1 : 0}`).sort().join(",");
-  }, [subsessionsByParent, currentSessionId]);
-  /** 运行态快照：签名未变时进度不重算，但 settle 里仍要用**当前**的值。 */
-  const subsRef = useRef<SubsessionRunState[]>([]);
-  subsRef.current = (currentSessionId != null ? subsessionsByParent[currentSessionId] ?? [] : [])
-    .map((c) => ({ id: c.id, running: Boolean(c.has_running) }));
+  const subagentMeta = useChatStore((s) => s.subagentMeta);
+  /** 「类型:id:运行态」签名：只在执行者新增 / 开始 / 结束时变化，内部的每条 delta 都不变。
+   *  用它当进度派生的记忆化键——进度不需要随每条流式消息重算。 */
+  const ownerSig = useMemo(() => {
+    const subs = currentSessionId != null ? subsessionsByParent[currentSessionId] : null;
+    const parts: string[] = [];
+    for (const [id, m] of Object.entries(subagentMeta)) {
+      parts.push(`a${id}:${m.status === "running" || m.status === "in_progress" ? 1 : 0}`);
+    }
+    for (const c of subs ?? []) parts.push(`s${c.id}:${c.has_running ? 1 : 0}`);
+    return parts.sort().join(",");
+  }, [subagentMeta, subsessionsByParent, currentSessionId]);
+  /** 运行态快照：签名未变时进度不重算，但 settle 里仍要用**当前**的值。
+   *  plan-549-2281：子代理为准，历史子会话作兜——升级前落库的步骤 owner 存的是子会话 id，
+   *  这里把两者都喂给纯函数，历史步骤才能继续转圈 / 继续显示归属。
+   *  顺序有讲究：子代理放在后面（后写入覆盖），两者 id 数值撞车时以子代理为准。 */
+  const ownersRef = useRef<OwnerRunState[]>([]);
+  ownersRef.current = [
+    ...(currentSessionId != null ? subsessionsByParent[currentSessionId] ?? [] : [])
+      .map((c) => ({ id: c.id, running: Boolean(c.has_running), kind: "subsession" as const })),
+    ...Object.entries(subagentMeta).map(([id, m]) => ({
+      id: Number(id),
+      running: m.status === "running" || m.status === "in_progress",
+      kind: "subagent" as const,
+    })),
+  ];
 
   return useMemo<ProgressResult>(() => {
     // plan-75-334 阶段3：enabled=false 时直接复用上次结果，跳过任务扫描与 turn 查找——
     // 右侧面板隐藏标签不再随主会话每个 delta 重算进度；恢复可见时补算一次。
     if (!enabled && frozenRef.current) return frozenRef.current;
-    /** 记录本次派生结果作为隐藏期冻结值（所有出口共用）。 */
-    const freeze = (r: ProgressResult): ProgressResult => { frozenRef.current = r; return r; };
-    const sessionRunning = isRunning || runningTurnId != null;
-
-    /** 判定某轮任务的活跃态。
-     *  turn 行缺失（未加载 / 超出 list_turns 上限的老轮次）时：会话正在跑就按 running
-     *  （兼容刚发起、turn 行还没进 store 的窗口），否则按已结束处理——老轮次绝不复活。 */
-    const phaseOf = (turnId: number | null | undefined): TurnPhase => {
-      if (turnId == null) return sessionRunning ? "running" : "concluded";
-      if (runningTurnId === turnId) return "running";
-      const t = turns.find((x) => x.id === turnId);
-      if (t?.status === "running") return "running";
-      if (t?.status === "interrupted") return "interrupted";
-      if (t) return "concluded";
-      return sessionRunning ? "running" : "concluded";
-    };
-
-    /** 按活跃态收口 + 计算展示行（所有出口共用）。 */
-    const settle = (rows: ProgressRow[], useTodo: boolean, phase: TurnPhase): ProgressResult => {
-      // plan-20261020-progress：先按子会话真实运行态修正（并行派发时多项同时转圈），
-      // 再进收口与兜底——顺序反了，兜底会多标一项待办。
-      const resolved = resolveSubsessionRows(rows, subsRef.current);
-      let list: ProgressRow[];
-      if (phase === "concluded") {
-        // 任务已结束：残留的未完成项不再当进度（这正是"重启后最后一步还在跑"的来源）
-        list = [];
-      } else if (phase === "interrupted") {
-        // 停止后收口"进行中"假象：未完成项如实呈现为中断态（警示色、不带转圈）
-        list = resolved.map((r) => (r.status === "running" ? { ...r, status: "interrupted" as const } : r));
-      } else {
-        list = resolved;
-      }
-      const display = withRunningFallback(list, phase === "running");
-      const done = display.filter((r) => r.status === "done").length;
-      return freeze({ rows: display, useTodo, done, unfinished: display.length - done, phase });
-    };
-
-    // ① AI 清单优先（todo.updated 事件，运行中实时）
-    // plan-20261023-ownerfix：清单必须属于当前会话——切换瞬间到达的旧会话事件会写进
-    // 新会话的 todos，此时宁可不展示（回退到本会话的引擎步骤），也不能把旧进度当成本轮进度。
-    const todoItems = Array.isArray(todos) && todosSessionId === currentSessionId
-      ? todos.filter((t) => t.content) : [];
-    if (todoItems.length > 0) {
-      if (todosCarried) {
-        // 续接清单：上一轮未完成、本轮模型尚未更新。它不是本轮进度，只如实呈现为「待续接」（警示色、不转圈）；
-        // 本轮已结束仍未更新，则收口隐藏，不再把旧清单当成进行中。
-        if (phaseOf(todosTurnId) === "concluded") {
-          return freeze({ rows: [], useTodo: true, done: 0, unfinished: 0, phase: "concluded" });
-        }
-        const carried: ProgressRow[] = todoItems.map((t) => ({
-          key: t.content,
-          title: t.content,
-          note: "待续接",
-          status: normalizeStatus(t.status) === "done" ? "done" : "interrupted",
-          // plan-156-619 S6：交接清单同样保留归属，否则续接后 chip 会消失
-          owner: t.owner ?? null,
-        }));
-        return settle(carried, true, "interrupted");
-      }
-      const rows: ProgressRow[] = todoItems.map((t) => ({
-        key: t.content,
-        title: t.content,
-        note: t.activeForm || "",
-        status: normalizeStatus(t.status),
-        owner: t.owner ?? null,
-      }));
-      return settle(rows, true, phaseOf(todosTurnId));
-    }
-
-    // ② 引擎步骤：从新到旧扫描，遇到第一个含 step 的 turn 立即定论
-    const visible = tasks.filter((t) => !t.is_hidden);
-    const turnIds = Array.from(
-      new Set(visible.map((t) => t.turn_id).filter((id): id is number => id != null)),
-    ).sort((a, b) => b - a);
-
-    for (const turnId of turnIds) {
-      const stepList = visible.filter((t) => t.turn_id === turnId && isStepTask(t));
-      if (stepList.length === 0) continue; // 该轮没有清单（如刚建立的新 turn）→ 继续找
-      const rows: ProgressRow[] = stepList.map((s) => ({
-        key: String(s.id),
-        title: s.title,
-        note: s.note || "",
-        status: normalizeStatus(s.status),
-        agentId: s.agent_id ?? null,
-        // plan-156-619 S6：todo 清单落库时写下的子会话归属（sessions.id）
-        owner: s.subsession_id ?? null,
-      }));
-      return settle(rows, false, phaseOf(turnId));
-    }
-
-    return freeze({ rows: [], useTodo: false, done: 0, unfinished: 0, phase: "concluded" });
-  }, [tasks, todos, todosSessionId, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled, subsessionSig, currentSessionId]);
+    const result = deriveProgress({
+      // plan-20261023-ownerfix：清单必须属于当前会话——切换瞬间到达的旧会话事件会写进
+      // 新会话的 todos，此时宁可不用（回退到本会话的落库步骤），也不能把旧进度当成本轮进度。
+      todos: Array.isArray(todos) && todosSessionId === currentSessionId ? todos : null,
+      todosTurnId,
+      todosCarried,
+      tasks,
+      turns,
+      runningTurnId,
+      isRunning,
+      // 签名（ownerSig）未变时不重算，但派生时要用**当前**的运行态快照
+      owners: ownersRef.current,
+    });
+    // 记录本次结果作为面板隐藏期的冻结值
+    frozenRef.current = result;
+    return result;
+  }, [tasks, todos, todosSessionId, todosTurnId, todosCarried, turns, runningTurnId, isRunning, enabled, ownerSig, currentSessionId]);
 }

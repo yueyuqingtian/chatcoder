@@ -14,7 +14,7 @@ import { sessionKey, useBrowserStore } from "../../store/browser";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
 import {
-  IconArrowToggle, IconCheck, IconChevronDown, IconGitBranch, IconMaximize, IconMessageSquare, IconMinus, IconPlus, IconRotateCcw, IconX,
+  IconCheck, IconChevronDown, IconGitBranch, IconMessageSquare, IconPlus, IconRotateCcw, IconX,
 } from "../icons";
 import { Popover, Tooltip } from "../ui";
 import { TaskSummaryPanel } from "./TaskSummaryPanel";
@@ -98,15 +98,12 @@ export function RightPanel() {
   const activeKey = usePanelStore((s) => s.activeKey);
   const buckets = usePanelStore((s) => s.buckets);
   const activeBucket = usePanelStore((s) => s.activeBucket);
-  const closePanel = usePanelStore((s) => s.closePanel);
   const openTab = usePanelStore((s) => s.openTab);
   const openNewTab = usePanelStore((s) => s.openNewTab);
   const closeTab = usePanelStore((s) => s.closeTab);
   const closedStack = usePanelStore((s) => s.closedStack);
   const reopenClosedTab = usePanelStore((s) => s.reopenClosedTab);
   const setActiveTab = usePanelStore((s) => s.setActiveTab);
-  const fullscreen = usePanelStore((s) => s.fullscreen);
-  const toggleFullscreen = usePanelStore((s) => s.toggleFullscreen);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showTabsMenu, setShowTabsMenu] = useState(false);
   // plan-20261015-browser-agent：当前会话的 AI 正在操作浏览器——「浏览器」标签上给出状态点
@@ -233,7 +230,8 @@ export function RightPanel() {
           {tabs.length === 0 && <div className="rp-tabs-empty">{t("rp.tabs_empty")}</div>}
         </div>
         <div className="rp-head-actions">
-          {tabsOverflow && (
+          {/* 没有标签时只有一行空态提示，不提供「全部标签」入口（此前空态文字被判为溢出，出现一枚空下拉） */}
+          {tabsOverflow && tabs.length > 0 && (
             <div className="rp-anchor">
               <Tooltip content={t("rp.all_tabs")} side="bottom" disabled={showTabsMenu}>
                 <button
@@ -299,16 +297,8 @@ export function RightPanel() {
               )}
             </Popover>
           </div>
-          <Tooltip content={fullscreen ? t("rp.scale") : t("rp.fullscreen")} side="bottom">
-            <button type="button" className={`rp-hbtn${fullscreen ? " is-on" : ""}`} aria-label={fullscreen ? t("rp.scale") : t("rp.fullscreen")} aria-pressed={fullscreen} onClick={toggleFullscreen}>
-              {fullscreen ? <IconMinus size={14} /> : <IconMaximize size={14} />}
-            </button>
-          </Tooltip>
-          <Tooltip content={t("rp.collapse")} side="bottom">
-            <button type="button" className="rp-hbtn" aria-label={t("rp.collapse")} onClick={closePanel}>
-              <IconArrowToggle open={false} size={14} />
-            </button>
-          </Tooltip>
+          {/* plan-20261025-shell：「全屏 / 收起」与窗口按钮合并为右上角全局控件组（WindowControls），
+              它压在本标签栏右端——标签栏只按 shell.css 的 --wc-full-w 预留位置，不再自带这两枚按钮 */}
         </div>
       </div>
       <div className="rp-content">

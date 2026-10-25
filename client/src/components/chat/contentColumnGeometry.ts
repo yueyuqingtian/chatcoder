@@ -43,7 +43,8 @@ export const MIN_CAPSULE_HOST_W = 440;
  * 仍按需让位（内容列只在右缘真的会被遮住时才左移，且只移需要的那一段）。
  * 旧实现按胶囊实测宽度让位，折叠 / 展开的每次切换都会让整列正文跟着平移，用户明确不要。
  */
-export function clearanceForForm(form: "expanded" | "capsule" | "hidden"): number {
+export function clearanceForForm(form: "expanded" | "floating" | "capsule" | "hidden"): number {
+  // plan-20261025-shell：悬浮卡片（放不下时用户仍展开）盖在内容之上，不让位
   return form === "expanded" ? CLEARANCE_EXPANDED : CLEARANCE_NONE;
 }
 

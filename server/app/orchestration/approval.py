@@ -118,10 +118,10 @@ class ApprovalManager:
                 # plan-522-2209：等待上限分两类。
                 # 子会话 / 子代理的审批往往发生在用户并未停留的会话里，超时自动拒绝等于让用户
                 # 两头都看不到（请求没看见、失败原因也没看见，只看到子任务莫名中断）——
-                # 按 approval_timeout_sec_subsession 处理，默认 0 即不设超时，只等用户处理或 turn 取消。
+                # 按 approval_timeout_sec_child 处理，默认 0 即不设超时，只等用户处理或 turn 取消。
                 _is_child = bool(detail.get("is_subagent") or detail.get("is_subsession"))
                 _timeout = (
-                    settings.approval_timeout_sec_subsession if _is_child
+                    settings.approval_timeout_sec_child if _is_child
                     else settings.approval_timeout_sec
                 )
                 if _timeout is None or _timeout <= 0:

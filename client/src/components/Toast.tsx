@@ -8,14 +8,16 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useChatStore } from "../store/chat";
 import { useToastStore, type ToastItem } from "../store/toast";
-import { IconAlertCircle, IconAlertTriangle, IconCheckCircle, IconInfo, IconX } from "./icons";
+import { IconToneBadge, IconX } from "./icons";
 import { IconButton } from "./ui/IconButton";
 
+/** plan-20261025-shell（需求 9）：四种语气统一为实心徽标（圆底 = 语气色、符号反白），
+ *  此前是粗细不一的线框图标，报错时在白色浮层上偏弱、与消息流报错卡也不是同一种图形 */
 const TONE_ICON = {
-  info: <IconInfo size={16} />,
-  success: <IconCheckCircle size={16} />,
-  warning: <IconAlertTriangle size={16} />,
-  error: <IconAlertCircle size={16} />,
+  info: <IconToneBadge tone="info" size={16} />,
+  success: <IconToneBadge tone="success" size={16} />,
+  warning: <IconToneBadge tone="warning" size={16} />,
+  error: <IconToneBadge tone="error" size={16} />,
 } as const;
 
 /** 退出动画时长，需与 .toast-out 的 --dur-normal 对齐（含 motion-scale 时由 animationend 兜底） */

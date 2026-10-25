@@ -260,7 +260,7 @@ const MODE_TEMPLATES: Array<{
  *  新加的工具（如 suggest_next_task）总在末尾被 MCP / 子代理工具压起来，用户找不到。 */
 const TOOL_GROUP_LABEL: Record<string, string> = {
   core: "基础能力",
-  subagent: "子代理 / 子会话",
+  subagent: "子代理",
   mcp: "MCP 工具",
 };
 const TOOL_GROUP_ORDER = ["core", "subagent", "mcp"] as const;
@@ -567,7 +567,6 @@ function ApprovalExplainSection() {
         {/* plan-91-393：改用全局模型选择器，与输入框模型弹窗一致（分组/标签/余额） */}
         <div className="sb-model-picker">
           <ModelPicker
-            variant="field"
             models={models}
             value={modelId}
             open={pickerOpen}

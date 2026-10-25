@@ -46,12 +46,16 @@ const TOOL_KEY: Record<string, K> = {
   // plan-20261017-ux-overhaul：补齐此前落到「other」闪电图标的常用工具
   multi_file_edit: "patch", apply_patch: "patch", read_file_range: "read", read_attachment: "read",
   symbol_search: "search", outline: "list", shell_exec: "term", terminal_bg_status: "term", terminal_bg_kill: "term", bg_command_done: "term", bg_command_stopped: "term",
+  // plan-549-2281：功能地图查询与符号索引导入——此前落到 other 闪电图标，与「检索类工具」语义不符
+  feature_lookup: "search", symbol_index_enable: "list",
   // plan-20261021-subq-row：子会话提问用对话气泡
   subsession_question: "ask",
   // plan-20261022-release-ci：子会话汇报 / 结论与子会话工具
   subsession_report: "ask", subsession_result: "collect",
   create_subsession: "agent", send_to_subsession: "ask", get_subsession_progress: "collect",
   interrupt_subsession: "agent", message_main: "ask", message_peer: "ask",
+  // plan-549-2281：子代理提问 / 进度上报 / 结束（伪工具名，见 timeline.subagentNoticeItem）
+  subagent_question: "ask", subagent_report: "ask", subagent_completion: "collect",
   git: "git", memory_write: "memory", skill_view: "read", compaction_index: "memory", compaction_view: "memory",
   goal_complete: "todo", cancel_subagent: "agent", subagent_inspect: "agent",
   send_to_subagent: "agent", resume_subagent: "agent", report_to_leader: "agent",

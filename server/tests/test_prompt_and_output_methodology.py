@@ -186,9 +186,15 @@ def test_prompt_verifies_by_risk_and_volume_not_per_step():
         CHATCODER_ADDENDUM_READONLY,
     )
 
-    for tpl in (CHATCODER_ADDENDUM, CHATCODER_ADDENDUM_FULL_ACCESS, CHATCODER_ADDENDUM_READONLY):
+    for tpl in (CHATCODER_ADDENDUM, CHATCODER_ADDENDUM_FULL_ACCESS):
         assert "按需验证" in tpl
         assert "小步修改" not in tpl
+    # plan-562-2318 A23：只读会话不写文件、不跑命令，原先把可写流程规范一并套进去
+    # （复查改动、交付前自查可运行性、后台进程管理、交付前统一验证）与审批层的硬拒绝冲突。
+    # 因此只读模板改为**反向断言**：不得再出现这些指向不存在动作的条款。
+    assert "按需验证" not in CHATCODER_ADDENDUM_READONLY
+    assert "BashKill" not in CHATCODER_ADDENDUM_READONLY
+    assert "修改文件后" not in CHATCODER_ADDENDUM_READONLY
 
 
 def test_system_prompt_is_deterministic_for_same_inputs():

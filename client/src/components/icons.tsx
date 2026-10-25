@@ -720,6 +720,32 @@ export function IconCheck({ size = 18, color = "currentColor", strokeWidth = 2, 
 
 /** 圆形警示（plan-282-1416：收编 TurnGroup 内联错误图标；
  *  相较三角警示，圆形在密集消息流中更安静、与线性图标体系一致） */
+/** 语气徽标（plan-20261025-shell 需求 9）：实心圆底 + 反白符号，用于报错卡与全局提示的行首。
+ *  线框圆在浅红底上与文字争夺注意力、又显得单薄；实心徽标一眼可辨语气，符号按 24 网格整数坐标绘制，
+ *  16px 渲染时 2 单位线宽落在整像素上（用户屏幕 150% 缩放下锐利）。
+ *  圆底取 currentColor（由宿主给语气色），符号取 --tone-glyph（缺省白色）。 */
+export function IconToneBadge({ tone, size = 16, ...rest }: IconProps & { tone: "error" | "warning" | "success" | "info" }) {
+  const glyph = "var(--tone-glyph, #fff)";
+  return (
+    <svg {...baseProps(size, "currentColor", 2, rest, `tone-${tone}`)} stroke="none">
+      <circle cx="12" cy="12" r="10" fill="currentColor" />
+      {tone === "success" ? (
+        <path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke={glyph} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" />
+      ) : tone === "info" ? (
+        <>
+          <circle cx="12" cy="7.5" r="1.4" fill={glyph} />
+          <path d="M12 11v6" fill="none" stroke={glyph} strokeWidth={2.2} strokeLinecap="round" />
+        </>
+      ) : (
+        <>
+          <path d="M12 7v6" fill="none" stroke={glyph} strokeWidth={2.2} strokeLinecap="round" />
+          <circle cx="12" cy="16.5" r="1.4" fill={glyph} />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export function IconAlertCircle({ size = 18, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
   return (
     <svg {...baseProps(size, color, strokeWidth, rest, "alert-circle")}>

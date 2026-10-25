@@ -15,7 +15,7 @@ import { useWorkflowStore } from "./workflow";
 import { useBgTaskStore } from "./bgTasks";
 import { handOffThinkingExpand } from "./flowExpand";
 // plan-522-2209：跨会话待处理交互轻量索引（仅存摘要）——侧栏等待图标的依据之一
-import { pendingActions, kindOfDetail } from "./pendingInteractions";
+import { pendingActions, kindOfDetail, usePendingInteractions } from "./pendingInteractions";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -494,7 +494,8 @@ interface ChatState {
   wsConnected: boolean;
   /** plan-156-619 S5：主会话 id → 其下子会话列表（左栏子会话行的数据源）。
    *  `list_sessions` 会过滤掉 side_parent_id 非空的会话，因此子会话必须单独拉取；
-   *  WS 只做增量（subsession.created / session.updated），刷新后由本桶重建。 */
+   *  WS 只做增量（session.updated 等），刷新后由本桶重建。
+   *  plan-549-2281：子会话创建已下线，桶里只有历史存量。 */
   subsessionsByParent: Record<number, SessionOut[]>;
   /** plan-156-619 S10：当前会话待处理的后续任务建议（消息流底部卡片数据源）。
    *  取消（dismiss）后由后端置 dismissed 并移除本地状态，刷新不会复活。 */
@@ -504,14 +505,17 @@ interface ChatState {
 
   // 动作
   loadBootstrap: () => Promise<void>;
-  /** plan-156-619 S5：拉取某主会话下的子会话（左栏进入项目分组时按需调用）。 */
-  loadSubsessions: (parentId: number) => Promise<void>;
-  /** plan-156-620：一次请求重建全部子会话桶（启动 / 重连 / 新建子会话时调用）。 */
+  /** plan-156-620：一次请求重建全部子会话桶（启动 / 重连时调用）。
+   *  plan-549-2281：子会话创建已下线，这里只服务「历史子会话仍然可见可打开」。 */
   loadSubsessionIndex: () => Promise<void>;
   /** plan-156-619 S10：拉取当前会话的建议（切换会话 / 刷新后重建卡片）。 */
   loadSuggestion: (sessionId: number) => Promise<void>;
   /** plan-156-619 S10：取消建议（后端置 dismissed，本地清空）。 */
   dismissSuggestion: () => Promise<void>;
+  /** plan-560-2311 E4：接受建议后在当前会话开新一轮，并统一收尾运行态与消息刷新。
+   *  只返回结果，**不清 pendingSuggestion**——卡片等刷新完成后再自行移除，
+   *  这样刷新失败导致的错误信息仍写在挂载中的组件上。 */
+  acceptSuggestion: (suggestionId: number) => Promise<{ ok: boolean; error?: string; stale?: boolean }>;
   loadModels: () => Promise<void>;
   createProject: (path: string, name?: string, look?: { icon?: string | null; color?: string | null }) => Promise<ProjectOut | null>;
   /** plan-20261009-ui U1：编辑项目名称 / 外观（项目弹窗编辑模式） */
@@ -528,6 +532,8 @@ interface ChatState {
   sessionHistIdx: number;
   histGo: (dir: -1 | 1) => void;
   deleteSession: (sessionId: number) => Promise<void>;
+  /** plan-20261025-shell（需求 8）：归档会话；归档的是当前会话时自动回退（成功返回 true） */
+  archiveSession: (sessionId: number) => Promise<boolean>;
   renameSession: (sessionId: number, title: string) => Promise<void>;
   forkSession: (sessionId: number) => Promise<void>;
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
@@ -613,7 +619,7 @@ resumeTurn: () => Promise<void>;
   flushQueuedInput: (id: string) => Promise<void>;
   /** v2.2: turn 结束后自动续发队列头（内部调用）。 */
   _drainQueue: () => Promise<void>;
-  handleWs: (event: string, payload: Record<string, unknown>) => void;
+  handleWs: (event: string, payload: Record<string, unknown>, replay?: boolean) => void;
   /** v37: 订阅全局状态通道（跨会话运行态/活动时间），侧栏实时更新。 */
   connectGlobalEvents: () => void;
   /** v37: 断开全局通道订阅（应用卸载时调用）。 */
@@ -628,6 +634,10 @@ let _globalWsUnsub: (() => void) | null = null;
 /** plan-522-2209: 全局通道「连上 / 重连上」回调的清理函数——用于重建跨会话等待索引 */
 let _globalOpenUnsub: (() => void) | null = null;
 let _workflowRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+/** 会话隔离修复：本轮补发批次里出现过的审批 id。
+ *  重建队列时只对这些条目做去留判定——实时到达的新请求不参与，
+ *  避免「REST 未决清单返回」与「实时 approval.request」的竞态把新卡误摘。 */
+const _replayedApprovalIds = new Set<string>();
 
 /** 工作流状态变化：防抖刷新侧栏的工作流标记；只合并 workflow_state，不覆盖其它运行态字段 */
 function scheduleWorkflowSessionRefresh(): void {
@@ -685,7 +695,7 @@ function _onWorkflowWakeup(payload: Record<string, unknown>): void {
       ...(sid === s.currentSessionId
         ? { isRunning: true, runningTurnId: s.runningTurnId ?? turnId, messages: adoptWakeupTurn(s.messages, turnId) }
         : {}),
-      sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)),
+      ...patchSession(s, sid, (x) => setSessionRunning(x, true)),
     }));
   }
   _setWakeupPending(sid, pending);
@@ -778,6 +788,15 @@ const SUBSESSION_TURN_TERMINAL = new Set(["completed", "failed", "interrupted", 
  *  （断线补发、resume_subagent / continue_subagent 会再次广播）。 */
 export const TERMINAL_SUBAGENT_STATUS = new Set(["done", "completed", "failed", "cancelled", "terminated"]);
 
+/** plan-565-2323 G11：轮次**真正结束**的状态。
+ *  注意不含 awaiting_confirmation——那一步在等用户确认计划，子代理可能仍在跑。
+ *  用途：turn 已结束时，其下 task.status 不可信（历史终态路径漏写子任务终态，重启修复也扫不到），
+ *  前端据此不再把残留行当成「运行中」，否则一条脏行就把整个会话锁成 busy（本次事故的直接表现）。 */
+const TURN_ENDED_STATUS = new Set(["completed", "failed", "interrupted", "cancelled"]);
+
+/** 子代理的「未结束」状态：这些才会被计入 pendingSubagents。 */
+const OPEN_SUBAGENT_STATUS = new Set(["running", "in_progress", "pending"]);
+
 /** plan-20261019-subagent-ghost: 合并服务端子代理列表（以列表为基线重建）。
  *
  * 为什么不能只做增量 merge：主代理每轮结束也会广播 `agent.completed`，旧前端不看 kind
@@ -788,18 +807,27 @@ export const TERMINAL_SUBAGENT_STATUS = new Set(["done", "completed", "failed", 
 function mergeSubagentMeta(
   prev: Record<number, SubagentMeta>,
   list: Awaited<ReturnType<typeof api.listSessionSubagents>>,
+  /** plan-565-2323 G11：本地已知已结束的轮次（用于裁剪列表里已不存在的残留运行条目） */
+  endedTurnIds: Set<number> = new Set(),
 ): Record<number, SubagentMeta> {
   const next: Record<number, SubagentMeta> = {};
   for (const it of list) {
     const p = prev[it.agent_id];
+    // plan-565-2323 G11：所属轮次已结束时，残留的 running/in_progress/pending 一律按 terminated 呈现。
+    // 服务端下发的 turn_status 是权威值；缺失时用本地轮次快照兜底。
+    const turnEnded = it.turn_status
+      ? TURN_ENDED_STATUS.has(String(it.turn_status))
+      : (it.turn_id != null && endedTurnIds.has(it.turn_id));
+    const rawStatus = it.status || p?.status || "running";
+    const status = turnEnded && OPEN_SUBAGENT_STATUS.has(rawStatus) ? "terminated" : rawStatus;
     next[it.agent_id] = {
       name: it.name || p?.name || `子代理 #${it.agent_id}`,
       turnId: it.turn_id ?? p?.turnId ?? null,
       taskId: it.task_id ?? p?.taskId ?? null,
       // plan-156-624：运行中不得把 updated_at 当结束时刻（该值只在启动/进度时推进）
       startedAt: it.created_at ?? p?.startedAt ?? null,
-      endedAt: (it.status === "done" || it.status === "failed"
-        || it.status === "cancelled" || it.status === "terminated")
+      endedAt: (status === "done" || status === "failed"
+        || status === "cancelled" || status === "terminated")
         ? (it.updated_at ?? p?.endedAt ?? null)
         : null,
       filesCount: it.files_count ?? p?.filesCount ?? 0,
@@ -811,12 +839,14 @@ function mergeSubagentMeta(
       // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
       status: (p?.status === "done" || p?.status === "failed") && (it.status === "running" || it.status === "pending")
         ? p.status
-        : (p?.status === "running" && it.status === "pending" ? "running" : (it.status || p?.status || "running")),
+        : (p?.status === "running" && it.status === "pending" ? "running" : status),
     };
   }
   for (const [idStr, m] of Object.entries(prev)) {
     const id = Number(idStr);
     if (next[id]) continue;
+    // plan-565-2323 G11：所属轮次已结束的本地残留条目直接丢弃，不再「因仍在运行而保留」
+    if (m.turnId != null && endedTurnIds.has(m.turnId)) continue;
     if (m.status === "running" || m.status === "in_progress") next[id] = m;
   }
   return next;
@@ -867,6 +897,22 @@ function _clearHeartbeat() {
   }
 }
 
+/** plan-549-2281 复盘：是否还有**别的**会话在运行（当前会话顶层运行态 + 各会话切片）。
+ *
+ *  心跳是全局单例，只服务当前会话的顶层 `isRunning`。切会话后清理运行态时若不看别的会话，
+ *  会把仍在后台跑的会话的兜底心跳一并摘掉——它的结束事件一旦丢失就永久停在「执行中」。
+ *  反之，别的会话还在跑时也不该由这里无条件 `_clearHeartbeat()`。 */
+function _hasOtherRunningSession(excludeSessionId: number): boolean {
+  const st = useChatStore.getState();
+  if (st.currentSessionId !== excludeSessionId && st.isRunning) return true;
+  for (const [key, slice] of Object.entries(st.sessionState)) {
+    const sid = Number(key);
+    if (sid === excludeSessionId) continue;
+    if (slice?.isRunning) return true;
+  }
+  return false;
+}
+
 /**
  * 性能优化（rAF 批量合并）：token.delta / thinking.delta 高频到达时，
  * 先累积到模块级 pending 缓冲，每帧仅一次 set() 合并进 store，
@@ -881,8 +927,12 @@ let _pendingToolOutput: Record<string, string> = {};
 let _pendingThread: Record<number, number> = {};
 let _streamDoneText: Record<string, string> = {};
 let _flushScheduled = false;
-// v967: 切回会话后短暂窗口（1s）内忽略 sync 重放的 delta 增量，避免旧增量累加到已恢复的缓冲上。
-let _replayGuardUntil = 0;
+/* plan-549-2281 复盘：此处曾有 `_replayGuardUntil = Date.now() + 1000`——
+ * 切回会话后 1 秒内**所有** delta 都丢掉，本意是躲开 sync 补发的重放增量。
+ * 但它按时间窗一刀切，把同窗口内新到达的真实 token/thinking 也一起丢了：
+ * 用户切回正在输出的会话，文字会先停一秒再整段跳出。
+ * 现在改由 `WsClient` 给补发批次逐条打 `replay` 标记（见 api/ws.ts），
+ * 这里只丢标记为 replay 的增量，判定与时间无关，实时增量一律放行。 */
 
 function _clearPendingDeltas() {
   _pendingToken = {};
@@ -1046,20 +1096,113 @@ function _sameUserContent(a: Record<string, unknown> | undefined, b: Record<stri
   return fa !== "" && fa === fb;
 }
 
+/** 乐观消息临时 id 的取值起点（真实 id 是 messages 表主键，实际远小于此值）。 */
+const OPTIMISTIC_ID_BASE = 1_000_000_000_000;
+
+/** plan-549-2281 复盘：乐观消息临时 id 的**唯一**判据。
+ *
+ *  旧实现把「`id > 1e12`」这个魔法值抄在 6 处（合并、去重、事件替换各写一遍），
+ *  任何人改临时 id 的值域都得同步改 6 处。收敛成一个函数后，值域只在这里定义，
+ *  `_mergeMessages` / `_mergeRefreshed` / `addMessage` / `handleWs` 全部走同一口径。
+ *
+ *  为什么仍取「1e12 之后的正数」而不用负数自增：消息数组统一按 id 升序排
+ *  （见 `_appendOrdered` 与各处 sort），负数会排到所有真实消息前面——刚发出的消息
+ *  出现在会话顶部，之后被真实消息替换时又跳到底部，视觉上是一次明显跳动。 */
+function isOptimisticMessageId(id: number): boolean {
+  return id > OPTIMISTIC_ID_BASE;
+}
+
+/** 乐观消息临时 id 生成器（模块级单调自增）。
+ *
+ *  plan-549-2281 复盘：旧实现用 `Date.now()` 当临时 id，两个后果：
+ *   · **同毫秒碰撞**——`_drainQueue` 续发排队消息、或连续两次发送落在同一毫秒，
+ *     两条占位拿到同一个 id，`addMessage` 的去重（`messages.some(m => m.id === msg.id)`）
+ *     直接把第二条吞掉，用户消息凭空消失；
+ *   · 与真实消息的先后关系不可控（同一毫秒内真实消息也可能被判成同一条）。
+ *  改为「每次 +1 的单调序列」后，同毫秒、跨会话切换都不会重复；起点仍高于真实 id，
+ *  因此既有的 `isOptimisticMessageId` 判据、按 id 升序追加的既有行为全部不变。 */
+let _optimisticSeq = OPTIMISTIC_ID_BASE;
+function nextOptimisticMessageId(): number {
+  _optimisticSeq += 1;
+  return _optimisticSeq;
+}
+
+/** 乐观占位与真实消息的配对结果。 */
+export interface OptimisticPairing {
+  /** 乐观占位临时 id → 唯一对应的真实消息（按占位出现顺序配对） */
+  pairs: Map<number, MessageOut>;
+  /** 本次没配上真实消息的占位（后端尚未落库，调用方应原样保留） */
+  pending: MessageOut[];
+}
+
+/**
+ * plan-549-2281 复盘：把「乐观占位」与「真实用户消息」**一对一**配对。
+ *
+ * 旧实现是 `fetched.find(fm => fm.sender_type === "user" && _sameUserContent(...))`——
+ * 只比文本、永远取第一条，于是：
+ *  · 连发两条「继续」时，两条占位都匹配到同一条真实消息，合并后 map 里只剩一个 key，
+ *    另一条占位凭空消失；
+ *  · 当会话里更早也有同文本消息时，占位会被那条历史消息「吃掉」，
+ *    真正的落库消息再被追加一次，消息流里出现重复。
+ *
+ * 现在的口径：
+ *  1. 只有**本次拉取中新出现**的真实消息（id 不在本地已确认集合里）才是候选——
+ *     历史同文本消息已被本地确认过，一律排除；
+ *  2. 占位按插入顺序、候选按 id 升序依次消费，一条真实消息最多配对一条占位；
+ *  3. 配不上的占位留在 `pending`，由调用方原样保留等待落库。
+ *
+ * 单条消息到达（`addMessage` / `message.created`）复用同一函数：`fetched` 传 `[msg]`
+ * 即退化为「找第一条同内容的占位」，保证两处替换口径一致。
+ */
+export function pairOptimisticMessages(
+  existing: MessageOut[],
+  fetched: MessageOut[],
+): OptimisticPairing {
+  const pairs = new Map<number, MessageOut>();
+  const pending: MessageOut[] = [];
+  const placeholders = existing.filter((m) => isOptimisticMessageId(Number(m.id) || 0));
+  if (placeholders.length === 0) return { pairs, pending };
+  const known = new Set<number>();
+  for (const m of existing) {
+    const id = Number(m.id) || 0;
+    if (id > 0 && !isOptimisticMessageId(id)) known.add(id);
+  }
+  const candidates = fetched.filter((fm) => {
+    const id = Number(fm.id) || 0;
+    return fm.sender_type === "user" && id > 0 && !known.has(id);
+  });
+  const claimed = new Set<number>();
+  for (const p of placeholders) {
+    const hit = candidates.find((fm) => {
+      const id = Number(fm.id) || 0;
+      return !claimed.has(id) && _sameUserContent(fm.content, p.content);
+    });
+    const pid = Number(p.id) || 0;
+    if (!hit) {
+      pending.push(p);
+      continue;
+    }
+    claimed.add(Number(hit.id) || 0);
+    pairs.set(pid, hit);
+  }
+  return { pairs, pending };
+}
+
 /** v967: 合并「快照已有消息」与「DB 拉取的最新消息」：按 id 去重、乐观消息 content 匹配替换、保持升序。 */
 function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageOut[] {
   const out = new Map<number, MessageOut>();
-  // DB 权威结果优先；仅纳入已确认 id（≤1e12）
+  // DB 权威结果优先；仅纳入已确认 id
   for (const m of fetched) {
     const id = Number(m.id) || 0;
-    if (id > 0 && id <= 1e12) out.set(id, m);
+    if (id > 0 && !isOptimisticMessageId(id)) out.set(id, m);
   }
+  // plan-549-2281 复盘：占位与真实消息按「一对一消费」配对（旧实现按文本取第一条，同文本会互相吞掉）
+  const { pairs } = pairOptimisticMessages(existing, fetched);
   for (const m of existing) {
     const id = Number(m.id) || 0;
-    if (id > 1e12) {
-      // 乐观消息（user 占位）：尝试按 content 匹配 DB 中真实 user 消息替换
-      const replaced = fetched.find((fm) =>
-        fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
+    if (isOptimisticMessageId(id)) {
+      // 乐观消息（user 占位）：已配对到 DB 中唯一一条真实 user 消息则替换，否则保留等待落库
+      const replaced = pairs.get(id);
       if (replaced) {
         const rid = Number(replaced.id) || 0;
         if (rid > 0) out.set(rid, replaced);
@@ -1080,7 +1223,7 @@ function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageO
  *  （乐观插入本地 + WS 落库回填）。快照若在续发落库前取到，响应一到整体覆盖
  *  就把刚插入的消息抹掉——只有切走再回（走只增合并）才重新出现。
  *
- *  baseIds = 请求发起时本地已确认消息（id ≤ 1e12）的 id 集合，用于区分两种情况：
+ *  baseIds = 请求发起时本地已确认消息的 id 集合，用于区分两种情况：
  *  · 不在 baseIds 且 DB 结果里没有 ⇒ 请求期间新增（乐观消息或刚落库），保留；
  *  · 在 baseIds 但在 DB 结果里没有 ⇒ 仅当后端快照的最大 id 已越过它时才判为删除；
  *    大于快照最大 id 的消息属于写队列尚未落库的尾部（plan-20261023-emptyflow）。
@@ -1109,7 +1252,7 @@ function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds:
   let maxFetchedId = 0;
   for (const m of fetched) {
     const id = Number(m.id) || 0;
-    if (id > 0 && id <= 1e12) {
+    if (id > 0 && !isOptimisticMessageId(id)) {
       out.set(id, reuse(m));
       if (id > maxFetchedId) maxFetchedId = id;
     }
@@ -1123,11 +1266,13 @@ function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds:
    * 空结果更不可能表示"会话被清空"，只可能是查询瞬间尚无数据，直接沿用本地数组
    * （保持引用，避免无意义重渲染）。 */
   if (out.size === 0 && existing.length > 0) return existing;
+  // plan-549-2281 复盘：占位与真实消息一对一消费配对（同文本多条不再互相吞掉）
+  const { pairs: placeholderHits } = pairOptimisticMessages(existing, fetched);
   for (const m of existing) {
     const id = Number(m.id) || 0;
-    if (id > 1e12) {
+    if (isOptimisticMessageId(id)) {
       // 乐观占位：DB 已落库则替换为真实消息，否则保留等待落库
-      const replaced = fetched.find((fm) => fm.sender_type === "user" && _sameUserContent(fm.content, m.content));
+      const replaced = placeholderHits.get(id);
       if (replaced && Number(replaced.id) > 0) out.set(Number(replaced.id), reuse(replaced));
       else out.set(id, m);
     } else if (!out.has(id)) {
@@ -1314,18 +1459,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   /** plan-278-1391: 同路径项目已归档提示（默认无）。 */
   archivedProjectPrompt: null,
 
-  /** plan-156-619 S5：拉取主会话下的子会话。
-   *  `list_sessions` 过滤了 side_parent_id 非空的行，所以子会话必须单独取；
-   *  这里按 parentId 存桶，切会话时不重复请求同一主会话。 */
-  loadSubsessions: async (parentId) => {
-    try {
-      const list = await api.listSubsessions(parentId);
-      set((s) => ({ subsessionsByParent: { ...s.subsessionsByParent, [parentId]: list } }));
-    } catch {
-      // 拉取失败保持旧值：左栏宁可少显示，也不要因为网络抖动清空已有子会话行
-    }
-  },
-
   loadSubsessionIndex: async () => {
     // plan-156-620：启动 / 子会话创建 / 建议卡接受可能并发触发——只认最后一次请求的结果，
     // 先发后回的旧响应不得覆盖新数据（否则刚建的子会话行会被抹掉）
@@ -1374,6 +1507,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set({ error: "取消建议失败：" + String(e) });
     }
+  },
+
+  /** plan-560-2311 E4：接受建议的收尾统一收进 store。
+   *
+   * 为什么必须放这里：此前是卡片组件自己 await 接口 → 立刻清 pendingSuggestion → 再刷新。
+   * 清掉 pendingSuggestion 会让卡片当场卸载，随后 refreshTurns / refreshMessages 抛错时
+   * 组件的 setError 写在一个已卸载的组件上，用户看不到任何失败信息；同时「左栏该会话运行态」
+   * 也没更新（只有顶层 isRunning 被置位），心跳未启动，60s 内无事件就永远停在旧状态。
+   *
+   * 这里按顺序做四件事，任一步失败都返回错误交给调用方展示：
+   *   1) 调接口（后端在当前会话里开新一轮）；
+   *   2) 归属校验后置顶层运行态；
+   *   3) patchSession 更新左栏会话的 has_running（走统一入口，含 running_started_at）；
+   *   4) 启动心跳兜底，再刷新 turns / messages。
+   * **不清 pendingSuggestion**：由卡片在刷新成功后自行移除，失败时卡片仍挂载可重试。
+   */
+  acceptSuggestion: async (suggestionId) => {
+    let res: { session_id: number; turn_id: number };
+    try {
+      res = await api.acceptSuggestion(suggestionId);
+    } catch (e) {
+      // 后端已是终态（已处理过 / 已不存在）：卡片是过期残留，交给调用方决定移除
+      if (e instanceof ApiError && /已处理过|不存在/.test(e.message)) return { ok: false, stale: true };
+      return { ok: false, error: "开始执行失败：" + String(e) };
+    }
+
+    const sid = get().currentSessionId;
+    if (res?.session_id != null && res.session_id === sid) {
+      set((s) => ({
+        isRunning: true,
+        runningTurnId: res.turn_id ?? null,
+        interruptedTurnId: null,
+        ...(sid != null ? patchSession(s, sid, (x) => setSessionRunning(x, true)) : {}),
+      }));
+      _startHeartbeat();
+    }
+    try {
+      await get().refreshTurns();
+      await get().refreshMessages();
+    } catch (e) {
+      // 刷新失败不影响「这一轮确实开始了」：运行态已置位，WS 事件仍会把内容推入
+      return { ok: true, error: "刷新消息失败：" + String(e) };
+    }
+    return { ok: true };
   },
 
   loadModels: async () => {
@@ -1578,9 +1755,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // WS 连接 + 事件监听（保存 cleanup 函数）
     wsClient.connect(sessionId);
+    // 会话隔离修复：把跨会话索引里**属于本会话**的等待项补回审批队列。
+    // 会话在后台运行时的提问 / 审批只到达全局通道（本会话 WS 早已切走），队列里没有条目；
+    // 不补的话侧栏显示「在等你」、切进来却无卡可答。只取本会话桶，别的会话的请求绝不进本视图。
+    {
+      const bucket = usePendingInteractions.getState().pendingBySession[sessionId];
+      const entries = bucket ? Object.entries(bucket) : [];
+      if (entries.length > 0 && get().currentSessionId === sessionId) {
+        set((s) => {
+          const queue = [...s.approvalQueue];
+          for (const [approvalId, entry] of entries) {
+            if (!queue.some((x) => x.approvalId === approvalId)) {
+              queue.push({ approvalId, detail: entry.detail });
+            }
+          }
+          return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
+        });
+      }
+    }
     _wsUnsub = wsClient.on((ev) => {
       const payload = ev.payload as Record<string, unknown>;
-      get().handleWs(ev.event, payload);
+      // plan-549-2281 复盘：把补发批次标记透传给 store——流式增量据此只丢重放、不误伤实时
+      get().handleWs(ev.event, payload, ev.replay === true);
     });
 
     /** plan-156-619 S10：切会话后拉一次待处理建议。
@@ -1605,8 +1801,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       void get().refreshTasks();
       // v967: 恢复切走瞬间未 flush 的增量尾巴（避免最后一段流式内容丢失）
       _restorePendingDeltas(cached);
-      // v967: 短暂窗口内忽略 sync 重放的旧 delta 增量，避免重复累加到已恢复的缓冲
-      _replayGuardUntil = Date.now() + 1000;
+      /* plan-549-2281 复盘：不再设置 1 秒重放守卫（那会把同窗口的真实增量一起丢掉）。
+       * 补发重放去重改由 `replay` 批次标记在 handleWs 内完成；服务端本来就不把
+       * token.delta / thinking.delta 写入补偿缓冲（server/app/gateway/ws.py 的
+       * _STREAM_NO_BUFFER_EVENTS），补发批次里天然不会有 delta，实时增量因此不再误伤。 */
       // v967: 主动拉取 DB 最新消息并与快照去重合并——补齐切走期间已落库但未收到广播的消息
       void refreshAndMergeMessages(sessionId);
       // v1.1: 缓存切换也要刷新占用（后台会话可能已运行/压缩过）
@@ -1656,6 +1854,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 加载会话 token 占用估算（解决重启后 usage 为 null 显示 0% 问题）
       try {
         const usage = await api.getSessionUsage(sessionId);
+        // plan-560-2311 E5：请求期间可能已经切走——usage 是当前会话的顶层状态，
+        // 写入别的会话会把旧会话的占用率显示在新会话胶囊上（切走越频繁越明显）。
+        if (get().currentSessionId !== sessionId) return;
         set({ usage: {
           input: usage.input,
           cached_input: usage.cached_input,
@@ -1812,6 +2013,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  /** plan-20261025-shell（需求 8）：归档会话的唯一入口（侧栏行内按钮 / 侧栏菜单 / 标题栏菜单共用）。
+   *  此前三处各自「改状态 + 刷新列表」，归档的若正是当前聚焦的会话，消息流仍停在这个已归档会话上。
+   *  现在：归档的是当前会话（或当前子会话所属的主会话）时，回退到导航历史里上一个仍在列表中的会话；
+   *  没有可回退的会话就回到新建任务页。导航历史同步剔除已归档项，前进 / 后退不会再落回去。 */
+  archiveSession: async (sessionId) => {
+    try {
+      await api.updateSession(sessionId, { status: "archived" });
+    } catch (e) {
+      set({ error: String(e) });
+      return false;
+    }
+    const before = get();
+    const curId = before.currentSessionId;
+    const cur = findSession(before, curId);
+    const hitsCurrent = curId === sessionId || cur?.side_parent_id === sessionId;
+    await get().loadBootstrap();
+    const st = get();
+    /** 仍可打开的会话：在主列表（或子会话桶）里、未归档、且不属于刚归档的会话 */
+    const alive = (id: number) => {
+      if (id === sessionId) return false;
+      const s = findSession(st, id);
+      return Boolean(s && s.status !== "archived" && s.side_parent_id !== sessionId);
+    };
+    // 导航历史去掉已归档项，并把游标换算到过滤后的位置（回退目标 = 原游标之前最近的可用项）
+    let fallback: number | null = null;
+    let fallbackIdx = -1;
+    const hist: number[] = [];
+    let cursor = -1;
+    for (let i = 0; i < st.sessionHist.length; i++) {
+      const id = st.sessionHist[i];
+      if (!alive(id)) continue;
+      if (hist[hist.length - 1] === id) continue; // 去掉相邻重复，避免前进 / 后退原地打转
+      hist.push(id);
+      if (i <= st.sessionHistIdx) cursor = hist.length - 1;
+      if (hitsCurrent && i < st.sessionHistIdx) { fallback = id; fallbackIdx = hist.length - 1; }
+    }
+    set((s) => ({
+      sessionHist: hist,
+      sessionHistIdx: hitsCurrent ? fallbackIdx : Math.min(cursor, hist.length - 1),
+      ...(s.sessionState[sessionId]
+        ? { sessionState: Object.fromEntries(Object.entries(s.sessionState).filter(([k]) => Number(k) !== sessionId)) }
+        : {}),
+    }));
+    if (hitsCurrent) {
+      if (fallback != null) await get().switchSession(fallback, true);
+      else get().startNewTask();
+    }
+    // 与删除同口径：会话的右面板桶（终端 / 浏览器实例）随之回收；动态 import 避免 chat ↔ panel 循环依赖
+    void import("./panel")
+      .then(({ usePanelStore }) => usePanelStore.getState().dropBucket(sessionId))
+      .catch(() => { /* 清理失败不影响归档 */ });
+    return true;
+  },
+
   renameSession: async (sessionId, title) => {
     try {
       const updated = await api.renameSession(sessionId, title);
@@ -1871,7 +2126,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     _sendingGuard = true;
     // 立即添加用户消息到本地状态，实现即时显示（流式体验）
     const optimisticUserMsg: MessageOut = {
-      id: Date.now(), // 临时 ID，后续会被 WebSocket 的真实消息覆盖（addMessage 有去重）
+      // plan-549-2281 复盘：临时 id 用单调自增序列，不再用 Date.now()——
+      // 同毫秒两条（连发 / 队列续发）会拿到相同 id，被 addMessage 的去重直接吞掉。
+      id: nextOptimisticMessageId(),
       session_id: currentSessionId,
       turn_id: null, // turn_id 稍后由 WebSocket 事件回填
       thread_id: null,
@@ -1903,36 +2160,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
             },
           }
         : {}),
-      sessions: s.sessions.map((x) => (x.id === currentSessionId
-        ? setSessionRunning({ ...x, last_activity_at: new Date().toISOString() }, true)
-        : x)),
+      // plan-560-2311 E5：运行态一律走 patchSession（同时覆盖子会话桶），不再直写 s.sessions.map
+      ...patchSession(s, currentSessionId, (x) => setSessionRunning({ ...x, last_activity_at: new Date().toISOString() }, true)),
     }));
     _startHeartbeat();
     try {
       const turn = await api.createTurn({ session_id: currentSessionId, content, attachments, reasoning_effort: reasoningEffort, mode, model_id: modelId ?? undefined, refs });
+      /* plan-549-2281 复盘（plan-560-2311 E5 同类漏洞的补齐）：建 turn 的响应同样不认会话归属。
+       *
+       * 发送后立刻切会话（或 _drainQueue 续发期间切走）时，`currentSessionId` 已经是新会话，
+       * 而这里会把**旧会话**的 turn 追加进新会话的 turns、把 runningTurnId 指向别的会话的 turn、
+       * isRunning 置真——新会话凭空被判成「运行中」。refreshMessages / refreshTurns /
+       * refreshTasks / loadRevertLock 早都有归属校验，唯独发送路径漏了。
+       *
+       * 处理原则与 E5 一致：顶层运行态只属于当前会话；会话自己的列表态（左栏转圈、
+       * 最近活动时间）照常更新，因为任务确实开跑了。 */
+      const stillOnSession = get().currentSessionId === currentSessionId;
       _clearPendingDeltas(); // v6.5: 新 turn 清掉上一轮残留的完成标记，保证思考/正文从头实时流式
       set((s) => ({
-        turns: [...s.turns, turn],
-        runningTurnId: turn.id,
-        isRunning: true,
-        interruptedTurnId: null,
-        // 发送消息后，乐观将当前会话置为运行中转圈状态
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? setSessionRunning(x, true) : x)),
+        ...(stillOnSession
+          ? {
+              turns: [...s.turns, turn],
+              runningTurnId: turn.id,
+              isRunning: true,
+              interruptedTurnId: null,
+            }
+          : {}),
+        // 发送消息后，乐观将当前会话置为运行中转圈状态（列表态与是否当前会话无关）
+        ...patchSession(s, currentSessionId, (x) => setSessionRunning(x, true)),
         // v7: /plan 不再立即弹确认框——记录待确认 plan turn，
         // 等后端真正生成 plan 文档并 turn.completed 后才弹出确认弹窗
-        ...(mode === "plan" ? { pendingPlanTurn: { turnId: turn.id, task: content } } : {}),
+        ...(stillOnSession && mode === "plan" ? { pendingPlanTurn: { turnId: turn.id, task: content } } : {}),
       }));
-      _startHeartbeat();
+      if (stillOnSession) _startHeartbeat();
       return turn.id;
     } catch (e) {
-      // v23: 发送失败回退乐观运行态（左侧转圈同步摘除）
-      _clearHeartbeat();
-      set((s) => ({
-        isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
-        sessions: s.sessions.map((x) => (x.id === currentSessionId ? setSessionRunning(x, false) : x)),
-      }));
+      /* plan-549-2281 复盘：失败分支同理——切走后再无条件清运行态，会把**新会话**
+       * 正在跑的 turn 的运行态一起清掉（它的 turn.completed 尚未到达）。 */
+      const stillOnSession = get().currentSessionId === currentSessionId;
+      if (stillOnSession) {
+        // v23: 发送失败回退乐观运行态（左侧转圈同步摘除）
+        if (!_hasOtherRunningSession(currentSessionId)) _clearHeartbeat();
+        set((s) => ({
+          isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
+          ...patchSession(s, currentSessionId, (x) => setSessionRunning(x, false)),
+        }));
+      } else {
+        // 已切走：只回退该会话自己的列表运行态；全局心跳留给仍在跑的会话
+        set((s) => patchSession(s, currentSessionId, (x) => setSessionRunning(x, false)));
+        if (!_hasOtherRunningSession(currentSessionId)) _clearHeartbeat();
+      }
       // plan-308-1542 需求1：发送失败属任务执行类错误——只进消息流错误卡，不弹右上角 Toast。
-      get().setFlowError(String(e), null);
+      // 切走时不写到新会话的消息流（错误卡属于发起失败的会话）。
+      if (stillOnSession) get().setFlowError(String(e), null);
       return null;
     } finally {
       _sendingGuard = false;
@@ -2013,7 +2293,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             runningTurnId: tid,
             interruptedTurnId: null,
             turns: s.turns.map((t) => (t.id === tid ? { ...t, status: "running" } : t)),
-            sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, true) : x)),
+            ...(s.currentSessionId != null
+              ? patchSession(s, s.currentSessionId, (x) => setSessionRunning(x, true))
+              : {}),
           }
         : {}),
     }));
@@ -2090,6 +2372,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         approvalExplain: s.approvalExplain?.approvalId === approvalId ? null : s.approvalExplain,
       };
     });
+    // 会话隔离修复：同步摘掉跨会话索引里的这一条。回执广播只回到发起会话，
+    // 若只清当前队列，残留条目会让卡片在切回原会话后复活（表现为反复回到第 1 题）。
+    pendingActions.clearByApprovalId(approvalId);
   },
 
   /** plan-238-1188: 提问向导作答草稿写回（切设置页/换会话后仍可恢复）。 */
@@ -2299,7 +2584,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           runningTurnId: null,
           isRunning: false,
-          sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, false) : x)),
+          ...patchSession(s, sid, (x) => setSessionRunning(x, false)),
         }));
         return;
       }
@@ -2324,7 +2609,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       approvalQueue: [],
       questionDraft: null,
       approvalExplain: null,
-      sessions: s.sessions.map((x) => (x.id === s.currentSessionId ? setSessionRunning(x, false) : x)),
+      ...(s.currentSessionId != null
+        ? patchSession(s, s.currentSessionId, (x) => setSessionRunning(x, false))
+        : {}),
     }));
     // 取消接口有专用短超时；失败不覆盖已经完成的本地停止。
     void api.cancelTurn(turnId).catch(() => {
@@ -2376,6 +2663,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         api.listTurns(currentSessionId),
         api.listSessionTasks(currentSessionId),
       ]);
+      // plan-568-2333：回滚要经过「取消 → 回滚 → 三次拉取」多个往返，期间用户可能已切走。
+      // 下面的 set 会整表覆盖 messages/turns/tasks，不校验归属就会把旧会话数据写进新会话
+      // （与 refreshMessages / loadSessionSubagents 同一套防护口径）。后端已回滚成功，
+      // 因此返回 true——调用方据此不会再去拉旧会话的回滚预览（那同样会串会话）。
+      if (get().currentSessionId !== currentSessionId) return true;
       // plan-1094: 回滚成功后立即清掉该 turn 及其之后的待审缓存——后端已物理删除
       // RollbackWrite(turn_id >= turn_id)，前端缓存残留会让贴条持续显示「N 待审」
       const nextChanges = { ...get().turnChanges };
@@ -2464,7 +2756,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => {
           const slice = s.sessionState[sid];
           if (!slice) return {};
-          const meta = mergeSubagentMeta(slice.subagentMeta, list);
+          // plan-565-2323 G11：该会话本地已结束的轮次——用于裁剪列表里已不存在的残留运行条目
+          const ended = new Set(
+            (slice.turns ?? []).filter((t) => TURN_ENDED_STATUS.has(String(t.status))).map((t) => t.id),
+          );
+          const meta = mergeSubagentMeta(slice.subagentMeta, list, ended);
           return {
             sessionState: {
               ...s.sessionState,
@@ -2475,7 +2771,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       set((s) => {
-        const meta = mergeSubagentMeta(s.subagentMeta, list);
+        const ended = new Set(
+          (s.turns ?? []).filter((t) => TURN_ENDED_STATUS.has(String(t.status))).map((t) => t.id),
+        );
+        const meta = mergeSubagentMeta(s.subagentMeta, list, ended);
         // v39: 依据合并后的状态统计运行中子代理数——切回会话/断线重连后
         // 「等待子代理结束…」状态可恢复（终态不回退，口径与卡片一致）。
         return { subagentMeta: meta, pendingSubagents: countPendingSubagents(meta) };
@@ -2488,7 +2787,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!currentSessionId) return;
     // plan-41-198: 请求发起前记录本地已确认消息 id——区分「请求期间新增」与「已被删除」
     const baseIds = new Set(
-      get().messages.filter((m) => (Number(m.id) || 0) <= 1e12).map((m) => Number(m.id)),
+      get().messages.filter((m) => !isOptimisticMessageId(Number(m.id) || 0)).map((m) => Number(m.id)),
     );
     try {
       const messages = await api.listSessionMessages(currentSessionId);
@@ -2678,15 +2977,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       // 去重：相同 ID 直接跳过
       if (state.messages.some((m) => m.id === msg.id)) return {};
-      // 处理乐观消息替换：后端真实用户消息到达时，移除同内容同 sender 的临时乐观消息
-      // 乐观消息 ID 是 Date.now()（很大），真实消息 ID 较小
+      // 处理乐观消息替换：后端真实用户消息到达时，用它的 id 顶替对应的占位
+      // plan-549-2281 复盘：替换口径统一走 pairOptimisticMessages——临时 id 不再是 Date.now()，
+      // 判据也不再是「超大 ID」魔法值；单条到达时与整表合并用的是同一套「已确认集合 + 一对一消费」。
       const isUserMsg = msg.sender_type === "user";
       if (isUserMsg) {
-        const optimisticIdx = state.messages.findIndex((m) =>
-          m.sender_type === "user" &&
-          m.id > 1_000_000_000_000 && // 乐观消息特征：超大临时 ID
-          _sameUserContent(m.content, msg.content) // v14: 文本或附件 file_id 一致即可替换
-        );
+        const { pairs } = pairOptimisticMessages(state.messages, [msg]);
+        const pairedId = pairs.size > 0 ? [...pairs.keys()][0] : null;
+        const optimisticIdx = pairedId == null ? -1 : state.messages.findIndex((m) => m.id === pairedId);
         if (optimisticIdx >= 0) {
           const newMessages = [...state.messages];
           newMessages.splice(optimisticIdx, 1, msg); // 原位替换，保持顺序
@@ -2698,8 +2996,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  handleWs: (event, payload) => {
+  handleWs: (event, payload, replay) => {
     const st = get();
+    /* plan-549-2281 复盘：补发批次标记。WsClient 给 sync 期间缓存的事件统一打 replay=true，
+     * 批次结束帧之后派发的事件一律不带。流式增量只丢带标记的那批（服务端本就不把
+     * token/thinking delta 写进补偿缓冲，补发批次里实际上不会有 delta），
+     * 而切回会话后 1 秒内到达的**实时**增量不再被旧的时间窗守卫丢掉。 */
+    const isReplay = Boolean(replay);
     // 运行中收到任何 WS 事件时重置心跳（§9.1 #3：60s 无事件超时兜底）
     if (st.isRunning) _startHeartbeat();
     // 工作流唤醒状态（待唤醒 / 唤醒轮接管 / 放弃）不是程序快照的刷新信号，单独处理，不转发给工作流 store
@@ -2789,11 +3092,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const isUserMsg = rawMsg.sender_type === "user";
           let newMessages: MessageOut[];
           if (isUserMsg) {
-            const optimisticIdx = state.messages.findIndex((m) =>
-              m.sender_type === "user" &&
-              m.id > 1_000_000_000_000 &&
-              _sameUserContent(m.content, rawMsg.content)
-            );
+            // plan-549-2281 复盘：与 addMessage 同口径——按一对一配对选占位，不再「取第一条同文本」
+            const { pairs } = pairOptimisticMessages(state.messages, [rawMsg]);
+            const pairedId = pairs.size > 0 ? [...pairs.keys()][0] : null;
+            const optimisticIdx = pairedId == null ? -1 : state.messages.findIndex((m) => m.id === pairedId);
             if (optimisticIdx >= 0) {
               newMessages = [...state.messages];
               newMessages.splice(optimisticIdx, 1, rawMsg);
@@ -2824,39 +3126,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.started": {
         const startedTurnId = Number(payload.turn_id);
-        const activeSid = Number(payload.session_id ?? 0) || get().currentSessionId;
+        const eventSid = Number(payload.session_id ?? 0);
+        const activeSid = eventSid || get().currentSessionId;
+        // plan-560-2311 E5：事件属于**别的**会话时（多会话并行 / 迟到补发）只更新左栏列表态，
+        // 绝不改当前会话的顶层运行态与待清理缓冲——否则后台会话开跑会让当前会话空转。
+        const isCurrentEvent = !eventSid || eventSid === get().currentSessionId;
         // v2.2: 只让"当前运行 turn 或更新的 turn"接管运行态——断线补发/迟到事件中
         // 旧 turn 的 turn.started 不得覆盖新 turn（同一会话内 turn id 单调递增）。
         const takesOver = (s: ChatState) => s.runningTurnId == null || startedTurnId >= s.runningTurnId;
-        if (takesOver(get())) _clearPendingDeltas(); // v6.5: 清理上一轮残留 delta/完成标记，思考从第一个 token 实时显示
+        if (isCurrentEvent && takesOver(get())) _clearPendingDeltas(); // v6.5: 清理上一轮残留 delta/完成标记，思考从第一个 token 实时显示
         set((s) => {
           // 旧 turn 的迟到 turn.started 不接管运行态，也不清当前 turn 的清单/活动记录
-          if (!takesOver(s)) return {};
+          if (isCurrentEvent && !takesOver(s)) return {};
           return {
-            // v15: 新 turn 清空上一轮的清单与活动记录
-            runningTurnId: startedTurnId,
-            isRunning: true,
-            agentActivity: {},
-            // v7(B/H): 新 turn 清空上一轮运行中的工具实时输出/结果缓存
-            runningToolOutput: {},
-            runningToolResults: {},
-            todos: null,
-            todosTurnId: null,
-            todosCarried: false,
-            todoPersisted: false,
-            // plan-282-1421（第10项）：新 turn 重置缓存均值统计——
-            // "平均缓存命中率"应是当前任务的滑动均值，跨 turn 累加会越来越钝。
-            usageCacheTotals: { inputSum: 0, cachedSum: 0, samples: 0 },
-            // v35: 新 turn 开始时清掉上一轮残留的重试状态提示
-            turnStatus: null,
-            // plan-308-1542 需求1：新一轮开始即清掉上一轮的消息流错误卡
-            flowError: null,
-            // v26: 新 turn 开始 = 旧方案提案失效，隐藏旧方案卡片（task.proposed 后再展示新卡片）
-            pendingPlan: null,
-            pendingPlanTurn: null,
-            sessions: s.sessions.map((x) => (x.id === activeSid ? setSessionRunning(x, true) : x)),
+            // v15: 新 turn 清空上一轮的清单与活动记录（仅当前会话）
+            ...(isCurrentEvent
+              ? {
+                  runningTurnId: startedTurnId,
+                  isRunning: true,
+                  agentActivity: {},
+                  // v7(B/H): 新 turn 清空上一轮运行中的工具实时输出/结果缓存
+                  runningToolOutput: {},
+                  runningToolResults: {},
+                  todos: null,
+                  todosTurnId: null,
+                  todosCarried: false,
+                  todoPersisted: false,
+                  // plan-282-1421（第10项）：新 turn 重置缓存均值统计——
+                  // "平均缓存命中率"应是当前任务的滑动均值，跨 turn 累加会越来越钝。
+                  usageCacheTotals: { inputSum: 0, cachedSum: 0, samples: 0 },
+                  // v35: 新 turn 开始时清掉上一轮残留的重试状态提示
+                  turnStatus: null,
+                  // plan-308-1542 需求1：新一轮开始即清掉上一轮的消息流错误卡
+                  flowError: null,
+                  // v26: 新 turn 开始 = 旧方案提案失效，隐藏旧方案卡片（task.proposed 后再展示新卡片）
+                  pendingPlan: null,
+                  pendingPlanTurn: null,
+                }
+              : {}),
+            // 左栏转圈按事件归属精确置位（patchSession 同时覆盖主会话与子会话桶）
+            ...(activeSid != null ? patchSession(s, activeSid, (x) => setSessionRunning(x, true)) : {}),
           };
         });
+        if (!isCurrentEvent) break;
         // v19: 重建子代理卡片（历史 turn 的子代理经 REST 恢复）
         void get().loadSessionSubagents();
         // v23: 新 turn 开始即刷新任务列表——request 任务/新拆分步骤立刻进入任务摘要与贴条
@@ -2874,10 +3186,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "turn.updated": {
         const turnId = Number(payload.turn_id);
         const status = String(payload.status ?? "");
-        const activeSid = Number(payload.session_id ?? 0) || get().currentSessionId;
+        const eventSid = Number(payload.session_id ?? 0);
+        const activeSid = eventSid || get().currentSessionId;
+        // plan-560-2311 E5：非当前会话的事件只更新左栏列表态（patchSession），
+        // 不改当前会话的顶层运行态 / 待清理缓冲 / plan 待确认标记。
+        const isCurrentEvent = !eventSid || eventSid === get().currentSessionId;
         set((s) => {
           const ended = status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "blocked" || status === "awaiting_confirmation";
           if (ended) _stoppingTurnIds.delete(turnId);
+          if (!isCurrentEvent) {
+            // 别的会话：只按归属修补它的列表标记，其余一概不动
+            return activeSid != null
+              ? patchSession(s, activeSid, (x) => (ended ? setSessionRunning(x, false) : setSessionRunning(x, true)))
+              : {};
+          }
           // plan turn 异常结束（未生成 plan）时清除待确认记录
           const clearPlanTurn = ended && status !== "completed" && s.pendingPlanTurn?.turnId === turnId;
           // v2.2: 仅当结束的 turn 就是当前运行中的 turn（或当前无运行 turn）时才复位运行态。
@@ -2895,14 +3217,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? {
                   runningTurnId: turnId,
                   isRunning: true,
-                  sessions: s.sessions.map((x) => (x.id === activeSid ? setSessionRunning(x, true) : x)),
+                  ...(activeSid != null ? patchSession(s, activeSid, (x) => setSessionRunning(x, true)) : {}),
                 }
               : {}),
             ...(clearsRunning
               ? {
                   runningTurnId: null,
                   isRunning: false,
-                  sessions: s.sessions.map((x) => (x.id === activeSid ? setSessionRunning(x, false) : x)),
+                  ...(activeSid != null ? patchSession(s, activeSid, (x) => setSessionRunning(x, false)) : {}),
                 }
               : {}),
             ...(status === "interrupted"
@@ -2913,6 +3235,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         // v2.2: turn 异常/取消等结束态也续发排队输入（仅非运行态）
         const endedNow = ["completed", "failed", "cancelled", "interrupted", "blocked"].includes(String(payload.status ?? ""));
+        if (!isCurrentEvent) break;
         if (endedNow) void get()._drainQueue();
         // v26: plan 模式 turn 完成（awaiting_confirmation，方案文档已写盘）也刷新变更清单，
         // 否则输入框上方"文件变更"贴条缺失方案文档（非 git 仓库同样适用）。
@@ -2929,9 +3252,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.completed": {
         const turnId = Number(payload.turn_id);
-        const turnCompletedSid = Number(payload.session_id ?? 0) || get().currentSessionId;
+        const evSidDone = Number(payload.session_id ?? 0);
+        const turnCompletedSid = evSidDone || get().currentSessionId;
+        // plan-560-2311 E5：非当前会话的完成事件只更新左栏列表态。
+        const isCurrentEvent = !evSidDone || evSidDone === get().currentSessionId;
         // v2.2: 仅当前运行 turn 完成时才清残留 delta（迟到/旧 turn 的 completed 不干扰新 turn 流式）
-        if (get().runningTurnId == null || get().runningTurnId === turnId) _clearPendingDeltas();
+        if (isCurrentEvent && (get().runningTurnId == null || get().runningTurnId === turnId)) _clearPendingDeltas();
         set((s) => {
           // v38 (plan-482): 方案文档已由 task.proposed 驱动；遗留 plan turn 结束时
           // 仅清理 pendingPlanTurn 标记（不再有 proposed group 兜底）。
@@ -2939,6 +3265,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           let pendingPlanTurn = s.pendingPlanTurn;
           if (pendingPlanTurn && pendingPlanTurn.turnId === turnId) {
             pendingPlanTurn = null;
+          }
+          // 别的会话：只按归属摘除它自己的转圈标记，绝不改当前会话的顶层运行态与流式缓冲
+          if (!isCurrentEvent) {
+            return {
+              ...(turnCompletedSid != null
+                ? patchSession(s, turnCompletedSid, (x) => setSessionRunning(x, false))
+                : {}),
+              pendingPlan,
+              pendingPlanTurn,
+            };
           }
           // v2.2: 仅当完成的就是当前运行 turn（或当前无运行 turn）才复位运行态/清流式缓冲，
           // 旧 turn 的迟到 completed（断线补发/队列场景）不得串到新 turn 上。
@@ -2958,19 +3294,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
                   subagentStreams: {}, subagentThinking: {},  // v19: 子代理流式缓冲同样兜底清空
                   // v1.1/v37: 本地摘除会话转圈标记（按事件携带的 session_id 精确复位，切会话不串）
-                  sessions: s.sessions.map((x) => (x.id === turnCompletedSid ? setSessionRunning(x, false) : x)),
+                  ...(turnCompletedSid != null
+                    ? patchSession(s, turnCompletedSid, (x) => setSessionRunning(x, false))
+                    : {}),
                 }
               : {}),
             pendingPlan,
             pendingPlanTurn,
           };
         });
+        if (!isCurrentEvent) break;
         get().refreshMessages();
         get().refreshTasks();
         // v11: turn 完成后拉取变更审核清单（写盘变更 + 持久化审核状态）
         // 【串会话修复】与 turn.updated 同口径：别的会话的迟到事件不得拉取。
-        const evSidDone = Number(payload.session_id ?? 0);
-        if (!evSidDone || evSidDone === get().currentSessionId) get().loadTurnChanges(turnId);
+        get().loadTurnChanges(turnId);
         // plan-20261018-turn-changes-fix：完成态重拉撤销锁（本轮写盘记录在此刻才完整）。
         const doneLockSid = evSidDone || get().currentSessionId;
         if (doneLockSid != null) void get().loadRevertLock(doneLockSid);
@@ -2987,54 +3325,71 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // （后端已补错误消息；此前 failed 与中断共用事件导致静默终止）。
         // plan-308-1542 需求1：任务执行失败属"任务执行类错误"——只进消息流，不弹右上角 Toast。
         const turnId = Number(payload.turn_id);
+        const failEventSid = Number(payload.session_id ?? 0);
+        const failSid = failEventSid || get().currentSessionId;
         const failReason = String(
           (payload as { error?: unknown; summary?: unknown }).error
             ?? (payload as { summary?: unknown }).summary
             ?? "任务执行失败",
         );
+        // plan-560-2311 E5：非当前会话的失败事件只修补它的列表标记，
+        // 不改当前会话的顶层运行态，也不把错误卡写进当前会话的消息流。
+        const isCurrentEvent = !failEventSid || failEventSid === get().currentSessionId;
         // v2.2: 仅当失败的就是当前运行 turn 才复位运行态（迟到事件同样不串扰）
-        const clearsRunningFail = get().runningTurnId == null || get().runningTurnId === turnId;
+        const clearsRunningFail = isCurrentEvent
+          && (get().runningTurnId == null || get().runningTurnId === turnId);
         set((s) => ({
-          turnStatus: null,
-          turns: s.turns.map((t) => (t.id === turnId
-            ? { ...t, status: "failed", summary: t.summary ?? failReason, completed_at: t.completed_at ?? new Date().toISOString() }
-            : t)),
+          ...(isCurrentEvent
+            ? {
+                turnStatus: null,
+                turns: s.turns.map((t) => (t.id === turnId
+                  ? { ...t, status: "failed", summary: t.summary ?? failReason, completed_at: t.completed_at ?? new Date().toISOString() }
+                  : t)),
+              }
+            : {}),
           ...(clearsRunningFail
             ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} }
             : {}),
+          ...(failSid != null ? patchSession(s, failSid, (x) => setSessionRunning(x, false)) : {}),
         }));
+        if (!isCurrentEvent) break;
         get().setFlowError(failReason, turnId);
         get().refreshMessages();
         get().refreshTurns();
         get().refreshTasks();
         void get().loadSessionSubagents();
         // plan-20261018-turn-changes-fix：失败前也可能已写盘（工具执行过半），锁同样要重拉
-        {
-          const failLockSid = Number(payload.session_id ?? 0) || get().currentSessionId;
-          if (failLockSid != null) void get().loadRevertLock(failLockSid);
-        }
+        if (failSid != null) void get().loadRevertLock(failSid);
         // 失败后不自动消费队列（避免连环失败刷屏），用户确认后手动继续。
         break;
       }
       case "turn.interrupted": {
         const turnId = Number(payload.turn_id);
+        const intEventSid = Number(payload.session_id ?? 0);
+        const intSid = intEventSid || get().currentSessionId;
+        // plan-560-2311 E5：非当前会话的中断事件只修补它的列表标记。
+        const isCurrentEvent = !intEventSid || intEventSid === get().currentSessionId;
         // v2.2: 仅当被中断的就是当前运行 turn 才复位运行态（迟到事件同理不串扰）
-        const clearsRunning = get().runningTurnId == null || get().runningTurnId === turnId;
+        const clearsRunning = isCurrentEvent
+          && (get().runningTurnId == null || get().runningTurnId === turnId);
         set((s) => ({
-          interruptedTurnId: turnId,
-          turns: s.turns.map((t) => (t.id === turnId
-            ? { ...t, status: "interrupted", completed_at: t.completed_at ?? new Date().toISOString() }
-            : t)),
+          ...(isCurrentEvent
+            ? {
+                interruptedTurnId: turnId,
+                turns: s.turns.map((t) => (t.id === turnId
+                  ? { ...t, status: "interrupted", completed_at: t.completed_at ?? new Date().toISOString() }
+                  : t)),
+              }
+            : {}),
           ...(clearsRunning ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} } : {}),
+          ...(intSid != null ? patchSession(s, intSid, (x) => setSessionRunning(x, false)) : {}),
         }));
+        if (!isCurrentEvent) break;
         get().refreshMessages();
         get().refreshTasks();
         void get().loadSessionSubagents();
         // plan-20261018-turn-changes-fix：中断时本轮可能已有写盘，锁必须重拉
-        {
-          const intLockSid = Number(payload.session_id ?? 0) || get().currentSessionId;
-          if (intLockSid != null) void get().loadRevertLock(intLockSid);
-        }
+        if (intSid != null) void get().loadRevertLock(intSid);
         // interrupted 由用户停止，不自动消费队列。
         break;
       }
@@ -3176,9 +3531,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const isCurrent = pSid === s.currentSessionId;
           return {
             ...(isCurrent ? { pendingSubagents: pCount } : {}),
-            sessions: s.sessions.map((x) => (x.id === pSid
-              ? (pCount > 0 ? setSessionRunning(x, true) : x)
-              : x)),
+            ...(pSid ? patchSession(s, pSid, (x) => (pCount > 0 ? setSessionRunning(x, true) : x)) : {}),
           };
         });
         break;
@@ -3280,7 +3633,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
         // v35: 流式恢复 = 重试已成功，自动清除状态行提示
         if (get().turnStatus != null) set({ turnStatus: null });
-        if (aid && delta && !_streamDoneText[`thinking:${tid ?? aid}`] && Date.now() >= _replayGuardUntil) {
+        // plan-549-2281 复盘：只丢补发批次里的重放增量（replay 标记），实时增量一律放行
+        if (aid && delta && !isReplay && !_streamDoneText[`thinking:${tid ?? aid}`]) {
           _pendingThinking[aid] = (_pendingThinking[aid] || "") + delta;
           // v19: 记录 thread_id，flush 时按主/子分桶
 
@@ -3310,7 +3664,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const tid = payload.thread_id != null ? Number(payload.thread_id) : null;
         // v35: 流式恢复 = 重试已成功，自动清除状态行提示
         if (get().turnStatus != null) set({ turnStatus: null });
-        if (aid && delta && !_streamDoneText[`token:${tid ?? aid}`] && Date.now() >= _replayGuardUntil) {
+        // plan-549-2281 复盘：同上——只丢 replay 批次里的增量，实时增量不再被时间窗误伤
+        if (aid && delta && !isReplay && !_streamDoneText[`token:${tid ?? aid}`]) {
           _pendingToken[aid] = (_pendingToken[aid] || "") + delta;
 
           if (tid != null) _pendingThread[aid] = tid;
@@ -3391,6 +3746,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // plan-156-620：会话归属校验——切换瞬间旧连接派发的清单会写进新会话的进程栏目
         const evSidTodo = Number(payload.session_id ?? 0);
         if (evSidTodo && evSidTodo !== get().currentSessionId) break;
+        /* plan-562-2318 B10：子代理写的清单不进主会话「进程」栏。
+         * 子代理的 ToolContext.session_id 就是父会话，光靠 session_id 分不开；后端已带
+         * is_subagent。此前不过滤，子代理每更新一次清单就把主会话的进度整份覆盖、
+         * 1.5 秒后又恢复，表现为「进程」总数在 15 与 5 之间反复跳。 */
+        if (payload.is_subagent === true) break;
         // v15: 模型自主维护的执行清单（todo_write）
         const items = Array.isArray(payload.todos) ? payload.todos : [];
         set({
@@ -3666,13 +4026,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "approval.request": {
+        // 会话隔离修复：补发批次（replay）里的审批 / 提问请求一律不入队。
+        // 每次进会话 lastSeq 都从 0 开始，服务端会把本会话补偿缓冲里的历史 approval.request
+        // 整体重放；已作答的请求会因此重新弹卡（表现为「回答完又回到第 1 题」）。
+        // 真正仍未决的请求由 sync.response 到达后的未决清单重建（见下方分支），
+        // 这里只记录 id 供重建时判定去留。
+        const replayAid = String(payload.approval_id ?? "");
+        if (isReplay) {
+          if (replayAid) _replayedApprovalIds.add(replayAid);
+          break;
+        }
         // plan-230-1144: 跨会话串线双保险——服务端已按 detail.session_id 精确路由，
         // 前端再校验一次：detail 携带的 session_id 与当前会话不一致时忽略
         // （历史遗留事件、多窗口重放等场景下防止提问/审批弹进错误的会话）。
         const detail = (payload.detail || {}) as Record<string, unknown>;
         const evtSid = Number(detail.session_id ?? 0);
         const curSid = get().currentSessionId;
-        if (evtSid > 0 && curSid != null && evtSid !== curSid) break;
+        // 会话隔离：会话未就绪（首页）或事件属于其他会话时一律不入队。
+        // 此前仅在 curSid != null 时校验，首页/切换瞬间到达的请求会进入当前队列并被
+        // 快照进会话切片，表现为「A 会话的提问卡出现在 B 会话」。
+        if (evtSid > 0 && evtSid !== curSid) break;
         // 作答草稿按 approvalId 键控，这里不动它（草稿只在本提问被作答 / 取消 / 回执时清）。
         // 切回会话时 WS 的 sync 会按序重放历史审批事件：若这里清草稿，中间那些已结束审批的
         // request 会把仍在等待的提问已填好的答案冲掉（“切走再回来草稿丢失”的根因）。
@@ -3692,6 +4065,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // plan-75-332: 一并清掉解释内容（本次审批已结束，保留只会串到下个审批卡）。
         // 只清属于该审批的状态：切回会话时 sync 重放的历史回执不能误清当前仍在等待的提问及其草稿。
         const respondedId = String(payload.approval_id ?? "");
+        // 会话隔离：回执到达即摘掉跨会话索引条目。全局通道会按广播的 session_id 再清一次，
+        // 这里按 approvalId 兜底，保证回执丢失或延迟时卡片也不会复活。
+        if (respondedId) pendingActions.clearByApprovalId(respondedId);
         set((s) => {
           if (!respondedId) return { approvalQueue: [], pendingApproval: null, questionDraft: null, approvalExplain: null };
           const patch: Partial<ChatState> = {};
@@ -3818,9 +4194,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const isCurrent = sid === s.currentSessionId;
           return {
             ...(isCurrent ? { isRunning: false, runningTurnId: null, pendingSubagents: subPending } : {}),
-            sessions: s.sessions.map((x) => (x.id === sid
-              ? setSessionRunning(x, subPending > 0)
-              : x)),
+            ...(sid ? patchSession(s, sid, (x) => setSessionRunning(x, subPending > 0)) : {}),
           };
         });
         // 仅当前会话需要立即刷新 turn/task（后台会话切回时由 switchSession 的 refresh 补齐）
@@ -3829,7 +4203,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           get().refreshTasks();
         }
         void api.getSession(sid).then((updated) => {
-          set((s) => ({ sessions: s.sessions.map((x) => (x.id === sid ? updated : x)) }));
+          set((s) => patchSession(s, sid, () => updated));
         }).catch(() => { /* 标题刷新失败不影响已完成的会话 */ });
         break;
       }
@@ -3843,17 +4217,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (sid == null) break;
         const goalStatus = String(payload.status ?? "");
         const turnsUsed = Number(payload.turns_used ?? 0);
-        set((s) => ({
-          sessions: s.sessions.map((x) => (x.id === sid
-            ? {
-                ...x,
-                ...(goalStatus === "active" || goalStatus === "completed" || goalStatus === "cancelled"
-                  ? { goal_status: goalStatus } : {}),
-                ...(typeof payload.text === "string" ? { goal_text: payload.text } : {}),
-                ...(payload.turns_used != null ? { goal_turns_used: turnsUsed } : {}),
-              }
-            : x)),
-        }));
+        set((s) => patchSession(s, sid, (x) => ({
+          ...x,
+          ...(goalStatus === "active" || goalStatus === "completed" || goalStatus === "cancelled"
+            ? { goal_status: goalStatus } : {}),
+          ...(typeof payload.text === "string" ? { goal_text: payload.text } : {}),
+          ...(payload.turns_used != null ? { goal_turns_used: turnsUsed } : {}),
+        })));
         break;
       }
       case "error":
@@ -3864,11 +4234,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "sync.response": {
         const count = Number(payload.count ?? 0);
         if (count > 0) {
-          _clearPendingDeltas();
-          set({ streamingBuffers: {}, thinkingBuffers: {} });
+          // plan-568-2333：只有「没有运行中轮次」时才能清空流式缓冲。服务端不把
+          // token/thinking 增量写入补偿缓冲（见 gateway/ws.py 的 _STREAM_NO_BUFFER_EVENTS），
+          // 所以运行中清空不会补回任何内容，只会把当前正在输出的正文与思考整段抹掉，
+          // 直到 token.done 的 full_text 到达才跳回来。运行中改为只刷新列表态。
+          if (!get().isRunning) {
+            _clearPendingDeltas();
+            set({ streamingBuffers: {}, thinkingBuffers: {} });
+          }
           void get().refreshMessages();
           void get().refreshTurns();
           void get().refreshTasks();
+        }
+        // 会话隔离修复：补发结束即用后端未决清单重建**当前会话**的审批队列。
+        // 重放的历史请求已在 approval.request 分支被忽略；这里既补回断线期间真正到达的
+        // 提问 / 审批，也顺手摘掉已作答、已超时的幽灵条目——否则切回会话时旧提问卡会复活。
+        const pendingSid = get().currentSessionId;
+        if (pendingSid != null) {
+          void api.getPendingApprovals().then((res) => {
+            // 请求期间可能已切走：迟到响应不得写进新会话
+            if (get().currentSessionId !== pendingSid) return;
+            const items = res.items.filter((it) => Number(it.session_id ?? 0) === pendingSid);
+            set((s) => {
+              // 只对「本轮补发里出现过」的条目做去留判定；实时到达的新请求无条件保留
+              const queue = s.approvalQueue.filter((x) =>
+                items.some((it) => it.approval_id === x.approvalId)
+                || !_replayedApprovalIds.has(x.approvalId),
+              );
+              for (const it of items) {
+                if (!queue.some((x) => x.approvalId === it.approval_id)) {
+                  queue.push({
+                    approvalId: it.approval_id,
+                    detail: (it.detail || {}) as Record<string, unknown>,
+                  });
+                }
+              }
+              return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
+            });
+            // 同步补全跨会话索引（全局通道可能漏事件；noteRequest 幂等）
+            for (const it of items) {
+              pendingActions.noteRequest(
+                pendingSid, it.approval_id,
+                it.kind === "question" ? "question" : "approval",
+                (it.detail || {}) as Record<string, unknown>,
+              );
+            }
+            _replayedApprovalIds.clear();
+          }).catch(() => { /* 拉取失败：保留当前队列，后续实时事件仍会补齐 */
+            _replayedApprovalIds.clear();
+          });
+        } else {
+          _replayedApprovalIds.clear();
         }
         break;
       }
@@ -3943,11 +4359,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingActions.clearRequest(sid, String(p.approval_id ?? ""));
         return;
       }
-      // plan-156-620：新建执行子会话（任意会话视图下都要即时出现在左栏父会话下方）
-      if (ev.event === "subsession.created") {
-        void get().loadSubsessionIndex();
-        return;
-      }
+      // plan-549-2281 复盘清理：`subsession.created` 死分支已删除——子会话创建下线后
+      // 服务端不再发出该事件（ws 转发白名单已同步移除），历史子会话桶只在启动/重连时重建。
       // plan-156-620：子会话行的运行态 / 标题同步（子会话不在 sessions 里，下方各分支覆盖不到）
       {
         const running = subsessionRunningOf(ev.event, p);
@@ -3979,7 +4392,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!pending && Number(p.turn_id ?? 0) > 0) {
           set((s) => {
             if (!s.sessions.some((x) => x.id === sid)) return {};
-            return { sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)) };
+            // plan-560-2311 E5：走统一入口，同时覆盖子会话桶
+            return patchSession(s, sid, (x) => setSessionRunning(x, true));
           });
         }
         _setWakeupPending(sid, pending);
@@ -4013,9 +4427,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
           return {
-            sessions: s.sessions.map((x) => (x.id === sid
-              ? { ...setSessionRunning(x, subPending > 0), ...(ts ? { last_activity_at: ts } : {}) }
-              : x)),
+            ...patchSession(s, sid, (x) => (
+              { ...setSessionRunning(x, subPending > 0), ...(ts ? { last_activity_at: ts } : {}) }
+            )),
             ...(s.currentSessionId === sid ? { isRunning: false, runningTurnId: null } : {}),
           };
         });
@@ -4030,9 +4444,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           || (event === "subagent.pending" && Number(p.pending ?? 0) > 0)) {
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
-          return {
-            sessions: s.sessions.map((x) => (x.id === sid ? setSessionRunning(x, true) : x)),
-          };
+          return patchSession(s, sid, (x) => setSessionRunning(x, true));
         });
         return;
       }
@@ -4049,13 +4461,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!title && !ts && !permissionMode && !approvalMode) return;
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
-          return {
-            sessions: s.sessions.map((x) => (x.id === sid
-              ? { ...x, ...(title ? { title } : {}), ...(ts ? { last_activity_at: ts } : {}),
-                  ...(permissionMode ? { permission_mode: permissionMode } : {}),
-                  ...(approvalMode ? { approval_mode: approvalMode } : {}) }
-              : x)),
-          };
+          return patchSession(s, sid, (x) => ({ ...x, ...(title ? { title } : {}), ...(ts ? { last_activity_at: ts } : {}),
+            ...(permissionMode ? { permission_mode: permissionMode } : {}),
+            ...(approvalMode ? { approval_mode: approvalMode } : {}) }));
         });
         return;
       }
@@ -4065,9 +4473,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!ts) return;
         set((s) => {
           if (!s.sessions.some((x) => x.id === sid)) return {};
-          return {
-            sessions: s.sessions.map((x) => (x.id === sid ? { ...x, last_activity_at: ts } : x)),
-          };
+          return patchSession(s, sid, (x) => ({ ...x, last_activity_at: ts }));
         });
       }
     });

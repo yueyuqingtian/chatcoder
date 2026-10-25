@@ -64,6 +64,8 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
   const shadowedIds = Array.isArray(c.shadowed_ids) ? (c.shadowed_ids as number[]) : [];
   const shadowedTokens = Number(c.shadowed_tokens ?? 0);
   const savedTokens = Number(c.saved_tokens ?? 0);
+  // plan-548-2277：压缩时同一次调用归档的会话记忆条数（0 = 本次无归档，不展示）
+  const sessionMemoryCount = Number(c.session_memory_count ?? 0);
   const restored = c.restored === true;
   const trigger = String(c.trigger ?? "pressure");
   const triggerLabel = trigger === "context-overflow" ? "溢出恢复" : "压力触发";
@@ -125,6 +127,9 @@ export const CompactCard = memo(function CompactCard({ msg }: { msg: MessageOut 
           <div className="compact-card-meta">
             {shadowedIds.length > 0 && <span>遮蔽 {shadowedIds.length} 条消息（ID {shadowedIds[0]}…{shadowedIds[shadowedIds.length - 1]}）</span>}
             {shadowedTokens > 0 && <span>被压缩消息原占用 {shadowedTokens.toLocaleString()} tokens</span>}
+            {sessionMemoryCount > 0 && (
+              <span>已归档 {sessionMemoryCount} 条会话记忆（memory_search 可按需检索）</span>
+            )}
             {index > 0 && <span>AI 可用 compaction_view 按 # {index} 查看压缩前消息</span>}
           </div>
           {!restored && (

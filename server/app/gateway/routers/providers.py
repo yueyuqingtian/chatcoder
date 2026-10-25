@@ -99,6 +99,8 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
         created_at=str(p.created_at) if p.created_at else None,
         proxy_mode=getattr(p, "proxy_mode", None) or "inherit",
         proxy_url=getattr(p, "proxy_url", None),
+        # plan-565-2323 G2：计数与账号列表同口径（都含停用行）——否则左侧写「2 账号」
+        # 而右侧账号面板空着，用户既看不到也改不回来
         credential_count=len(creds),
         active_credential_count=len(active_creds),
         # plan-271-1364: 凭据取用策略（sticky | round_robin）
@@ -284,15 +286,22 @@ async def _require_provider(db: AsyncSession, provider_id: int):
 
 @router.get("/providers/{provider_id}/credentials", response_model=list[ProviderCredentialOut])
 async def list_credentials(provider_id: int, db: AsyncSession = Depends(get_db)):
-    """列出该供应商的全部凭据（按当前取用顺序，首个为「当前使用」）。"""
+    """列出该供应商的全部凭据（含已停用行，按当前取用顺序，首个可用者为「当前使用」）。"""
     provider = await _require_provider(db, provider_id)
     creds = await credential_service.list_credentials(db, provider_id)
     strategy = getattr(provider, "credential_strategy", None) or "sticky"
+    # plan-565-2323 G2：停用行也必须出现在列表里——否则用户一点「停用」，那条账号就整条
+    # 消失，面板显示「暂无账号」而左列仍写 N 账号，且再也没有入口把它重新打开
     if (provider.api_format or "openai").lower() == "ta3":
-        ranked = credential_service.available_credentials(creds, strategy=strategy)
+        ranked = credential_service.available_credentials(
+            creds, strategy=strategy, include_inactive=True,
+        )
     else:
-        ranked = credential_service.rank_credentials(creds, strategy=strategy)
-    preferred_id = ranked[0].id if ranked else None
+        ranked = credential_service.rank_credentials(
+            creds, strategy=strategy, include_inactive=True,
+        )
+    # preferred（当前优先使用）只从可用集合里取：停用行不可能是「当前使用」
+    preferred_id = next((c.id for c in ranked if getattr(c, "is_active", True)), None)
     return [await _cred_to_out(c, preferred_id=preferred_id) for c in ranked]
 
 
@@ -316,13 +325,15 @@ async def create_credential(provider_id: int, body: ProviderCredentialCreate,
 async def update_credential(credential_id: int, body: ProviderCredentialUpdate,
                             db: AsyncSession = Depends(get_db)):
     """编辑凭据（label / key / 优先级 / 启停）。"""
-    ok = await credential_service.update_credential(
+    found = await credential_service.update_credential(
         db, credential_id,
         label=body.label, api_key=body.api_key, priority=body.priority,
         is_active=body.is_active, extra=body.extra,
     )
-    if not ok:
-        raise HTTPException(404, "credential not found")
+    if not found:
+        # plan-565-2323 G1：此前这里拿到的其实是「本次是否触发启用复位」，停用恒为假，
+        # 于是写库成功却报 404；现在只按记录是否存在判定，文案也改回中文
+        raise HTTPException(404, "账号不存在或已被移除")
     cred = await credential_service.get_credential(db, credential_id)
     return await _cred_to_out(cred)
 

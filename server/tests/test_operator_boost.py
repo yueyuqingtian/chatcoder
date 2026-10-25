@@ -172,52 +172,84 @@ def test_guard_silent_when_saved_or_reused_or_trivial():
 # ── 操控子会话 ──────────────────────────────────────────────
 
 
-class _FakeDb:
-    def __init__(self, levels):
-        self._levels = levels
-
-    async def get(self, _model, _id):
-        return SimpleNamespace(reasoning_efforts=self._levels)
-
-
 @pytest.mark.asyncio
-async def test_resolve_operator_effort(monkeypatch):
-    from app.services.subsession_service import is_operator_purpose, resolve_operator_effort
+async def test_operator_subagent_purpose_and_effort(monkeypatch):
+    """plan-549-2281：操控子会话下线后，界面操作加速能力迁到子代理的 purpose=operator。
 
-    monkeypatch.setattr(settings, "operator_reasoning_effort", "lowest", raising=False)
-    assert await resolve_operator_effort(_FakeDb(["none", "minimal", "low", "high"]), 1) == "minimal"
-    assert await resolve_operator_effort(_FakeDb(["medium", "high"]), 1) == "medium"
-    assert await resolve_operator_effort(_FakeDb([]), 1) == "low"
-    assert await resolve_operator_effort(_FakeDb(["low"]), None) == "low"
+    断言两件事：① spawn_subagent 的 schema 暴露 purpose（含 operator 取值）；
+    ② 档位解析真实覆盖（plan-549-2281 复盘修复：此前这里只剩一条近乎永真的断言，
+    真实解析逻辑——lowest=最低非关闭档 / follow / 指定档 / 档位未排序——零覆盖）。
+    """
+    from app.orchestration.subagent_tools import SPAWN_SUBAGENT_SCHEMA
+    from app.orchestration.agent_loop import lowest_open_effort, resolve_operator_effort
 
-    monkeypatch.setattr(settings, "operator_reasoning_effort", "follow", raising=False)
-    assert await resolve_operator_effort(_FakeDb(["low"]), 1) is None
-    monkeypatch.setattr(settings, "operator_reasoning_effort", "none", raising=False)
-    assert await resolve_operator_effort(_FakeDb(["low"]), 1) == "none"
+    props = SPAWN_SUBAGENT_SCHEMA["function"]["parameters"]["properties"]
+    # plan-560-2311：enum 只有 "operator"，不能把 "" 放进来——Gemini 系网关会直接
+    # 拒绝空枚举值（400 GenerateContentRequest.tools[...].enum[0]: cannot be empty），
+    # 整轮请求失败。普通任务省略该参数即可，语义与旧版空串一致。
+    assert props["purpose"]["enum"] == ["operator"]
+    assert "operator" in props["purpose"]["description"]
 
-    monkeypatch.setattr(settings, "operator_subsession_enabled", True, raising=False)
-    assert is_operator_purpose("operator") and not is_operator_purpose("")
-    monkeypatch.setattr(settings, "operator_subsession_enabled", False, raising=False)
-    assert not is_operator_purpose("operator")
+    # lowest：声明档位里最低的非关闭档；档位列表未排序也不能取错（取首元素的旧 bug）
+    assert resolve_operator_effort("lowest", ["high", "medium", "low"]) == "low"
+    assert resolve_operator_effort("lowest", ["medium", "none", "minimal"]) == "minimal"
+    assert resolve_operator_effort("lowest", []) == "low"            # 读不到档位兜底
+    assert resolve_operator_effort("lowest", ["none"]) == "low"      # 全关闭兜底
+    # follow：跟随主档位（None = 不覆盖）
+    assert resolve_operator_effort("follow", ["high", "low"]) is None
+    # plan-560-2311：空值等价于 "lowest"，即「模型声明的档位里取最低非关闭档」——
+    # 声明只有 high 时结果就是 high，不是固定 low（low 仅在读不到档位或全关闭时兜底）
+    assert resolve_operator_effort("", ["high"]) == "high"
+    assert resolve_operator_effort("", ["high", "low"]) == "low"
+    assert resolve_operator_effort("", []) == "low"
+    # 指定档位：按字面（截 20 字符）
+    assert resolve_operator_effort("medium", ["low"]) == "medium"
+    assert len(resolve_operator_effort("x" * 40, [])) == 20
+    # lowest_open_effort 单独可用（spawn 侧也用它做通用档位判定）
+    assert lowest_open_effort(["High", "LOW"]) == "low"              # 大小写折叠
+    assert lowest_open_effort(["", " ", None]) == "low"              # 脏输入全滤掉
 
 
 def test_operator_hint_gating(monkeypatch):
-    from app.orchestration.prompts.parallel_subsession import operator_subsession_hint
+    """操控子代理提示词的注入门禁：模式、GUI 工具、身份三者都要满足。"""
+    from app.orchestration.prompts.subagent_dispatch import operator_subagent_hint
 
-    monkeypatch.setattr(settings, "operator_subsession_enabled", True, raising=False)
-    assert "purpose=operator" in operator_subsession_hint("agent", gui_tools=True)
-    assert operator_subsession_hint("readonly", gui_tools=True) == ""
-    assert operator_subsession_hint("agent", gui_tools=False) == ""
-    assert operator_subsession_hint("agent", gui_tools=True, is_subsession=True) == ""
-    monkeypatch.setattr(settings, "operator_subsession_enabled", False, raising=False)
-    assert operator_subsession_hint("agent", gui_tools=True) == ""
+    monkeypatch.setattr(settings, "operator_subagent_enabled", True, raising=False)
+    assert "purpose=operator" in operator_subagent_hint("agent", gui_tools=True)
+    assert operator_subagent_hint("readonly", gui_tools=True) == ""
+    assert operator_subagent_hint("agent", gui_tools=False) == ""
+    # 子代理自身不再拿到「派给操控子代理」的提示（它不能派下级）
+    assert operator_subagent_hint("agent", gui_tools=True, is_subagent=True) == ""
+    monkeypatch.setattr(settings, "operator_subagent_enabled", False, raising=False)
+    assert operator_subagent_hint("agent", gui_tools=True) == ""
 
 
-def test_create_subsession_schema_exposes_purpose():
-    from app.orchestration.subsession_tools import CREATE_SUBSESSION_SCHEMA
+def test_subagent_dispatch_hint_gating_and_wording(monkeypatch):
+    """plan-549-2281 复盘修复：派发提示词的门禁与口径补测——此前该模块零测试覆盖，
+    旧 create_subsession 的 background/task/context 参数话术正因如此漏网。"""
+    from app.orchestration.prompts import subagent_dispatch as sd
 
-    props = CREATE_SUBSESSION_SCHEMA["function"]["parameters"]["properties"]
-    assert props["purpose"]["enum"] == ["", "operator"]
+    monkeypatch.setattr(settings, "subagent_enabled", True, raising=False)
+    full = sd.subagent_dispatch_hint("agent")
+    assert "spawn_subagent" in full and "mode=" in full
+    # 旧工具参数不得再出现：spawn_subagent 没有 background 参数
+    #（该话术会让模型在该阻塞等结论时做无效调用）
+    assert "background" not in full
+    assert "task_description" in full  # 参数名按新 schema（不是旧 create_subsession 的 task/context）
+    # 只读 / 计划模式：受限版（引导只派只读调研），不得再引导「实现可委派」
+    ro = sd.subagent_dispatch_hint("readonly")
+    assert "只读调研子代理" in ro
+    assert "实现可以且应该委派" not in ro
+    assert sd.subagent_dispatch_hint("plan", full=False) != ""
+    # 身份门禁：子代理自身 / 历史挂靠子会话都不注入（由 legacy hint 单独约束后者）
+    assert sd.subagent_dispatch_hint("agent", is_subagent=True) == ""
+    assert sd.subagent_dispatch_hint("agent", is_legacy_child=True) == ""
+    assert sd.operator_subagent_hint("agent", gui_tools=True, is_legacy_child=True) == ""
+    assert sd.legacy_child_session_hint(True) != ""
+    assert sd.legacy_child_session_hint(False) == ""
+    # 总开关：关闭时不注入（工具已不下发，提示词必须同口径停止）
+    monkeypatch.setattr(settings, "subagent_enabled", False, raising=False)
+    assert sd.subagent_dispatch_hint("agent") == ""
 
 
 # ── 下载回报文案 ────────────────────────────────────────────

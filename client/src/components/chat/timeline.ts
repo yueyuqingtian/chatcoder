@@ -19,7 +19,8 @@ import { recordDerivation } from "../../perf/metrics";
 import { formatBgElapsed } from "../../utils/bgFormat";
 import {
   SUBSESSION_QUESTION_TOOL, SUBSESSION_REPORT_TOOL, SUBSESSION_RESULT_TOOL,
-  parseSubsessionNotice, parseSubsessionQuestion,
+  SUBAGENT_QUESTION_TOOL, SUBAGENT_REPORT_TOOL, SUBAGENT_COMPLETION_TOOL,
+  parseSubagentNotice, parseSubsessionNotice, parseSubsessionQuestion,
 } from "../../utils/subsessionQuestion";
 
 export interface ToolLeaf {
@@ -764,6 +765,58 @@ function isSubsessionQuestion(c: Record<string, unknown>): boolean {
   return typeof c.question_id === "string" && c.question_id.length > 0;
 }
 
+/** plan-549-2281：子代理提问 / 进度上报 / 完成通知（子会话下线后的唯一「向上抛」通道）。
+ *  优先于普通正文分支判定——它带 mailbox 标记但 msg_type 是 text，落到正文会显示成裸文本。
+ *  plan-549-2281 复盘修复：子代理分支必须排在 isSubsessionNotice **之前**——后端给这三类
+ *  落库消息带「按用户输入回放」标记（content.subsession_report=true，供历史回放按正确角色
+ *  重建），而 isSubsessionNotice 也认这个标记，后判就会把子代理消息错渲染成子会话汇报。 */
+function isSubagentQuestion(c: Record<string, unknown>): boolean {
+  return mailboxKindOf(c) === "subagent_question";
+}
+
+function isSubagentReport(c: Record<string, unknown>): boolean {
+  return mailboxKindOf(c) === "subagent_report";
+}
+
+function isSubagentCompletion(c: Record<string, unknown>): boolean {
+  return mailboxKindOf(c) === "subagent_completion";
+}
+
+/** plan-549-2281：子代理提问 / 汇报 → 与子会话同一行版式的单叶子工具条目。
+ *
+ *  子会话下线后所有「向上抛」的消息都来自子代理，因此复用 SubsessionQuestionRow 的版式，
+ *  但来源换成「子代理 #N「任务标题」」，动作换成「打开执行过程」（右面板）。
+ *  与子会话那一版的区别：没有 question_id 语义（答复走 send_to_subagent agent_id），
+ *  来源 id 就是 agent_id。 */
+function subagentNoticeItem(
+  m: MessageOut, c: Record<string, unknown>, tool: string,
+): TurnItem {
+  const parsed = parseSubagentNotice(msgText(c));
+  const leaf: ToolLeaf = {
+    callKey: `subag-${m.id}`,
+    tool,
+    args: {
+      agent_id: parsed.agentId,
+      title: parsed.title,
+      subagent_kind: parsed.kind,
+      // plan-560-2311 E2：状态词透传给渲染层，行内动词才能显示「子代理失败 / 子代理已取消」
+      status: parsed.status,
+    },
+    agentName: "",
+    threadId: parsed.agentId,
+    turnId: m.turn_id != null ? Number(m.turn_id) : null,
+    // plan-560-2311 E2：失败按失败态着色；「已取消」不算失败——它是用户主动中止，
+    // 标红会让用户以为自己操作出错，因此保持中性的完成态。
+    ok: parsed.status !== "失败",
+    output: parsed.body,
+    error: null,
+    durationMs: null,
+    changeStat: null,
+    image: null,
+  };
+  return { kind: "tools", nodes: [{ kind: "leaf", leaf }], firstId: Number(m.id) };
+}
+
 /** plan-20261021-subq-row：把子会话提问换成一条单叶子的工具条目（伪工具名 subsession_question）。
  *
  *  此前是一张常显卡片：任务进行中夹在工具行之间显得突兀，完成后又整张留在汇报上方（工作过程折叠不收它）。
@@ -899,8 +952,9 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     if (m.msg_type !== MsgType.ToolResult) continue;
     const rc = m.content as Record<string, unknown>;
     const tool = String(rc.tool ?? "");
-    // 子代理结果由 SubagentCard 展示、不进 ToolTree；卡片用它区分「在跑」与「派发被拒」
-    if (tool === "spawn_subagent") {
+    // 子代理结果由 SubagentCard 展示、不进 ToolTree；卡片用它区分「在跑」与「派发被拒」。
+    // plan-568-2333：resume_subagent 的结果同样单独索引——续跑也要按时间线入条。
+    if (tool === "spawn_subagent" || tool === "resume_subagent") {
       spawnResultsByKey.set(String(rc.call_key ?? ""), m);
       continue;
     }
@@ -959,6 +1013,23 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       continue;
     }
     const c = m.content as Record<string, unknown>;
+    // plan-549-2281 复盘修复：子代理三类通知先于子会话分支判定（见 isSubagentQuestion
+    // 处的说明——它们与子会话通知共用 content.subsession_report 回放标记）。
+    if (isSubagentQuestion(c)) {
+      flushTools();
+      items.push(subagentNoticeItem(m, c, SUBAGENT_QUESTION_TOOL));
+      continue;
+    }
+    if (m.sender_type === SenderType.System && isSubagentReport(c)) {
+      flushTools();
+      items.push(subagentNoticeItem(m, c, SUBAGENT_REPORT_TOOL));
+      continue;
+    }
+    if (m.sender_type === SenderType.System && isSubagentCompletion(c)) {
+      flushTools();
+      items.push(subagentNoticeItem(m, c, SUBAGENT_COMPLETION_TOOL));
+      continue;
+    }
     // plan-474-2105：子会话治理的两类系统消息先于 System / Text 分支判定——它们带着
     // mailbox 标记但 msg_type 是 text，落到普通正文分支会显示成裸文本。
     // buildTimeline 的完整构建与增量构建都经 buildTurnItems，因此刷新前后判定一致。
@@ -983,7 +1054,11 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
     }
     if (m.msg_type === MsgType.ToolCall) {
       afterSuggestion = false; // 建议工具之后又有别的工具调用：其后的思考属于正常过程
-      if (c.tool === "spawn_subagent") {
+      // plan-568-2333：resume_subagent（续跑）与 spawn_subagent 一样，是「派发/续跑」这个
+      // 动作本身的时间线锚点——后端在工具执行前就已落库 TOOL_CALL，位置精确。此前只认
+      // spawn_subagent，续跑调用被当成普通工具节点混进 ToolTree，卡片只能走 TurnGroup 的
+      // 未落位兜底槽位，表现为「子代理卡片始终停在消息流底部」。
+      if (c.tool === "spawn_subagent" || c.tool === "resume_subagent") {
         // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
         // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
         flushTools();

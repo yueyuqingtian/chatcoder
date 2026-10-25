@@ -54,10 +54,14 @@ import type {
  * v6.4: 开发模式直连后端，绕过 vite 代理（Node 18+ Happy Eyeballs IPv6 问题）。
  * v2.1: 打包版端口由主进程探活后透传（getBackendPort），端口冲突自动换空闲端口。 */
 const IS_ELECTRON = typeof window !== "undefined" && Boolean((window as Window).chatcoderAPI);
-const IS_DEV = import.meta.env.DEV;
+/** plan-549-2281 复盘：`import.meta.env` 只在 Vite 注入时存在（ws.ts 早已防御性访问）。
+ *  这里是 store/chat.ts 的传递依赖，直接读 `.DEV` 会让 Node 单测一 import 就抛
+ *  「Cannot read properties of undefined」——前端纯函数回归测试因此完全跑不起来。 */
+const _env = (import.meta as { env?: { DEV?: boolean; VITE_API_PORT?: string } }).env;
+const IS_DEV = Boolean(_env?.DEV);
 /** plan-20261009-ui D0：开发态可用 VITE_API_PORT 指向独立的开发后端（隔离测试库），
  *  避免浏览器调试时读写已安装版本的真实数据；未设置时保持 12973。 */
-export const DEV_API_PORT = Number(import.meta.env.VITE_API_PORT) || 12973;
+export const DEV_API_PORT = Number(_env?.VITE_API_PORT) || 12973;
 
 /** 桌面版后端端口（主进程透传，Promise 缓存） */
 let _backendPortPromise: Promise<number> | null = null;
@@ -90,25 +94,39 @@ async function baseForFetch(): Promise<string> {
   return BASE;
 }
 
+/** 单次请求的超时时间（旧实现写在 fetchWithRetry 内部，提取出来便于统一口径） */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/** 只有幂等方法才允许「失败后自动重发」。
+ *  plan-549-2281 复盘：PATCH / PUT / DELETE 走的是同一封装，桌面端 maxRetries=8——
+ *  超时后会把一次结果未知的写入重放成最多 9 次（审核状态、设置写入可能被重复提交，
+ *  或按过期值覆盖后来的写入）。写操作失败应当是「报错给用户、由用户决定是否重试」。 */
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 /** 带重试的 fetch — 后端启动中时自动重试,避免 "Failed to fetch" */
 async function fetchWithRetry(
   input: string,
   init?: RequestInit,
   maxRetries: number = IS_ELECTRON ? 8 : 0,
 ): Promise<Response> {
+  const method = String(init?.method ?? "GET").toUpperCase();
+  const retries = IDEMPOTENT_METHODS.has(method) ? maxRetries : 0;
   let lastErr: unknown;
-  for (let i = 0; i <= maxRetries; i++) {
+  for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(input, { ...init, signal: controller.signal });
-      clearTimeout(timeoutId);
-      return res;
+      return await fetch(input, { ...init, signal: controller.signal });
     } catch (err) {
       lastErr = err;
-      if (i < maxRetries) {
+      if (i < retries) {
         await new Promise((r) => setTimeout(r, 300 * Math.pow(2, i)));
       }
+    } finally {
+      /* plan-549-2281 复盘：旧实现只在成功路径 clearTimeout——抛错（含 10s 超时 abort）
+       * 时定时器要一直挂到触发为止，请求失败越多泄漏越多；重试循环里每次都新建一个，
+       * 于是 N 次失败留下 N 个待触发定时器。清理必须放进 finally。 */
+      clearTimeout(timeoutId);
     }
   }
   throw lastErr;
@@ -624,7 +642,7 @@ export interface TaskSuggestionOut {
   title: string;
   summary: string;
   steps: string[];
-  /** 建议在子会话里用什么执行模式 */
+  /** plan-549-2281：建议执行时使用的执行模式（在主会话里开新一轮） */
   mode: string;
   rationale?: string;
 }
@@ -932,20 +950,18 @@ export const api = {
   /** 从主会话开一个侧边会话（子会话）：沿用主会话的项目、模型与模式，之后走同一条 turn 流水线。 */
   createSideSession: (parentId: number) => post<SessionOut>(`/sessions/${parentId}/side-sessions`),
   listSideSessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/side-sessions`),
-  /** plan-156-619 S5：创建**执行子会话**（带任务，创建即开工）。子会话派生出来仍是同级。 */
-  createSubsession: (parentId: number, data: { title: string; task: string; context?: string; mode?: string }) =>
-    post<SessionOut>(`/sessions/${parentId}/subsessions`, data),
-  /** plan-156-619 S5：主会话下全部子会话——左栏子会话行的唯一数据源（list_sessions 会过滤掉子会话）。 */
-  listSubsessions: (parentId: number) => get<SessionOut[]>(`/sessions/${parentId}/subsessions`),
   /** plan-156-620：全部未归档执行子会话（一次请求，前端按 side_parent_id 分桶）。
-   *  替代「每个主会话各请求一次」——上百个并发请求曾拖慢所有接口。 */
+   *  plan-549-2281：子会话的创建与控制已下线，该接口只服务「历史子会话仍然可见可打开」。
+   *  保留原因：左栏缩进展示与登录后重建桶都依赖它——替代「每个主会话各请求一次」，
+   *  此前上百个并发请求曾拖慢所有接口。 */
   listSubsessionIndex: () => get<SessionOut[]>(`/sessions/subsession-index`),
   /** plan-156-619 S10：取会话当前待处理的后续任务建议（刷新后重建卡片）。 */
   getLatestSuggestion: (sessionId: number) =>
     get<{ suggestion: TaskSuggestionOut | null }>(`/sessions/${sessionId}/suggestions/latest`),
-  /** 接受建议 → 新建子会话执行（返回新子会话 id）。 */
+  /** plan-549-2281：接受建议 → 在**当前会话**里开新一轮执行，不再新建子会话。
+   *  返回该轮的归属会话与轮次 id，前端据此刷新消息流并接收这一轮的流。 */
   acceptSuggestion: (suggestionId: number) =>
-    post<{ subsession_id: number; session_id: number }>(`/suggestions/${suggestionId}/accept`),
+    post<{ session_id: number; turn_id: number }>(`/suggestions/${suggestionId}/accept`),
   /** 取消建议 → 永久不再展示。 */
   dismissSuggestion: (suggestionId: number) =>
     post<{ ok: boolean }>(`/suggestions/${suggestionId}/dismiss`),
@@ -1087,7 +1103,14 @@ export const api = {
       spawn_message_id?: number | null;
       /** plan-20261019-subagent-ghost: 线程消息数（0 且无任务、非运行中 = 幽灵条目） */
       message_count?: number;
+      /** plan-565-2323 G11：所属轮次状态——turn 已终态时该子代理不再计入「运行中」，
+       *  用于兜底库里残留的 in_progress 行把会话锁死（后端 turns.py 一并下发） */
+      turn_status?: string | null;
     }>>(`/turns/sessions/${sessionId}/subagents`),
+  /** plan-565-2323 G8：取消单个子代理（右面板终止按钮、模型侧 cancel_subagent 同源）。
+   *  返回 cancelled / not_running / not_found，均为正常结果，不抛错。 */
+  cancelSessionSubagent: (sessionId: number, agentId: number) =>
+    post<{ result: string }>(`/turns/sessions/${sessionId}/subagents/${agentId}/cancel`, {}),
   listSessionTasks: (sessionId: number) => get<TaskOut[]>(`/turns/sessions/${sessionId}/tasks`),
   /** v38 (plan-482): 确认/取消方案文档（不再涉及 group/steps）。 */
   confirmPlanTurn: (turnId: number, data: { accepted: boolean }) =>
@@ -1242,6 +1265,9 @@ export const api = {
   updateProviderCredential: (credentialId: number, data: Record<string, unknown>) =>
     patch<ProviderCredentialOut>(`/credentials/${credentialId}`, data),
   deleteProviderCredential: (credentialId: number) => del<{ ok: boolean }>(`/credentials/${credentialId}`),
+  /** plan-565-2323 G3：手动复位凭据（清冷却与错误、恢复可用）——「暂缓使用」账号的入口 */
+  resetProviderCredential: (credentialId: number) =>
+    post<ProviderCredentialOut>(`/credentials/${credentialId}/reset`, {}),
   testProviderProxy: (id: number) =>
     post<{ ok: boolean; latency_ms: number; proxy: string | null; error: string | null }>(`/providers/${id}/proxy-test`, {}),
 
@@ -1584,8 +1610,8 @@ export const api = {
       { mode },
     ),
   setGlobalSettings: (data: Partial<GlobalSettingsIn>) => put<GlobalSettingsOut>("/settings/global", data),
-  /** 单会话并发上限与当前占用（只读内存快照） */
-  getRuntimeLimits: () => get<RuntimeLimitsOut>("/runtime/limits"),
+  // plan-549-2281 复盘清理：getRuntimeLimits 已删除——前端从未消费（左栏「运行中」走
+  // SessionOut.has_running），/runtime/limits 仅保留给后端诊断与测试。
   /** plan-522-2209：当前全部未决审批 / 提问的轻量摘要。
    *  全局通道在断线重连与页面重载后会丢事件，靠这个接口重建跨会话等待索引。 */
   getPendingApprovals: () => get<PendingApprovalsOut>("/approvals/pending"),
@@ -1783,20 +1809,16 @@ export interface GlobalSettingsOut {
   desktop_coord_mode?: string;
   /** 单会话子代理并发上限（1~30） */
   max_concurrent_subagents?: number;
-  /** 单会话子会话并发上限（1~30） */
-  max_subsessions_per_parent?: number;
-  /** plan-156-619 S4e: 子代理开关（plan-20261020-subsession-switch 起只控制子代理） */
+  /** plan-156-619 S4e: 子代理开关 */
   subagent_enabled?: boolean;
-  /** plan-20261020-subsession-switch: 子会话开关（含操控子会话），与子代理独立 */
-  subsession_enabled?: boolean;
   /** plan-156-619 S4e: 子代理默认模型 id；0 = 跟随主代理 */
   subagent_model_id?: number;
   /** plan-156-619 S4e: 子代理思考深度档位；空 = 跟随会话档位 */
   subagent_reasoning_effort?: string;
-  /** plan-20261018-operator-boost: GUI 操作（电脑操控 / 内置浏览器）交给操控子会话 */
-  operator_subsession_enabled?: boolean;
-  /** plan-20261018-operator-boost: 操控子会话思考深度（lowest = 模型最低档 / follow = 跟随子会话设置 / 具体档位） */
-  operator_reasoning_effort?: string;
+  /** plan-549-2281: GUI 操作（电脑操控 / 内置浏览器）交给操控子代理——沿用原操控开关语义 */
+  operator_subagent_enabled?: boolean;
+  /** plan-549-2281: 操控子代理思考深度（lowest = 模型最低档 / follow = 跟随子代理设置 / 具体档位） */
+  operator_subagent_effort?: string;
   /** plan-156-619 S7: 综合工具卡各栏目的全局默认展开策略（true = 默认全展开）。旧字段，仅作逐栏默认缺省时的回落 */
   tool_card_sections_expanded?: boolean;
   /** plan-20261019-toolcard-v2: 工具卡默认形态（capsule = 右上角悬浮胶囊 / expanded = 展开卡片） */
@@ -1847,12 +1869,7 @@ export interface BgProcessOut {
   elapsed: number;
 }
 
-/** 单会话并发上限与当前占用（只读内存快照） */
-export interface RuntimeLimitsOut {
-  max_concurrent_subagents: number;
-  max_subsessions_per_parent: number;
-  sessions: Array<{ session_id: number; subagents_running: number; subsessions_running: number }>;
-}
+// plan-549-2281 复盘清理：RuntimeLimitsOut 随 getRuntimeLimits 一并删除（无任何消费方）。
 
 /** plan-522-2209：一条未决交互的轻量摘要（不含命令原文与文件路径）。
  *  用于前端在建立全局连接后重建「哪些会话在等我」的索引。 */
@@ -1864,7 +1881,8 @@ export interface PendingApprovalItem {
   action_label: string | null;
   agent_name: string | null;
   is_subagent: boolean;
-  is_subsession: boolean;
+  /** plan-549-2281 复盘修复：删除顶层 subagent_title 死字段——后端 pending 摘要从不下发它，
+   *  任务标题始终在 detail.subagent_title 里，前端读取也全走 detail。 */
   /** 审批详情（已剔除提问的作答内容）——卡片要渲染工具名、动作短语与命令原文，
    *  缺了它跨会话审批卡就只剩一句「有个审批在等你」。 */
   detail: Record<string, unknown>;

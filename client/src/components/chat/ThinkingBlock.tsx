@@ -60,9 +60,8 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
         onClick={() => setOpen(!open)}
       >
         <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
-        <span className="tc-verb">
-          {isThinking ? "正在思考" : "思考过程"}
-        </span>
+        {/* plan-20261025-shell（需求 1）：与工具行同一写法——「思考 · 持续了 N 秒」，思考中同一个词加流光 */}
+        <span className={"tc-verb" + (isThinking ? " text-shine" : "")}>思考</span>
         {isThinking ? (
           open ? (
             // v41: 展开时隐藏刷字 ticker，仅保留呼吸点作为活动指示
@@ -76,9 +75,12 @@ export const ThinkingBlock = memo(function ThinkingBlock({ text, active, turnId,
             </span>
           )
         ) : (
-          <span className="tc-query thinking-done-label">
-            {duration != null ? `持续了 ${duration} 秒` : "持续了几秒"}
-          </span>
+          <>
+            <span className="tc-sep" aria-hidden>·</span>
+            <span className="thinking-done-label">
+              {duration != null ? `持续了 ${duration} 秒` : "持续了几秒"}
+            </span>
+          </>
         )}
         <span className={`tc-chevron${open ? " open" : ""}`}>
           <IconChevronRight size={11} />

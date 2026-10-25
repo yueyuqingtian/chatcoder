@@ -13,10 +13,11 @@
  * 设计约束（AGENTS.md）：层次只用留白 / 字号字重 / 颜色表达，不引入左侧彩色竖线。
  */
 import { memo, useState } from "react";
-import { IconAlertCircle, IconCheck, IconChevron, IconCopy, IconX } from "../icons";
+import { IconCheck, IconChevron, IconCopy, IconToneBadge, IconX } from "../icons";
 import { Button } from "../ui/Button";
 import { Collapse } from "../ui/Collapse";
 import { IconButton } from "../ui/IconButton";
+import { errorKey, useDismissedErrors } from "../../store/dismissedErrors";
 
 /** 摘要展示上限：超出即截断，完整原文进详情 */
 const SUMMARY_MAX = 96;
@@ -61,6 +62,11 @@ function splitErrorText(text: string): { summary: string; detail: string | null 
  *  并给一句可执行的建议——用户不必读懂 HTTP 原文也知道下一步做什么。
  *  只在调用方未显式传 title 时生效；匹配不到时沿用「执行出错」。 */
 const ERROR_KINDS: Array<{ re: RegExp; title: string; hint: string }> = [
+  // plan-565-2323 G4：账号被逐个停用是一种「用户自己能修」的状态，必须排在鉴权失败之前——
+  // 它的原因码里带 credential，若不前置会被下面的鉴权分支当成 key 失效，把用户引向错误方向。
+  { re: /provider_credentials_all_disabled|全部处于停用状态/i,
+    title: "账号已全部停用",
+    hint: "该供应商的账号全部处于停用状态，请在模型管理中启用至少一个账号" },
   { re: /\b(401|403)\b|unauthori[sz]ed|forbidden|invalid[_ ]?api[_ ]?key|authentication|鉴权|认证失败/i,
     title: "鉴权失败", hint: "检查该供应商的 API Key 是否有效或已过期" },
   { re: /\b429\b|rate[_ ]?limit|too many requests|请求过于频繁|限流/i,
@@ -101,9 +107,17 @@ export const ErrorCard = memo(function ErrorCard({
 }: Props) {
   const [showDetail, setShowDetail] = useState(false);
   const [copied, setCopied] = useState(false);
-  const { summary, detail } = splitErrorText(text);
+  const split = splitErrorText(text);
   const kind = title ? null : classify(text);
   const heading = title ?? kind?.title ?? "执行出错";
+  // plan-20261025-shell（需求 9）：「鉴权失败：Request failed…」这类报错，冒号前的原因与归类标题相同，
+  // 此前标题与摘要会连着出现两遍「鉴权失败」——此时摘要改取冒号后的细节首行，详情只在比摘要长时保留
+  let { summary, detail } = split;
+  if (detail && summary.trim() === heading.trim()) {
+    const lead = clip(detail.split("\n")[0] ?? "");
+    summary = lead;
+    if (lead === detail.trim()) detail = null;
+  }
   const copy = () => {
     void navigator.clipboard?.writeText(text).then(() => {
       setCopied(true);
@@ -115,7 +129,8 @@ export const ErrorCard = memo(function ErrorCard({
       className={`turn-item turn-item-error${variant === "trailing" ? " flow-error-card" : ""}${className ? ` ${className}` : ""}`}
     >
       <div className="err-head">
-        <IconAlertCircle size={14} className="err-icon" />
+        {/* plan-20261025-shell（需求 9）：实心语气徽标代替线框圆，浅红底上一眼可辨 */}
+        <IconToneBadge tone="error" size={16} className="err-icon" />
         <div className="err-text">
           <div className="err-title">{heading}</div>
           <div className="err-summary">{summary || text}</div>
@@ -155,6 +170,20 @@ export const ErrorCard = memo(function ErrorCard({
           <div className="err-detail">{detail}</div>
         </Collapse>
       )}
+    </div>
+  );
+});
+
+/** 轮次内的报错（数据库 ERROR 消息）：可关闭，关闭记在本机（plan-20261025-shell 需求 9：消息流所有报错都支持叉掉）。
+ *  只订阅自己这一条的关闭态，关掉一条不会让整轮重渲染。 */
+export const DismissibleErrorCard = memo(function DismissibleErrorCard({ msgId, text }: { msgId: number | string; text: string }) {
+  const key = errorKey(msgId, text);
+  const dismissed = useDismissedErrors((s) => s.keys.has(key));
+  const dismiss = useDismissedErrors((s) => s.dismiss);
+  if (dismissed) return null;
+  return (
+    <div className="turn-item-wrap">
+      <ErrorCard text={text} onClose={() => dismiss(key)} />
     </div>
   );
 });

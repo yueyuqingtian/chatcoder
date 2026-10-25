@@ -15,8 +15,8 @@ import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
-import { IconCheck, IconChevronDown, IconCpu, IconSpinner, IconX } from "../icons";
-import { Button, Collapse, Empty, Tooltip, usePresence } from "../ui";
+import { IconCheck, IconChevronDown, IconCpu, IconSpinner, IconStop, IconX } from "../icons";
+import { Button, Collapse, Dialog, Empty, Tooltip, usePresence } from "../ui";
 import { IconSendStop } from "../iconkit/MorphIcons";
 import type { WorkflowNodeBrief } from "../../api/client";
 
@@ -222,10 +222,33 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
   visible?: boolean;
 }) {
   const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  const sessionId = useChatStore((s) => s.currentSessionId);
   const liveCount = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0));
   const running = meta?.status === "running" || meta?.status === "in_progress";
   const failed = meta?.status === "failed" || meta?.status === "cancelled";
   const done = meta?.status === "done";
+
+  // plan-565-2323 G8：终止单个子代理。此前界面没有任何终止入口——子代理因永久性错误
+  // 卡在运行时，用户只能重启应用，而重启后库里残留的 in_progress 仍把会话锁成 busy。
+  const [stopOpen, setStopOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+
+  const doStop = async () => {
+    if (sessionId == null || threadId == null) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      await api.cancelSessionSubagent(sessionId, threadId);
+      setStopOpen(false);
+      // 服务端此刻已落终态，重拉列表让卡片与面板同步（同时重算 pendingSubagents 解除输入框 busy）
+      await useChatStore.getState().loadSessionSubagents();
+    } catch (e) {
+      setStopError(String(e));
+    } finally {
+      setStopping(false);
+    }
+  };
 
   // v36 (plan-321-1600 M2): 头部“用时”在运行中需每秒刷新（否则计时不动）。
   // S8c：订阅共享秒级 ticker（与 ToolTree / WorkTimer 共用同一个 setInterval）。
@@ -313,6 +336,20 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
             )}
             {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
             {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
+            {/* plan-565-2323 G8：运行中才给终止入口；与状态/元信息同组右对齐，不挤占标题行 */}
+            {running && (
+              <Tooltip content="终止这个子代理（不影响主会话）">
+                <Button
+                  variant="danger-ghost"
+                  size="xs"
+                  className="subagent-panel-stop"
+                  icon={<IconStop size={11} />}
+                  onClick={() => { setStopError(null); setStopOpen(true); }}
+                >
+                  终止
+                </Button>
+              </Tooltip>
+            )}
           </div>
         </div>
         {wf && <WorkflowNodeHead wf={wf} />}
@@ -324,6 +361,26 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
         <PluginSlot slot="message-flow" source="subagent" threadId={threadId} visible={visible} className="subagent-flow" />
       </div>
       {canNote && wf && <NodeNoteComposer wf={wf} />}
+      {/* plan-565-2323 G8：终止属破坏性操作，先确认；文案说明影响面（只停这个子代理，主会话不受影响） */}
+      <Dialog
+        open={stopOpen}
+        onClose={() => { if (!stopping) setStopOpen(false); }}
+        title="终止这个子代理？"
+        subtitle={`${agentName || meta?.name || `子代理 #${threadId}`} 会立即停止，已完成的步骤与产出保留。`}
+        width={420}
+        footer={(
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setStopOpen(false)} disabled={stopping}>取消</Button>
+            <Button variant="danger" size="sm" loading={stopping} onClick={() => { void doStop(); }}>终止</Button>
+          </>
+        )}
+      >
+        <div className="subagent-stop-note">
+          {stopError
+            ? `终止失败：${stopError}`
+            : "主会话的执行不受影响。若它已经卡住不动，终止后可以把会话继续用下去。"}
+        </div>
+      </Dialog>
     </div>
   );
 }

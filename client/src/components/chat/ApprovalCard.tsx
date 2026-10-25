@@ -21,6 +21,7 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconClock,
+  IconCpu,
   IconFileText,
   IconGlobe,
   IconInfo,
@@ -194,9 +195,9 @@ export interface ApprovalCardProps {
   onAlwaysAllow: (scope: "session" | "global") => void;
   /** 排在本卡之后的待审批数量（多个子代理并行申请时）；大于 0 时在标题行提示 */
   queuedCount?: number;
-  /** plan-522-2209：这条审批来自子会话时传入（标题行末尾标注来源 + 图标切换为等待态）。
-   *  为 null / 缺省表示来自当前会话自己，此时不显示来源行——避免给自己发起的审批加噪音。 */
-  source?: { subsessionId: number; title: string } | null;
+  /** plan-549-2281：这条审批来自子代理时传入（标题行末尾标注来源 + 图标切换为等待态）。
+   *  为 null / 缺省表示来源不是子代理（当前会话自己或主代理），此时不显示来源行——避免加噪音。 */
+  source?: { kind: "subagent"; agentId: number; title: string } | null;
 }
 
 export function ApprovalCard({
@@ -215,6 +216,16 @@ export function ApprovalCard({
   const riskNote = String(detail.risk_note ?? "");
   const summary = typeof detail.summary === "string" ? detail.summary : "";
   const isOutsideRead = detail.outside_read === true;
+  /* plan-549-2281：来源子代理的任务标题。主卡正文用「来自子代理 #N「标题」」标出来源，
+     用户才知道这个审批是并行子代理在问、而不是当前会话自己。—— 优先取后端下发的
+     subagent_title（详情自带，跨会话审批也有），其次回退到调用方传的 source。
+     plan-549-2281 复盘修复：agentId=0（调用方只带标题、无有效编号）按「无编号」处理，
+     不再渲染「来自子代理 #0」。 */
+  const subagentTitle = String(detail.subagent_title ?? "") || (source?.title ?? "");
+  const sourceAgentId = source != null && source.agentId > 0 ? source.agentId : null;
+  const subagentId = sourceAgentId
+    ?? (typeof detail.agent_id === "number" && detail.agent_id > 0 ? detail.agent_id : null);
+  const fromSubagent = detail.is_subagent === true || source?.kind === "subagent";
 
   const explaining =
     explain != null && explain.approvalId === approvalId &&
@@ -234,22 +245,36 @@ export function ApprovalCard({
   return (
     <div className="composer-approval-card" ref={cardRef}>
       <div className="approval-head">
-        {/* plan-522-2209：来自子会话的审批用等待态图标（与左栏同语义、同一组件），
+        {/* plan-522-2209：来自子代理的审批用等待态图标（与左栏同语义、同一组件），
             当前会话自己的审批沿用按动作类别区分的图标——用户一眼能分清「谁在问」。 */}
         <span className="approval-head-icon">
-          {source ? <WaitingIcon size={15} /> : actionIcon(action)}
+          {fromSubagent ? <WaitingIcon size={15} /> : actionIcon(action)}
         </span>
         <span className="approval-head-text">
           <span className="approval-head-tool">{tool ? toolTitle(tool) : "工具"}</span>
           <span className="approval-head-action">想要{actionLabel}</span>
-          {/* plan-522-2209：来源标注放标题行末尾、与 action 同一基线。
-              单行省略：窄宽度下先牺牲会话名，右侧「另有 N 项」是决策信息必须完整。 */}
-          {source && (
-            <span className="approval-head-source">来自子会话「{source.title}」</span>
-          )}
+          {/* plan-549-2281 复盘修复：来源标注不再放标题行——正文的来源行（「来自子代理
+              #N「任务标题」」）就在下方，标题行再标一遍 #N 是相邻两行重复；标题行仅靠
+              等待态图标区分来源，编号与标题统一由正文行承载。 */}
         </span>
         {queuedCount > 0 && <span className="approval-head-queue">另有 {queuedCount} 项待审批</span>}
       </div>
+
+      {/* plan-549-2281：主卡正文的来源行——「来自子代理 #N「任务标题」」。
+          标题可能很长（模型常把整段任务写在标题里），单行省略 + 悬停看全文。 */}
+      {fromSubagent && (
+        <div className="approval-source-line">
+          <IconCpu size={13} />
+          <span className="approval-source-text">
+            来自子代理{subagentId != null ? ` #${subagentId}` : ""}
+            {subagentTitle ? (
+              <Tooltip content={subagentTitle}>
+                <span className="approval-source-title">「{subagentTitle}」</span>
+              </Tooltip>
+            ) : null}
+          </span>
+        </div>
+      )}
 
       {isOutsideRead && (
         <div className="approval-outside-hint">

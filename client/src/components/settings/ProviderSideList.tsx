@@ -36,6 +36,22 @@ const AUTOSCROLL_MAX_STEP = 14;
 
 function notify(msg: string) { useChatStore.setState({ error: msg }); }
 
+/** plan-565-2323 G2：左侧行尾凭据徽标文案。
+ *  credential_count 是全部凭据（含停用），active_credential_count 只算当前可用
+ *  （后端口径：is_active 且未暂缓）；差值为不可用数。两者相等（或后端未返回该字段）时
+ *  不显示差值，只报总数。总数 ≤ 1 时不渲染徽标（单个账号不必占位）。 */
+function credBadgeText(p: ProviderOut, oauthFormats: Set<string>): string | null {
+  const total = p.credential_count ?? 0;
+  if (total === 0) return null;
+  const active = p.active_credential_count ?? total;
+  const off = Math.max(0, total - active);
+  // 单个凭据且可用时不占位（与既有行为一致）；单个却不可用时必须显示，
+  // 否则左列完全看不出「唯一的账号被停用了」。
+  if (total === 1 && off === 0) return null;
+  const unit = oauthFormats.has(p.api_format) ? "账号" : "Key";
+  return off > 0 ? `${total} ${unit} · ${off} 停用` : `${total} ${unit}`;
+}
+
 /** 把 from 位置的元素移动到 to 位置（返回新数组，不改原数组） */
 function moveItem<T>(list: T[], from: number, to: number): T[] {
   const next = [...list];
@@ -205,6 +221,11 @@ export function ProviderSideList({
     // 没真正移动（含原地松手）→ 不写库，避免无意义请求
     if (!moved || to == null || to === from) return;
     suppressClickRef.current = true;
+    // plan-568-2333：手柄与可选按钮是兄弟节点，拖拽结束的 click 落在手柄上，
+    // 按钮的 onClick 永远消费不到这个标志——此前会一直留 true，把之后第一次点击也吞掉
+    // （用户每次拖完排序都要点两下）。主动在下一轮任务复位：仍挡住紧随其后的合成 click，
+    // 又不影响后续正常点击。
+    window.setTimeout(() => { suppressClickRef.current = false; }, 0);
     const prev = providersRef.current;
     void commit(moveItem(prev, from, to), prev);
   };
@@ -292,9 +313,15 @@ export function ProviderSideList({
                 {/* 首字母图标 + 名称 + 凭据徽标 + 状态圆点（右置：先"是谁"再"怎么样"） */}
                 <ProviderAvatar name={p.name} size={26} muted={!p.is_active} />
                 <span className="models-side-name">{p.name}</span>
-                {(p.credential_count ?? 0) > 1 && (
-                  <span className="models-side-badge">
-                    {p.credential_count} {oauthFormats.has(p.api_format) ? "账号" : "Key"}
+                {/* plan-565-2323 G2：徽标同时体现停用数（「2 账号 · 1 停用」），两者相等时只显示「N 账号」。
+                    flexShrink/nowrap + 等宽数字：文案变长只压缩名称区（本来就有省略号），
+                    行尾状态点是固定 20px 槽位，不会被推得左右跳动。 */}
+                {credBadgeText(p, oauthFormats) && (
+                  <span
+                    className="models-side-badge"
+                    style={{ flexShrink: 0, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}
+                  >
+                    {credBadgeText(p, oauthFormats)}
                   </span>
                 )}
                 <span className="models-side-tail"><span className={statusDotClass(p)} /></span>

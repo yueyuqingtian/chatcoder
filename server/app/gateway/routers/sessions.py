@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import (
     CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
-    SubsessionCreate,
 )
 from app.orchestration.agent_events import broadcast
 from app.orchestration.workflow import store as workflow_store
@@ -96,28 +95,35 @@ async def list_sessions(project_id: int | None = None, include_archived: bool = 
 
 @router.get("/subsession-index", response_model=list[SessionOut])
 async def list_subsession_index(project_id: int | None = None, db: AsyncSession = Depends(get_db)):
-    """全部未归档执行子会话（左栏一次性重建子会话行，前端按 side_parent_id 分桶）。
+    """全部未归档执行子会话（只读，历史挂靠会话）。
+
+    plan-549-2281：子会话的**创建与控制**已下线，但存量数据必须继续可见——
+    左栏仍需把这些历史子会话挂在对应主会话下方，否则用户既看不到也无法清理它们。
+    因此本接口保留，但只是只读查询（走 child_session_service，无任何写行为）。
 
     plan-156-620：替代「每个主会话各请求一次 /subsessions」——上百个并发请求
     曾把后端请求队列塞满，进入会话时卡片与其它接口都明显变慢。
     必须声明在 `/{session_id}` 之前，否则会被当成会话 id 解析。
     """
-    from app.services import subsession_service
+    from app.services import child_session_service
 
-    children = await subsession_service.list_all_children(db, project_id=project_id)
+    children = await child_session_service.list_all_children(db, project_id=project_id)
     return await _list_out(db, children)
 
 
 @router.post("/{session_id}/side-sessions", response_model=SessionOut)
 async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db)):
-    """从主会话开一个侧边会话（子会话）。
+    """从主会话开一个侧边会话（只读对话面板用，不是执行子会话）。
 
-    子会话沿用主会话的项目、模型、执行/权限模式与工作树，之后的 turn 与主会话走同一条流水线，
+    侧边会话沿用主会话的项目、模型、执行/权限模式与工作树，之后的 turn 与主会话走同一条流水线，
     因此工具调用与消息展示完全一致。
 
-    plan-474-2105：**子会话不能再创建任何同级 / 下级会话**——
-    旧实现（plan-156-619 S5）允许子会话派生同级，导致一个任务可以无限套娃并绕开并发上限；
-    需求 3 明确禁止。这里按调用方身份直接拒绝（工具层已剥离 create_subsession，这是 REST 入口的防线）。
+    plan-474-2105：**挂靠会话不能再创建任何同级 / 下级会话**——
+    旧实现（plan-156-619 S5）允许派生出更多挂靠会话，导致一个任务可以无限套娃；
+    需求 3 明确禁止。这里按调用方身份直接拒绝。
+
+    plan-549-2281：执行子会话的创建已整体下线，本端点只服务侧边对话（side_kind=side）；
+    它不派发任务、不产生执行子会话，与已删除的 POST /{id}/subsessions 无关。
     """
     parent = await session_service.get_session(db, session_id)
     if parent is None:
@@ -149,45 +155,9 @@ async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db
     return await _to_out(db, child)
 
 
-@router.post("/{session_id}/subsessions", response_model=SessionOut)
-async def create_subsession(
-    session_id: int, body: SubsessionCreate, db: AsyncSession = Depends(get_db),
-):
-    """创建一个执行子会话并立即下发首条任务（plan-156-619 S5）。
-
-    与 `/side-sessions` 的区别：这里带 `task` / `context` / `mode`，创建即开工，
-    供前端「子会话」入口与建议卡「在新子会话执行」使用；
-    `/side-sessions` 只建空会话，供侧边对话面板使用。
-    """
-    from app.services import subsession_service
-
-    try:
-        sid = await subsession_service.create_subsession(
-            db,
-            parent_session_id=session_id,
-            title=body.title,
-            task=body.task,
-            context=body.context or "",
-            mode=body.mode,
-        )
-    except subsession_service.SubsessionError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    child = await session_service.get_session(db, sid)
-    return await _to_out(db, child)
-
-
-@router.get("/{session_id}/subsessions", response_model=list[SessionOut])
-async def list_subsessions(session_id: int, db: AsyncSession = Depends(get_db)):
-    """某主会话下的全部子会话（含运行态字段）。
-
-    左栏子会话行的**唯一**数据源：`list_sessions` 会过滤掉子会话，
-    因此刷新后必须由本接口重建；WS 事件只做增量。
-    """
-    if await session_service.get_session(db, session_id) is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    children = await subsession_service.list_children(db, session_id)
-    return await _list_out(db, children)
-
+# plan-549-2281 复盘修复：GET /{session_id}/subsessions（按主会话逐个拉取挂靠会话）已删除——
+# /subsession-index 一次拉全量（见上方 plan-156-620 的说明），前端早已只走后者，
+# 本端点无任何调用方，保留只会让「左栏数据源是哪个」出现两套说法。
 
 
 @router.get("/{session_id}/side-sessions", response_model=list[SessionOut])
@@ -242,31 +212,48 @@ async def delete_session(session_id: int, permanent: bool = False,
     永久删除会级联清理该会话的 messages/turns/tasks/agents/audit/rollback/会话记忆。
     """
     if permanent:
-        from app.orchestration.workflow import service as workflow_service
-        from app.services import subsession_service
+        from app.services import child_session_service
 
-        # 挂靠会话随主会话一并永久删除，不留下不可见的残留会话。
-        # plan-156-621：list_side_sessions 现在只返回侧边对话（side），执行子会话必须另行取，
-        # 否则 sub 子会话会变成用户既看不到、也删不掉的孤儿行。
-        child_ids = [c.id for c in await session_service.list_side_sessions(db, session_id)]
-        seen = set(child_ids)
-        for child in await subsession_service.list_children(db, session_id):
-            if child.id not in seen:
-                child_ids.append(child.id)
-                seen.add(child.id)
-        # plan-20261020-bgtask：会话一删，界面上再没有入口能管理它名下的后台命令——先停掉，免得成为占端口的孤儿
-        from app.orchestration.tools.bg_process import bg_process_registry
-
+        # plan-156-621 复盘修复：级联之前必须先判定被删对象**自己**是不是根主会话。
+        # `list_children` 内部经 `root_parent_of`（`side_parent_id or id`）归一，传入挂靠会话 id
+        # 时会被解析成**父会话 id**，于是「删除一条侧边对话」会把同一主会话下全部存量执行子会话
+        # 一起永久删除（连带消息 / turn / 工具输出 / 附件目录 / 回滚快照），不可恢复。
+        # 判定只能放在调用点：删除挂靠会话时 child_ids 保持为空，绝不触碰父会话与兄弟会话的数据。
+        session = await session_service.get_session(db, session_id)
+        if session is None:
+            # 与下方 delete_session_permanent 返回空的口径一致：删一个不存在的会话是 404
+            raise HTTPException(404, "会话不存在")
+        child_ids: list[int] = []
+        # `side_parent_id is None` = 根主会话。只有它才拥有 side / sub 挂靠会话。
+        if session.side_parent_id is None:
+            # 挂靠会话随主会话一并永久删除，不留下不可见的残留会话。
+            # plan-156-621：list_side_sessions 现在只返回侧边对话（side），执行子会话必须另行取，
+            # 否则 sub 子会话会变成用户既看不到、也删不掉的孤儿行。
+            # plan-549-2281：子会话创建已下线，这里只是把**存量**挂在名下的子会话一并清掉。
+            try:
+                children = await child_session_service.list_children(db, session_id)
+            except child_session_service.ChildSessionError as e:
+                # plan-549-2281 复盘修复：list_children → root_parent_of 在会话不存在时抛
+                # ChildSessionError（业务错误），此处未捕获会直接变成 500。
+                raise HTTPException(404, "会话不存在") from e
+            child_ids = [c.id for c in await session_service.list_side_sessions(db, session_id)]
+            seen = set(child_ids)
+            for child in children:
+                if child.id not in seen:
+                    child_ids.append(child.id)
+                    seen.add(child.id)
+        # plan-562-2318 H4：删除前的运行态清理由 session_service.prepare_session_removal 统一负责
+        # （含此前漏掉的 engine.stop_session_execution，以及后台命令 / 工作流 / 失败计数 /
+        #  fs_read 缓存）。先处理子会话、再处理主会话的顺序保持不变。
         for child_id in child_ids:
-            await bg_process_registry.kill_session(child_id)
-            await workflow_service.on_session_deleted(child_id)
+            await session_service.prepare_session_removal([child_id])
             await session_service.delete_session_permanent(db, child_id)
-        await bg_process_registry.kill_session(session_id)
-        await workflow_service.on_session_deleted(session_id)
+        await session_service.prepare_session_removal([session_id])
         result = await session_service.delete_session_permanent(db, session_id)
         if result is None:
             raise HTTPException(404, "会话不存在")
         return result
+
     status = await session_service.update_session(db, session_id, status="archived")
     if status is None:
         raise HTTPException(404, "会话不存在")

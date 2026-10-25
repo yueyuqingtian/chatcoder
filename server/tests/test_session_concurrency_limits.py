@@ -13,13 +13,14 @@ from app.core.config import settings as app_settings
 from app.gateway.routers import settings as settings_router
 from app.gateway.routers import subagents as subagents_router
 from app.orchestration import subagent as subagent_module
-from app.services import subsession_service
+from app.services import child_session_service
 
 
 def test_config_defaults():
     """默认值与遗留配置清理。"""
     assert app_settings.max_concurrent_subagents == 4
-    assert app_settings.max_subsessions_per_parent == 4
+    # plan-549-2281：子会话创建能力下线，max_subsessions_per_parent 已删除
+    assert not hasattr(app_settings, "max_subsessions_per_parent")
     # 每轮派发总量限制本轮已废弃：只限并发、不限累计总量
     assert not hasattr(app_settings, "max_subagents_per_turn")
     # plan-20261022-subagent-reject-fast：并发满直接拒绝，排队等待配置已移除
@@ -59,26 +60,22 @@ def settings_client(monkeypatch):
 
 
 def test_put_clamps_limits(settings_client):
-    """PUT 传入 99 / 0 时被夹到 30 / 1。"""
+    """PUT 传入 0 时被夹到 1。"""
     client, saved = settings_client
-    originals = (
-        app_settings.max_concurrent_subagents,
-        app_settings.max_subsessions_per_parent,
-    )
+    originals = (app_settings.max_concurrent_subagents,)
     try:
         r = client.put("/api/settings/global", json={
             "max_concurrent_subagents": 0,
-            "max_subsessions_per_parent": 99,
         })
         assert r.status_code == 200
         body = r.json()
         assert body["max_concurrent_subagents"] == 1
-        assert body["max_subsessions_per_parent"] == 30
         assert saved["max_concurrent_subagents"] == 1
-        assert saved["max_subsessions_per_parent"] == 30
+        # plan-549-2281：子会话并发上限已从配置与响应体移除
+        assert "max_subsessions_per_parent" not in body
     finally:
         # 恢复单例，避免污染同批次其他用例
-        app_settings.max_concurrent_subagents, app_settings.max_subsessions_per_parent = originals
+        app_settings.max_concurrent_subagents = originals[0]
 
 
 def test_runtime_limits_route_mounted_under_api_runtime():
@@ -96,7 +93,8 @@ def test_runtime_limits_returns_snapshot(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["max_concurrent_subagents"] == app_settings.max_concurrent_subagents
-    assert body["max_subsessions_per_parent"] == app_settings.max_subsessions_per_parent
+    # plan-549-2281：max_subsessions_per_parent 已从响应体移除
+    assert "max_subsessions_per_parent" not in body
     assert body["sessions"] == []
 
 
@@ -110,7 +108,7 @@ def test_runtime_limits_aggregates_running(monkeypatch):
         def pending_count(self) -> int:
             return 2
 
-    monkeypatch.setattr(subsession_service, "list_running_counts_by_parent", _fake_counts)
+    monkeypatch.setattr(child_session_service, "list_running_counts_by_parent", _fake_counts)
     monkeypatch.setattr(
         subagent_module, "peek_subagent_manager", lambda sid: _Manager() if sid == 12 else None
     )
@@ -159,6 +157,6 @@ async def test_list_running_counts_by_parent_roundtrip():
         return ids
 
     ids = await run_write_locked(_seed, label="test.session.concurrency.limits")
-    counts = await subsession_service.list_running_counts_by_parent()
+    counts = await child_session_service.list_running_counts_by_parent()
     # 只有 running 子会话计入；归档的虽然有运行中 turn 也不再计入
     assert counts.get(ids["parent"]) == 1

@@ -15,19 +15,21 @@ import { openExtensionsManager, type ExtKind } from "../../store/navIntent";
 import { api } from "../../api/client";
 import { recordComponentRender } from "../../perf/metrics";
 import { useProgressRows } from "../chat/taskProgress";
+import { isListedSubagent, subagentState, type SubagentState } from "../chat/subagentStatus";
 import { refsOf } from "../chat/AttachmentCard";
 import { IconChevronDown, IconTarget } from "../icons";
 import { Badge, Button, Collapse, Tooltip } from "../ui";
 import { extKindIcon } from "../composer/ExtensionPicker";
 import { FileIcon, baseName } from "../iconkit/FileIcon";
 import { IxBot, IxExtensions, IxFiles, IxTasks } from "../iconkit/StackIcons";
-import { StatusIcon, normalizeStatus, type StatusKind } from "../iconkit/StatusIcon";
+import { StatusIcon, type StatusKind } from "../iconkit/StatusIcon";
 
 /** plan-75-334 阶段3：隐藏期的消息占位——稳定空引用，selector 结果不变 ⇒ 不触发重渲染。 */
 const EMPTY_MESSAGES: never[] = [];
-/** 续接清单每一项的备注（taskProgress 写入）。总览行已说明「待续接 · N 项」，逐行重复这两个字只是噪音，
- *  因此行上不展示，但仍用它识别续接态（plan-20261014-summary）。 */
-const CARRIED_NOTE = "待续接";
+/** 子代理展示状态 → 状态图标（已停止不是错误，用中性的暂停态；与工具卡同一口径） */
+const SUBAGENT_ICON: Record<SubagentState, StatusKind> = {
+  running: "running", done: "done", failed: "failed", stopped: "paused", pending: "pending",
+};
 
 /** 产物路径的归一键（plan-20261020-path-dedupe）：模型写同一个文件时会混用 `a\b.md` 与 `a/b.md`，
  *  后端聚合已统一，这里再兜一层——接口失败回退到消息产物时同样按归一键去重，避免同一文件两行。
@@ -87,6 +89,8 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
   const confirmPlanTurn = useChatStore((state) => state.confirmPlanTurn);
   const artifacts = useChatStore((state) => state.artifacts);
   const isRunning = useChatStore((state) => state.isRunning);
+  /** 后台子代理未结束也算本会话执行中（整轮口径，与输入框停止按钮同源） */
+  const pendingSubagents = useChatStore((state) => state.pendingSubagents);
   const subagentMeta = useChatStore((state) => state.subagentMeta);
   const session = useChatStore((state) => state.sessions.find((x) => x.id === state.currentSessionId));
   // 后台工作流在跑（含结束后等待唤醒主代理的空档）时，本会话即为「执行中」（工作流可能已不占用任何轮次）
@@ -147,15 +151,14 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
     openTab("files");
   };
 
-  /** 子代理：运行中置顶；工作流的节点按所属程序分组（标注“工作流 · 节点名”），其余按 id 升序；
-   * 已取消不是错误，用中性“已停止”态 */
+  /** 子代理：运行中置顶；工作流的节点按所属程序分组（标注“工作流 · 节点名”），其余按 id 升序。
+   * 列入与状态的判定与工具卡共用（subagentStatus.ts），两处数量、状态保持一致 */
   const subagents = useMemo(() => {
-    const rows = Object.entries(subagentMeta).map(([id, m]) => {
-      const st = normalizeStatus(m.status);
+    const rows = Object.entries(subagentMeta).filter(([, m]) => isListedSubagent(m)).map(([id, m]) => {
       return {
         id: Number(id),
         meta: m,
-        status: (st === "cancelled" ? "paused" : st) as StatusKind,
+        status: SUBAGENT_ICON[subagentState(m.status)],
         programId: m.workflow?.program_id ?? 0,
       };
     });
@@ -222,18 +225,27 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
    *  避免每种状态都挤一段文字（plan-20261014-summary） */
   const head = useMemo<{ status: StatusKind; title: string; hint?: string }>(() => {
     if (hasPendingPlan) return { status: "paused", title: "等待确认方案", hint: "确认后按方案执行，或停止这次任务。" };
-    if (isRunning || workflowRunning || progress.phase === "running") {
-      return {
-        status: "running",
-        title: !isRunning && workflowRunning ? "工作流执行中" : "执行中",
-        hint: progressRows.length === 0 ? "正在执行，步骤会陆续出现在这里。" : undefined,
-      };
+    if (isRunning || workflowRunning || pendingSubagents > 0 || progress.phase === "running") {
+      // 主代理在跑 → 执行中；只剩后台工作流 / 子代理时点明是谁在跑（与输入框停止按钮同一整轮口径）
+      const title = isRunning || progress.phase === "running" ? "执行中"
+        : workflowRunning ? "工作流执行中" : "子代理执行中";
+      const hint = progressRows.length === 0 ? "正在执行，步骤会陆续出现在这里。"
+        : progress.carried ? `上一轮有 ${progress.unfinished} 项待续接，模型核对后继续。`
+        : progress.fromPrevious ? "以下是之前的步骤，本轮制定新步骤后刷新。"
+        : undefined;
+      return { status: "running", title, hint };
     }
-    if (progressRows.some((r) => r.note === CARRIED_NOTE)) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
+    if (progress.carried) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
     if (progress.phase === "interrupted") return { status: "paused", title: `已停止 · ${progress.unfinished} 项未完成` };
-    if (progressRows.length > 0 && progressDone === progressRows.length) return { status: "done", title: "已完成" };
+    if (progressRows.length > 0) {
+      // 本轮已结束：清单保留到之后的轮次制定新清单（plan-20261025-progress-keep）；
+      // 模型漏标的项如实计为未完成，不冒充已完成
+      return progress.unfinished === 0
+        ? { status: "done", title: "已完成" }
+        : { status: "pending", title: `已结束 · ${progress.unfinished} 项未完成` };
+    }
     return { status: "pending", title: "空闲", hint: "布置任务后，这里会显示执行步骤。" };
-  }, [hasPendingPlan, progress.phase, progress.unfinished, isRunning, workflowRunning, progressRows, progressDone]);
+  }, [hasPendingPlan, progress.phase, progress.unfinished, progress.carried, progress.fromPrevious, isRunning, workflowRunning, pendingSubagents, progressRows]);
 
   const ratio = progressRows.length > 0 ? progressDone / progressRows.length : 0;
 
@@ -277,7 +289,7 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
               >
                 <span className="ts-row-lead"><StatusIcon status={row.status} size={14} /></span>
                 <span className="ts-row-title">{row.title}</span>
-                {row.note && row.note !== CARRIED_NOTE && <span className="ts-row-note">{row.note}</span>}
+                {row.note && <span className="ts-row-note">{row.note}</span>}
               </button>
             ))}
           </div>

@@ -84,7 +84,8 @@
 
 :root[data-world="graphite"] {
   --color-background: oklch(98.6% 0.001 85);
-  --color-sidebar: oklch(96.4% 0.002 85);
+  /* plan-20261025-shell：默认石墨主题的全局底色（左栏 + 卡片四周留白）固定为中性 #ECECEF，左栏不再叠渐变 */
+  --color-sidebar: #ECECEF;
   --color-card: oklch(99.8% 0.001 85);
   --world-2: oklch(62% 0.02 250);
   /* 石墨：宣纸暖白 + 铅灰晕 + 一点墨蓝，像摊开的速写本 */
@@ -92,7 +93,7 @@
     radial-gradient(60% 50% at 12% 8%, oklch(95% 0.012 80 / 0.55), transparent 70%),
     radial-gradient(50% 45% at 92% 90%, oklch(93% 0.01 250 / 0.45), transparent 70%),
     radial-gradient(40% 35% at 70% 20%, oklch(96% 0.006 60 / 0.4), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96.8% 0.004 80), oklch(96% 0.003 250));
+  --world-scene-side: none;
 }
 :root[data-world="forest"] {
   --color-background: oklch(98.7% 0.003 120);

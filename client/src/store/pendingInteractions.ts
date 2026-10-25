@@ -94,6 +94,30 @@ export const pendingActions = {
     });
   },
 
+  /** 按 approvalId 全局清除（作答 / 回执兜底）。
+   *  会话隔离修复：跨会话作答时回执按提交方会话广播，只按会话清会留下幽灵条目，
+   *  切回原会话后卡片复活、反复回到第 1 题。approvalId 全局唯一，可直接跨桶定位。 */
+  clearByApprovalId: (approvalId: string) => {
+    if (!approvalId) return;
+    usePendingInteractions.setState((s) => {
+      let changed = false;
+      const next: PendingBySession = {};
+      for (const sidKey of Object.keys(s.pendingBySession)) {
+        const sessionId = Number(sidKey);
+        const bucket = s.pendingBySession[sessionId];
+        if (!bucket[approvalId]) {
+          next[sessionId] = bucket;
+          continue;
+        }
+        changed = true;
+        const rest = { ...bucket };
+        delete rest[approvalId];
+        if (Object.keys(rest).length > 0) next[sessionId] = rest;
+      }
+      return changed ? { pendingBySession: next } : {};
+    });
+  },
+
   /** 清空（断线重连后由 REST 重建、或会话数据整体重载时使用）。 */
   reset: () => {
     usePendingInteractions.setState({ pendingBySession: {} });

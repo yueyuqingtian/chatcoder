@@ -15,11 +15,12 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, type GitCardRepoOut, type GitDiffStatOut, type GitStatusOut } from "../../../api/client";
-import { useChatStore, TERMINAL_SUBAGENT_STATUS } from "../../../store/chat";
+import { useChatStore } from "../../../store/chat";
 import { usePanelStore, type PanelTabId } from "../../../store/panel";
 import { useWorkflowStore } from "../../../store/workflow";
 import { useBgTaskStore, type BgTask } from "../../../store/bgTasks";
-import { useProgressRows, type ProgressRow } from "../taskProgress";
+import { useProgressRows, type ProgressRow, type TurnPhase } from "../taskProgress";
+import { isListedSubagent, subagentState } from "../subagentStatus";
 import { foldProcessRows, type ProcessEntry } from "./processFold";
 import type { PlanCardInfo } from "../../../store/chat";
 import type { TurnOut } from "../../../api/client";
@@ -69,15 +70,21 @@ export interface ProcessSectionData {
   entries: ProcessEntry[];
   done: number;
   total: number;
-  /** 胶囊上显示的那一行（优先 running，其次第一个未完成） */
+  /** 胶囊上显示的那一行（优先 running，其次第一个未完成；已结束的清单不再指认「当前」） */
   currentTitle: string;
   hasRunning: boolean;
+  /** 清单所属轮次的阶段（与右面板摘要同源）：决定栏目头计数的语气与状态词 */
+  phase: TurnPhase;
+  /** 续接清单（上一轮未完成、本轮尚未更新） */
+  carried: boolean;
 }
 
 export interface SubagentSectionData {
   running: { id: number; name: string }[];
-  /** 已结束条目（当前轮次的排在最前）；全部折成一行展示 */
-  finished: { id: number; name: string }[];
+  /** 尚未开始（如工作流里排队的节点）：折成一行，不冒充已完成 */
+  pending: { id: number; name: string }[];
+  /** 已结束条目（当前轮次的排在最前）；全部折成一行展示，逐项保留真实结果 */
+  finished: { id: number; name: string; state: "done" | "failed" | "stopped" }[];
 }
 
 export interface WorkflowItem {
@@ -364,10 +371,11 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
     const done = rows.filter((r) => r.status === "done").length;
     /* plan-20261020-progress：并行派发时子会话步骤也会转圈，
        「当前动作」优先取**主代理自己**（没有 owner）正在进行的那项——否则标题会被
-       某个子会话的步骤占住，用户看不到主代理实际在做什么。rows 的顺序保持不变。 */
+       某个子会话的步骤占住，用户看不到主代理实际在做什么。rows 的顺序保持不变。
+       plan-20261025-progress-keep：已结束的清单保留展示，但没有「正在做」的项——不再拿第一个未完成项当当前动作。 */
     const current = rows.find((r) => r.status === "running" && !r.owner)
       ?? rows.find((r) => r.status === "running")
-      ?? rows.find((r) => r.status !== "done");
+      ?? (progress.phase === "concluded" ? undefined : rows.find((r) => r.status !== "done"));
     return {
       rows,
       entries: foldProcessRows(rows),
@@ -375,39 +383,33 @@ export function useToolCardData(sessionId: number | null): ToolCardData {
       total: rows.length,
       currentTitle: current?.title ?? "",
       hasRunning: rows.some((r) => r.status === "running"),
+      phase: progress.phase,
+      carried: progress.carried,
     };
-  }, [progress.rows]);
+  }, [progress.rows, progress.phase, progress.carried]);
 
   const subagentData = useMemo<SubagentSectionData | null>(() => {
     const entries = Object.entries(subagentMeta || {});
     if (entries.length === 0) return null;
-    const running: { id: number; name: string }[] = [];
-    const finished: { id: number; name: string }[] = [];
+    const running: SubagentSectionData["running"] = [];
+    const pending: SubagentSectionData["pending"] = [];
+    const finished: SubagentSectionData["finished"] = [];
     /** 当前轮次已结束的条目：排在 finished 最前（「刚跑完的这一批先看到」），
      *  但**不**假装它们还在跑（plan-20261018-subagent-status-fix）。 */
-    const currentTurnFinished: { id: number; name: string }[] = [];
+    const currentTurnFinished: SubagentSectionData["finished"] = [];
     for (const [idStr, m] of entries) {
+      // 列入与状态判定与右面板摘要共用（subagentStatus.ts）：终态压过「当前轮次」，幽灵条目不列出
+      if (!isListedSubagent(m)) continue;
       const id = Number(idStr);
       const name = m.name || `子代理 #${id}`;
-      /* 【口径统一】终态必须压过「当前轮次」：
-         旧实现只要 `m.turnId === runningTurnId` 就无条件计入 running 数组，于是
-         `status === "done"` 的子代理在主代理还在同一轮里继续干活时，工具卡一直显示
-         「N 运行中」——而右面板按 status 判定、同一时刻显示「已完成」，两边自相矛盾。 */
-      const isTerminal = TERMINAL_SUBAGENT_STATUS.has(String(m.status));
-      const isRunningAgent = !isTerminal && (m.status === "running" || m.status === "in_progress");
-      /* plan-20261019-subagent-ghost：没有任何归属锚点、也没有任何输出的条目
-         （典型来源是主代理完成事件曾被误记成「子代理 #N」）不进入栏目——
-         它们点开只是一个空面板。运行中的条目仍保留：它可能还没来得及产出消息。 */
-      const hasAnchor = m.turnId != null || m.taskId != null || m.programId != null
-        || m.spawnMessageId != null || (m.messageCount ?? 0) > 0;
-      if (!hasAnchor && !isRunningAgent) continue;
-      const isCurrentTurn = m.turnId != null && m.turnId === runningTurnId;
-      if (isRunningAgent) running.push({ id, name });
-      else if (isCurrentTurn) currentTurnFinished.push({ id, name });
-      else finished.push({ id, name });
+      const state = subagentState(m.status);
+      if (state === "running") running.push({ id, name });
+      else if (state === "pending") pending.push({ id, name });
+      else if (m.turnId != null && m.turnId === runningTurnId) currentTurnFinished.push({ id, name, state });
+      else finished.push({ id, name, state });
     }
-    if (running.length === 0 && currentTurnFinished.length === 0 && finished.length === 0) return null;
-    return { running, finished: [...currentTurnFinished, ...finished] };
+    if (running.length === 0 && pending.length === 0 && currentTurnFinished.length === 0 && finished.length === 0) return null;
+    return { running, pending, finished: [...currentTurnFinished, ...finished] };
   }, [subagentMeta, runningTurnId]);
 
   const workflowData = useMemo<WorkflowSectionData | null>(() => {

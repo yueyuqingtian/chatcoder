@@ -1,8 +1,11 @@
-/** 排队托盘（plan-20261009-ui U2）：会话运行中继续发送的消息，排在输入卡上方。
+/** 排队托盘（plan-20261009-ui U2；plan-20261025-shell 需求 9 重做外观）：会话运行中继续发送的消息，排在输入卡上方。
  *
  * 旧实现是输入卡内部顶部的一串细胶囊（与正文挤在同一个卡片里、按钮 20px 难点中）。
- * 现在：独立托盘、标题行（排队中 N · 清空）、每条 = 序号 + 模式徽标 + 单行摘要 + 附件数 + 悬停操作
- * （立即发送 / 编辑回填 / 移除）；入队错峰滑入、出队高度收拢、发送中显示进度微光。 */
+ * 现在：托盘像从输入卡背后抽出的抽屉——左右比输入卡各收进一截、底边与输入卡顶边相接，
+ * 每条一行（弱色序号 + 模式徽标 + 单行摘要 + 附件数 + 操作：立即发送 / 编辑回填 / 移除）。
+ * plan-20261025-composer：去掉「排队中 N · 说明 · 清空」标题行（用户反馈太占行高），
+ * 操作图标常显而不是悬停才出现——托盘只剩条目本身，精简扁平；「按顺序发送」的说明交给无障碍标签。
+ * 条目不再各套一层描边卡片，层次靠留白与悬停底色；入队错峰滑入、出队高度收拢、发送中显示进度微光。 */
 import { useEffect, useRef, useState } from "react";
 import { Badge, Tooltip } from "../ui";
 import { IconArrowUp, IconPaperclip, IconPencil, IconX } from "../icons";
@@ -56,27 +59,17 @@ function useExiting<T extends { id: string }>(items: T[], ms = 220): Array<T & {
   return view;
 }
 
-export function QueueTray({ items, onFlush, onRemove, onEdit, onClear }: {
+export function QueueTray({ items, onFlush, onRemove, onEdit }: {
   items: QueuedInput[];
   onFlush: (id: string) => void;
   onRemove: (id: string) => void;
   onEdit: (item: QueuedInput) => void;
-  onClear: () => void;
 }) {
   const { t } = useI18n();
   const view = useExiting(items);
   if (view.length === 0) return null;
-  const live = items.length;
   return (
-    <div className="cc-queue" role="list" aria-label="排队消息">
-      <div className="cc-queue-head">
-        <span className="cc-queue-title">排队中</span>
-        <Badge size="xs" count>{live}</Badge>
-        <span className="cc-queue-hint">当前任务结束后按顺序发送</span>
-        {live > 1 && (
-          <button type="button" className="cc-queue-clear" onClick={onClear}>清空</button>
-        )}
-      </div>
+    <div className="cc-queue" role="list" aria-label="排队消息：当前任务结束后按顺序发送">
       {view.map((q, i) => {
         const leaving = Boolean(q._leaving);
         const attach = q.attachments?.length ?? 0;

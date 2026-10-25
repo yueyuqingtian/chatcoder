@@ -468,3 +468,82 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   background: transparent; color: var(--text-1);
   font-size: inherit;
 }
+
+/* ══ plan-20261025-shell（需求 1）：工具调用行精简排版 ══════════════════════
+   参考 zcode「思考 · 持续了几秒」「查阅 · 2 文件」「读取 a.py 目录/」：
+   · 动作词两字、次级色中字重；对象（文件名 / 命令 / 查询词）紧跟其后，靠间距分隔；
+   · 「·」只放在「动作 · 统计 / 时长」之间；补充说明、计数、目录、时长统一弱色并小一号（随对话字号缩放）；
+   · 展开卡片与行内文字左对齐（缩进 = 图标槽 + 间距），12px 卡片圆角，与正文代码块同一卡片语言。 */
+.tc-row .tc-verb { color: var(--text-2); font-weight: 500; }
+.tc-row .tc-filename { font-weight: 500; }
+.tc-sep { flex-shrink: 0; color: var(--text-3); }
+.tc-meta,
+.tc-row .tc-tool-name,
+.tc-row .tc-explore-summary,
+.tc-row .thinking-done-label,
+.tc-row .tc-query,
+.tc-row .tc-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: calc(var(--fs-md, 13px) - 1px);
+  font-weight: 400;
+}
+.tc-row .tc-tool-name { flex: 0 1 auto; }
+.tc-meta { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+
+/* 展开卡片：缩进到动作词起点，形成「行 → 详情」的层次；圆角取卡片档 */
+.tc-output {
+  margin: 4px 0 6px calc(var(--flow-icon, 16px) + var(--flow-icon-gap, 8px));
+  border-radius: var(--r-lg);
+}
+/* 命令头：提示符 + 完整命令（多行原样）+ 复制；与下方输出之间一条细分隔 */
+.tc-cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--surface-inset-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.tc-cmd:last-child { border-bottom: none; }
+.tc-cmd-ps { flex-shrink: 0; color: var(--text-3); user-select: none; }
+.tc-cmd-text {
+  flex: 1;
+  min-width: 0;
+  max-height: 7.2em;
+  overflow-y: auto;
+  color: var(--text-1);
+  background: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.tc-cmd-copy { flex-shrink: 0; margin: -3px 0; color: var(--text-3); }
+/* 子代理行 / 子代理·子会话通知行：任务名（来源标题）是行内对象，正文色；失败原因与任务名左对齐 */
+.tc-subagent-row .tc-query { flex: 0 1 auto; color: var(--text-1); font-size: inherit; font-weight: 500; }
+.tc-subagent-error { padding-left: calc(var(--flow-icon, 16px) + var(--flow-icon-gap, 8px)); }
+.tc-sq-row .tc-sq-title { font-weight: 500; }
+
+/* ══ plan-20261025-shell（需求 9）：消息流报错卡 ══════════════════════
+   · 卡内按钮（详情 / 复制 / 重试 / 关闭）悬停改为同色系浅红底——此前是全局中性灰白底，
+     压在浅红卡片上像打了块补丁（用户截图指出的「割裂」）；按钮文字取错误色与次级色的中间档；
+   · 字号全部跟随外观设置的对话字号；行首为实心语气徽标，与标题首行垂直居中。 */
+.turn-item-error .err-icon { margin-top: 2px; color: var(--error); }
+.turn-item-error .err-text { line-height: 1.55; }
+.turn-item-error .err-hint { font-size: calc(var(--fs-md, 13px) - 1px); line-height: 1.5; }
+.turn-item-error .err-detail { font-size: calc(var(--fs-md, 13px) - 1.5px); }
+.turn-item-error .err-actions :is(.btn, .ui-icon-btn) {
+  color: color-mix(in srgb, var(--error) 55%, var(--text-2));
+  background: transparent;
+  border-color: transparent;
+}
+.turn-item-error .err-actions :is(.btn, .ui-icon-btn):hover:not(:disabled),
+.turn-item-error .err-actions :is(.btn, .ui-icon-btn):focus-visible {
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+  color: var(--error);
+}
+.turn-item-error .err-actions .btn[aria-expanded="true"] { background: color-mix(in srgb, var(--error) 8%, transparent); }

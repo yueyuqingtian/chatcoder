@@ -154,12 +154,24 @@ def _sticky_rank_key(cred: ProviderCredential) -> tuple:
     return (0, -last.timestamp(), cred.priority or 0, cred.id or 0)
 
 
+def _inactive_tail(creds: list[ProviderCredential]) -> list[ProviderCredential]:
+    """plan-565-2323 G2：停用行按 (priority, id) 排序，供展示路径追加到队尾。"""
+    rows = [c for c in creds if not getattr(c, "is_active", True)]
+    rows.sort(key=lambda c: (c.priority or 0, c.id or 0))
+    return rows
+
+
 def rank_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
-                     now: datetime | None = None) -> list[ProviderCredential]:
+                     now: datetime | None = None,
+                     include_inactive: bool = False) -> list[ProviderCredential]:
     """非 ta3 供应商的尝试序：healthy（按策略）+ demoted（暂缓者，窗口最早到期在前）。
 
     与 `available_credentials` 的关键差异：**不过滤暂缓者**。全部凭据都在列表里，
     暂缓者只是排到队尾，因此「其余都不可用」时仍会回头试它（R1 的软降级）。
+
+    include_inactive 只给展示路径用（plan-565-2323 G2）：为 True 时把 is_active=False
+    的行按 (priority, id) 追加到队尾。停用行既不参与排序也不占据队首，取用路径不传该
+    参数（默认 False），尝试序与改造前完全一致——只降级不排除的语义保持不变。
     """
     now = now or _now()
     healthy: list[ProviderCredential] = []
@@ -176,7 +188,10 @@ def rank_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
     else:
         healthy.sort(key=_sticky_rank_key)
     parked.sort(key=lambda c: (_health(c).demoted_until or now, c.priority or 0, c.id or 0))
-    return healthy + parked
+    ranked = healthy + parked
+    if include_inactive:
+        return ranked + _inactive_tail(creds)
+    return ranked
 
 
 def is_demoted(cred: ProviderCredential, now: datetime | None = None) -> bool:
@@ -355,8 +370,12 @@ def order_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
 
 def available_credentials(creds: list[ProviderCredential], strategy: str = "sticky",
                           provider_id: int | None = None,
-                          rotate: bool = False) -> list[ProviderCredential]:
+                          rotate: bool = False,
+                          include_inactive: bool = False) -> list[ProviderCredential]:
     """过滤出当前可用凭据（启用且不在冷却期内），按尝试序排序。
+
+    include_inactive 与 rank_credentials 同义（plan-565-2323 G2）：仅展示路径传 True，
+    把停用行按 (priority, id) 追加到队尾，让用户还能在列表里看到并重新启用它。
 
     plan-271-1364 M3.1: 排序委托 order_credentials（strategy 决定粘性/轮转）；
     默认 sticky 且不 rotate，展示路径（计数/扫描取 key）行为与改造前完全一致。
@@ -376,7 +395,10 @@ def available_credentials(creds: list[ProviderCredential], strategy: str = "stic
             if until is not None and until > now:
                 continue  # 冷却中，跳过
         ok.append(c)
-    return order_credentials(ok, strategy=strategy, rotate=rotate, provider_id=provider_id)
+    ranked = order_credentials(ok, strategy=strategy, rotate=rotate, provider_id=provider_id)
+    if include_inactive:
+        return ranked + _inactive_tail(creds)
+    return ranked
 
 
 async def list_credentials(db: AsyncSession, provider_id: int) -> list[ProviderCredential]:
@@ -484,13 +506,19 @@ async def create_account_credential(db: AsyncSession, provider_id: int, *,
 
 
 async def update_credential(db: AsyncSession, credential_id: int, **fields) -> bool:
-    """只更新非 None 字段；api_key 传空字符串表示清除。"""
+    """只更新非 None 字段；api_key 传空字符串表示清除。
+
+    返回值 = **记录是否存在**（plan-565-2323 G1）。此前返回的是「本次是否触发了启用
+    复位」，而「停用」永远不会触发复位，调用方据此误判为记录不存在——界面弹
+    credential not found，实际上开关已经写库成功。
+    """
     from app.persistence.database import run_write_locked
 
     def patch(s):
         cred = s.get(ProviderCredential, credential_id)
         if cred is None:
-            return False
+            return False, False
+        was_active = bool(cred.is_active)
         for k, v in fields.items():
             if v is None:
                 continue
@@ -504,16 +532,23 @@ async def update_credential(db: AsyncSession, credential_id: int, **fields) -> b
             cred.status = "ok"
             cred.cooldown_until = None
             cred.fail_count = 0  # plan-290: 重新启用即重置连续失败计数
-            _reset_later = True
+            reset = True
         else:
-            _reset_later = False
+            reset = False
+        _active_changed = (
+            fields.get("is_active") is not None and bool(cred.is_active) != was_active
+        )
         s.commit()
-        return _reset_later
+        return True, (reset or _active_changed)
 
-    reset = await run_write_locked(patch, label=f"credential.update.{credential_id}")
-    if reset:
-        forget(credential_id)  # 进程内健康状态同步复位，避免新排序仍认为它暂缓中
-    return bool(reset)
+    found, stale_state = await run_write_locked(
+        patch, label=f"credential.update.{credential_id}",
+    )
+    if stale_state:
+        # plan-565-2323 G1：启停一变，库里的可用性与进程内健康状态就脱节了——
+        # 停用后仍被判「暂缓」、重新启用后仍被旧冷却拦下，两种都表现为账号关不掉/打不开。
+        forget(credential_id)
+    return found
 
 
 async def delete_credential(db: AsyncSession, credential_id: int) -> bool:

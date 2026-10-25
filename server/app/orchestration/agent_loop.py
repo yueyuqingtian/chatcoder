@@ -40,19 +40,7 @@ from app.orchestration.tools import ToolContext, ToolResult, tool_executor
 from app.orchestration.tools.read_cache import read_cache_for
 from app.orchestration.tools.registry import tool_registry
 from app.orchestration.workflow.tools import WORKFLOW_TOOL_NAMES, run_workflow_tool
-# plan-156-619 S4：子会话工具（主代理 4 个 + 子会话自身 2 个）与执行分发。
-# 与探索子代理分成两个模块：探索走 _run_subagent_tool，执行走 subsession_tool_runner。
-from app.orchestration.subsession_tools import (
-    SUBSESSION_OWN_TOOLS as SUBSESSION_OWN_TOOL_SCHEMAS,
-    SUBSESSION_TOOL_NAMES,
-)
-from app.orchestration.subsession_tool_runner import run_own_tool, run_subsession_tool
 from app.services import hook_service, message_service, rollback_service, task_service
-
-# 子会话自身可用的通信工具名集合（用于分发判定）
-SUBSESSION_OWN_TOOL_NAMES: set[str] = {
-    s["function"]["name"] for s in SUBSESSION_OWN_TOOL_SCHEMAS
-}
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +238,12 @@ _TRANSIENT_HINTS = (
 _PERMANENT_HINTS = (
     "401", "403", "unauthorized", "forbidden", "invalid api key", "authentication",
     "token 上限", "仅生成思考", "model not found", "overflow", "context length",
+    # plan-565-2323 G5：凭据/鉴权类失败不会因为等待而好转，必须判永久。
+    # 事故复盘：provider_credential_unavailable 含 "unavailable"，被上面的瞬时表命中，
+    # 子代理进入无上限保活循环、永久显示「执行中」（配合 subagent.py 的保活上限一并收紧）。
+    # 这里只写 credential 一个词即可覆盖 provider_credential_unavailable /
+    # provider_credentials_all_disabled 两种取值；永久表优先于瞬时表匹配。
+    "credential", "api key", "鉴权", "凭据",
 )
 
 
@@ -722,6 +716,7 @@ async def _compact_persistent_or_fallback(
     used_tokens: int | None, agent_id: int, agent_name: str,
     turn_id: int, messages: list, trigger: str = "pressure",
     reply_language: str = "auto",
+    thread_id: int | None = None, agent_kind: str = "main",
 ) -> tuple[dict | None, list]:
     """优先落库式压缩（v30，参照 deepseek-harness compaction）。
 
@@ -730,6 +725,12 @@ async def _compact_persistent_or_fallback(
     内存 messages（本轮剩余 step 立即可见），广播 compact.summary。
     失败时：回退旧内存式 auto_compact / emergency_compact（不落库）。
 
+    plan-560-2311 A2：子代理（thread_id 非空或 agent_kind != "main"）**不做落库式压缩**。
+    compact_session / emergency_compact_session 取的是 `_fetch_main_messages`（主线程
+    `thread_id IS NULL` 的消息），会把主会话历史遮蔽、把 SUMMARY 卡片写回主线程并
+    改写主会话 shared_context——子代理自己的线程却完全没被压缩。因此子代理直接返回
+    (None, messages)，由下方内存式回退只裁剪自己的上下文。
+
     Returns:
         (result, messages)：result 非 None 表示落库式压缩成功。
     """
@@ -737,6 +738,8 @@ async def _compact_persistent_or_fallback(
     from app.orchestration.prompts import get_checkpoint_preamble
 
     _result: dict | None = None
+    # plan-560-2311 A2：非主线程不能落库式压缩（原因见 docstring），交由内存式回退
+    _persistent_allowed = thread_id is None and agent_kind == "main"
     # plan-19-82 步骤5: 固定开销（system/developer + 工具规则）实测值——压缩不会动它们，
     # 必须先扣除再判定目标可达性，否则会「压不动却反复压」。
     from app.orchestration.token_counter import estimate_fixed_overhead_tokens as _fixed_of
@@ -744,13 +747,15 @@ async def _compact_persistent_or_fallback(
     try:
         from app.persistence.models.message import Session as _SessRow
         from app.orchestration.context_compressor import compact_session, emergency_compact_session
-        _sess = await db.get(_SessRow, session_id)
+        _sess = await db.get(_SessRow, session_id) if _persistent_allowed else None
         if _sess is not None:
             if trigger == "context-overflow":
                 _result = await emergency_compact_session(
                     db, session=_sess, provider=provider, context_window=agent_window,
                     used_tokens=used_tokens, agent_id=agent_id, agent_name=agent_name,
                     turn_id=turn_id, language=reply_language,
+                    # plan-560-2311 A4：与 pressure 路径同源传固定开销，口径一致
+                    fixed_overhead_tokens=_fixed_overhead,
                 )
             else:
                 _result = await compact_session(
@@ -874,22 +879,16 @@ async def _agent_started_extra(agent) -> dict:
 
 
 # ── plan-474-2105：身份二次防御 ──────────────────────────────
-# 工具 schema 在组装时已按身份剥离（subsession_tools.strip_for_subsession /
-# subagent_tools.strip_for_subagent），但「类型工具白名单」「历史 profile 配置」
+# 工具 schema 在组装时已按身份剥离（subagent_tools.strip_for_subagent），
+# 但「类型工具白名单」「历史 profile 配置」
 # 「自定义权限模式」都可能把工具名重新塞回来。这里按调用方身份再拦一次：
 # 剥离解决「模型看不到」，本守卫解决「看到了也执行不了」。
-_SUBSESSION_DENIED: frozenset[str] = frozenset({
-    # 子会话不得直接问用户：用户可能正停在主会话，子会话的提问会无人可见而无限阻塞
-    "ask_user_question",
-    # 不得派生下级执行体，也不得跨会话操作
-    "create_subsession", "send_to_subsession", "get_subsession_progress", "interrupt_subsession",
-    "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
-    "send_to_subagent", "resume_subagent", "report_to_leader",
-})
+# plan-549-2281：子会话的创建与控制已下线，旧 _SUBSESSION_DENIED 随之删除——
+# 不再有任何创建 / 操作子会话的工具可被重新塞回。
 _SUBAGENT_DENIED: frozenset[str] = frozenset({
     # 子代理只能通过 report_to_leader 向主代理求助，不得直接打扰用户
     "ask_user_question",
-    # 不得派生下级执行体，也不得碰子会话
+    # 不得派生下级执行体，也不得碰子会话（历史名保留：旧会话回放仍可能出现）
     "create_subsession", "send_to_subsession", "get_subsession_progress", "interrupt_subsession",
     "message_main", "message_peer",
     "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
@@ -925,9 +924,10 @@ def _interruptible_for(tool_name: str, args: dict) -> str:
 
 
 # plan-20261020-bgtask：邮箱消息类型 → 让出等待时给模型看的来源说明
+# plan-549-2281：子代理成为唯一执行体，它的提问也走 P0 打断（替代原子会话提问）。
 _INTERRUPT_SOURCE_LABEL: dict[str, str] = {
-    "subsession_question": "收到子会话提问",
-    "subsession_report": "收到子会话汇报",
+    "subagent_question": "收到子代理提问",
+    "subagent_completion": "有子代理已结束",
     "main_reply": "收到主会话答复",
     "bg_command_done": "有后台命令已结束",
     "bg_command_stopped": "有后台命令已被停止",
@@ -946,11 +946,13 @@ def _deny_tool_for_identity(tool_name: str, *, is_subsession: bool, is_subagent:
             "需要主代理决策时用 report_to_leader(kind=\"question\")，"
             "需要用户决策时把问题写进最终结论，由主代理转达。不要重试本工具。"
         )
-    if is_subsession and tool_name in _SUBSESSION_DENIED:
+    # plan-549-2281：子会话的创建与控制已下线，_SUBSESSION_DENIED 随之删除——
+    # 历史挂靠会话仍在跑，但它们拿不到任何子会话工具，无需再按身份二次拦截。
+    # 仍按「旧口径 + report_to_leader」拦：挂靠会话没有 subagent_comm，调用它只会拿到未知工具。
+    if is_subsession and (tool_name in _SUBAGENT_DENIED or tool_name == "report_to_leader"):
         return (
-            f"Error: 子会话无权调用工具 {tool_name}。"
-            "需要澄清时用 message_main(kind=\"question\") 询问主代理，"
-            "由主代理决定自己回答还是转问用户；子会话不能再创建子会话或派发子代理。不要重试本工具。"
+            f"Error: 该会话无权调用工具 {tool_name}。"
+            "需要主代理决策时把问题写进最终结论，由主代理决定自己回答还是转问用户。不要重试本工具。"
         )
     return ""
 
@@ -1018,6 +1020,9 @@ async def run_agent_loop(
         )
     except Exception:
         logger.debug("[agent] turn=%s 会话身份判定失败(按主会话处理)", turn_id, exc_info=True)
+    # plan-549-2281：子代理的任务标题——审批卡据此显示「来自子代理 #N「标题」」。
+    # 子代理的 agent.name 是任务标题的截断（40 字符，见 spawn 处），主代理侧为空。
+    _caller_task_title = str(getattr(agent, "name", "") or "") if _caller_is_subagent else ""
 
     # v2.2 (对齐 zcode 3.12): 会话权限模式（executor 审批门前决策）
     # plan-330-1648 M1: 子代理按类型锁定运行模式（subagent_mode），**不继承会话模式**——
@@ -1038,10 +1043,14 @@ async def run_agent_loop(
         except Exception:
             logger.warning("[agent] turn=%s 读取会话执行模式失败，用 agent", turn_id, exc_info=True)
 
-    # plan-156-621：排队消息（运行中「立即发送」）也要带上并行分派提醒。
-    # 与 turn 开始时的完整提示同一套开关：设置关闭或该模式不下发子会话工具时为空串。
-    from app.orchestration.prompts.parallel_subsession import parallel_subsession_hint
-    _parallel_reminder = parallel_subsession_hint(permission_mode, full=False)
+    # plan-549-2281：排队消息（运行中「立即发送」）也要带上派发子代理的提醒。
+    # 与 turn 开始时的完整提示同一套开关：设置关闭或该模式不下发子代理工具时为空串。
+    # 子代理自身与历史挂靠子会话（side_parent_id 非空）都不带——它们没有派发工具。
+    from app.orchestration.prompts.subagent_dispatch import subagent_dispatch_hint
+    _parallel_reminder = subagent_dispatch_hint(
+        permission_mode, full=False,
+        is_subagent=_caller_is_subagent, is_legacy_child=_caller_is_subsession,
+    )
 
     # plan-75-332: 权限模式（ask / auto / full）——与执行模式正交，注入本 turn 所有
     # ToolContext（主代理/子代理共用此入口）。子代理同样继承会话权限模式：子代理的
@@ -1396,11 +1405,13 @@ async def run_agent_loop(
                     logger.info("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) >= 阈值 %d，调用前压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
                     await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _est_prompt, "context_window": agent_window, "ratio": round(_est_prompt / agent_window * 100, 1)}})
                     # v30: 优先落库式压缩（持久化 checkpoint），失败回退内存式 auto_compact
+                    # plan-560-2311 A2：带上线程身份，子代理不做落库式压缩
                     _cc_pre, messages = await _compact_persistent_or_fallback(
                         db, session_id=session_id, provider=provider, agent_window=agent_window,
                         used_tokens=_est_prompt, agent_id=agent_id, agent_name=agent_name,
                         turn_id=turn_id, messages=messages, trigger="pressure",
                         reply_language=reply_language,
+                        thread_id=thread_id, agent_kind=agent_kind,
                     )
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
@@ -1472,7 +1483,14 @@ async def run_agent_loop(
                     last_sig=_subagent_reminded_sig, step=step,
                     last_step=_subagent_reminded_at_step,
                 ):
-                    _pending_reminders.append(_build_subagent_running_reminder(_running_now))
+                    _pending_reminders.append(
+                        _build_subagent_running_reminder(
+                            _running_now,
+                            # plan-549-2281：把额度一并告知（上限取当前设置，占用取实时数）
+                            max_conc=max(1, min(30, int(getattr(settings, "max_concurrent_subagents", 4) or 4))),
+                            pending=int(_sub_mgr_for_reminder.pending_count()),
+                        )
+                    )
                     _subagent_reminded_sig = _running_sig
                     _subagent_reminded_at_step = step
                 elif not _running_now:
@@ -1510,7 +1528,9 @@ async def run_agent_loop(
 
             # plan-547 C3: plan 模式每次调用注入计划全集与状态标记——
             # 模型在任意一步都看得到完整清单与进度，防止长规划跑偏或遗漏步骤
-            if permission_mode == "plan" and _last_todos:
+            # plan-562-2318 M1：判定改走**判定档**（`_mode_kind`，按 kind 归一）——
+            # 此前用原始模式名比较，自定义 kind=plan 模式拿不到这份每步清单。
+            if _mode_kind(permission_mode) == "plan" and _last_todos:
                 _plan_lines = []
                 for _t in _last_todos:
                     _c_item = str(_t.get("content") or "").strip()
@@ -1754,11 +1774,13 @@ async def run_agent_loop(
                             agent_window = await get_agent_context_window(db, agent, model_id=model_id)
                             # v30: 溢出恢复优先落库式（保留最近6回合 + LLM 摘要 + 限次重试），
                             # 失败回退旧硬编码 emergency_compact。
+                            # plan-560-2311 A2：带上线程身份，子代理不做落库式压缩
                             _cc_ovf, messages = await _compact_persistent_or_fallback(
                                 db, session_id=session_id, provider=provider, agent_window=agent_window,
                                 used_tokens=None, agent_id=agent_id, agent_name=agent_name,
                                 turn_id=turn_id, messages=messages, trigger="context-overflow",
                                 reply_language=reply_language,
+                                thread_id=thread_id, agent_kind=agent_kind,
                             )
                             if _cc_ovf is None:
                                 messages = emergency_compact(messages, agent_window)
@@ -2042,11 +2064,13 @@ async def run_agent_loop(
                         },
                     })
                     # v30: 优先落库式压缩（持久化 checkpoint），失败回退内存式 auto_compact
+                    # plan-560-2311 A2：带上线程身份，子代理不做落库式压缩
                     _cc_real, messages = await _compact_persistent_or_fallback(
                         db, session_id=session_id, provider=provider, agent_window=agent_window,
                         used_tokens=_final_prompt, agent_id=agent_id, agent_name=agent_name,
                         turn_id=turn_id, messages=messages, trigger="pressure",
                         reply_language=reply_language,
+                        thread_id=thread_id, agent_kind=agent_kind,
                     )
                     # v6.5: 压缩后广播，前端关闭反馈提示（携带阴影定价供渲染压缩卡片）
                     await broadcast(session_id, {
@@ -2193,6 +2217,7 @@ async def run_agent_loop(
                             read_cache=read_cache_for(session_id, lambda: messages),
                             is_subagent=_caller_is_subagent,
                             is_subsession=_caller_is_subsession,
+                            subagent_title=_caller_task_title,
                         )
                         _par_results.update(_par_done)
                         # 钩子注入文本按批内顺序并入：钩子仍在工具执行前生效，语义与串行一致
@@ -2357,55 +2382,6 @@ async def run_agent_loop(
                         _tool_executed = True
                         continue
 
-                    # ── plan-156-619 S4：子会话工具（主代理 4 个 / 子会话自身 2 个）──
-                    # 与探索子代理分文件：探索走 _run_subagent_tool，执行走 subsession_tool_runner，
-                    # 避免两套语义在同一条 if 链里交错。
-                    # 落库顺序与子代理工具一致：TOOL_CALL 先落库并排空，保证前端先有调用消息再有其结果。
-                    if tool_name in SUBSESSION_TOOL_NAMES:
-                        await message_service.create_message(
-                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
-                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
-                            msg_type=MsgType.TOOL_CALL.value,
-                            content={"tool": tool_name, "args": args, "call_key": tc.get("id", ""),
-                                     "agent_name": agent_name},
-                            buffered=True,
-                        )
-                        try:
-                            from app.persistence.write_behind import write_behind as _wb2
-                            await _wb2.get(session_id, turn_id).flush()
-                        except Exception:
-                            logger.debug("[agent] 子会话调用消息落库屏障失败(非阻塞)", exc_info=True)
-                        if tool_name in SUBSESSION_OWN_TOOL_NAMES:
-                            tool_output = await run_own_tool(
-                                tool_name, args, session_id=session_id, db=db,
-                                # 等主代理答复期间用户 / 同级发来新消息就让出，不必等到提问超时
-                                interrupt_check=lambda _t=turn_id: _has_injected_inputs(_t, urgent_only=True),
-                            )
-                        else:
-                            tool_output = await run_subsession_tool(
-                                tool_name, args, session_id=session_id, db=db,
-                                # 等子会话结束期间有新消息（子会话提问 / 用户追加）就让出，
-                                # 否则子会话在等主代理答复、主代理在等子会话结束，互相等到超时
-                                interrupt_check=lambda _t=turn_id: _has_injected_inputs(_t, urgent_only=True),
-                            )
-                        tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
-                        messages.append(ChatMessage(
-                            role="tool", content=tool_output,
-                            name=tool_name, tool_call_id=tc.get("id", ""),
-                        ))
-                        await message_service.create_message(
-                            db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
-                            sender_type=SenderType.AGENT.value, sender_id=agent_id,
-                            msg_type=MsgType.TOOL_RESULT.value,
-                            content={"tool": tool_name, "call_key": tc.get("id", ""),
-                                     "ok": not str(tool_output).startswith("Error:"),
-                                     "output": tool_output,
-                                     "error": "", "agent_name": agent_name},
-                            buffered=True,
-                        )
-                        _tool_executed = True
-                        continue
-
                     # ── plan-330-1648 M4: 子代理 → 主代理上报/提问（不走 executor）──
                     if subagent_comm and tool_name == "report_to_leader":
                         tool_output = await _run_report_to_leader(
@@ -2495,6 +2471,8 @@ async def run_agent_loop(
                             # plan-522-2209：把身份带进工具上下文，审批等待策略据此豁免静默超时
                             is_subagent=_caller_is_subagent,
                             is_subsession=_caller_is_subsession,
+                            # plan-549-2281：审批卡显示「来自子代理 #N「标题」」
+                            subagent_title=_caller_task_title,
                         )
                         # S12（plan-41-197）：pre_tool_use 钩子——工具调用前触发（可按工具名匹配）；
                         # 提示词型钩子文本注入下一步上下文，命令型钩子在此执行（fail-open）。
@@ -2934,6 +2912,23 @@ async def run_agent_loop(
                     if not result.ok:
                         result.classify_if_missing()
                         _model_content = f"{_model_content}\n{result.failure_hint_line()}".strip()
+                    # plan-548-2277：写盘后跑最小检查，把语法/格式错误立刻回灌给模型。
+                    # 只覆盖 .py/.json/.cjs/.js（单文件级、秒级、零副作用）；.ts/.tsx 的类型
+                    # 检查留给交付前的项目级 typecheck，避免每次编辑都等一次编译。
+                    if (result.ok and tool_name in ("fs_write", "editor_apply_diff", "multi_file_edit")
+                            and getattr(settings, "post_edit_check_enabled", True)):
+                        try:
+                            from app.services import post_edit_check
+
+                            _check_note = await post_edit_check.check_after_tool(
+                                tool_name, result.data, workspace,
+                                fail_counts=post_edit_check.fail_counts_for(session_id),
+                            )
+                        except Exception:  # noqa: BLE001 — 检查失败不影响主流程
+                            _check_note = ""
+                            logger.debug("[agent] 写后检查异常 tool=%s", tool_name, exc_info=True)
+                        if _check_note:
+                            _model_content = f"{_model_content}\n\n{_check_note}".strip()
                     messages.append(ChatMessage(
                         role="tool", content=_model_content,
                         name=tool_name, tool_call_id=tc.get("id", ""),
@@ -2945,6 +2940,16 @@ async def run_agent_loop(
                         _fp = result.data.get("fingerprint")
                         if _rk and _fp:
                             _rc.record(tuple(_rk), tuple(_fp), tc.get("id", ""))
+                        # plan-548-2277：「先读后改」闸门要的是实际行区间——shown_lines 形如
+                        # "120-419"，即本次真正返回给模型的行范围。未变化存根不带该字段，
+                        # 但它指向的更早那次读取已经登记过，无需重复。
+                        _shown = str(result.data.get("shown_lines") or "")
+                        if _rk and _shown:
+                            try:
+                                _a, _, _b = _shown.partition("-")
+                                _rc.record_range(_rk[0], int(_a), int(_b))
+                            except (TypeError, ValueError):
+                                pass
                     # L3.1（plan-340-1705）：登记本步的电脑操控调用，供下一步的观测埋点使用
                     if tool_name.startswith("desktop_"):
                         _obs_tools.append((tool_name, bool(result.ok)))
@@ -3082,7 +3087,7 @@ async def run_agent_loop(
             # plan-330-1648 M1: 计划文档纠偏**只对主代理生效**——子代理不参与规划流程，
             # 运行模式已按类型锁定（不再继承会话 plan），此处再显式限定 agent_kind，
             # 彻底消除"子代理被系统反复催写 ai/chatcoder-plan-*.md"的现象。
-            if (agent_kind == "main" and permission_mode == "plan"
+            if (agent_kind == "main" and _mode_kind(permission_mode) == "plan"
                     and not any(p.replace("\\", "/").startswith("ai/chatcoder-plan") or "/ai/chatcoder-plan" in p.replace("\\", "/") for p in write_paths)):
                 if _plan_correction_tries < _PLAN_CORRECTION_MAX:
                     _plan_correction_tries += 1
@@ -3288,7 +3293,7 @@ _PARALLEL_TOOL_LIMIT = 4
 # 的孤儿，否则下一次请求会被网关以「消息序列不合法」拒绝。
 ABORTED_BEFORE_DISPATCH = "Error: tool call aborted before dispatch"
 
-# 无论是否标记并发安全都不得并行的工具：特判通道（子代理 / 工作流 / 子会话 / 上报）
+# 无论是否标记并发安全都不得并行的工具：特判通道（子代理 / 工作流 / 上报）
 # 与互斥交互（结构化提问）。这些调用在原循环里走独立分支且带 user-visible 副作用，
 # 并行只会打乱它们的时序。
 _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
@@ -3296,7 +3301,7 @@ _NEVER_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "report_to_leader",
     "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
     "send_to_subagent", "resume_subagent",
-}) | frozenset(WORKFLOW_TOOL_NAMES) | frozenset(SUBSESSION_TOOL_NAMES)
+}) | frozenset(WORKFLOW_TOOL_NAMES)
 
 
 def _parallel_batches(
@@ -3373,6 +3378,7 @@ async def _run_parallel_batch(
     read_cache,
     is_subagent: bool,
     is_subsession: bool,
+    subagent_title: str = "",
 ) -> tuple[dict[int, tuple["ToolResult", int]], list[str]]:
     """并行执行一批调用，返回 ({下标: (结果, 耗时毫秒)}, 批内按序排列的钩子注入文本)。
 
@@ -3432,6 +3438,10 @@ async def _run_parallel_batch(
                         read_cache=read_cache,
                         is_subagent=is_subagent,
                         is_subsession=is_subsession,
+                        # plan-549-2281 修复：并行批路径同样要带子代理任务标题——
+                        # 此前只给串行路径传了 subagent_title，只读工具走并行批时审批卡
+                        # 就退回「子代理 #N」而没有标题（两边渲染不一致）。
+                        subagent_title=subagent_title,
                     )
                     task = asyncio.ensure_future(tool_executor.execute(
                         tool_name=name, args=args, call_key=call_key,
@@ -4061,11 +4071,17 @@ def _format_elapsed_zh(seconds: float) -> str:
     return f"{minutes / 60:.1f} 小时"
 
 
-def _build_subagent_running_reminder(snapshot: list[dict]) -> str:
+def _build_subagent_running_reminder(
+    snapshot: list[dict], max_conc: int | None = None, pending: int | None = None,
+) -> str:
     """plan-64-291: 构造「子代理运行中」提醒（等待期纪律的持续在场）。
 
     只陈述事实（谁在跑、跑了多久）+ 纪律三条，不替主代理决定具体做什么；
     子代理全部结束后自然消失（下一步 running_snapshot 为空即复位）。
+
+    plan-549-2281（复盘）：补一句并发额度（上限 / 占用 / 剩余）。
+    此前主代理只有「已经派满了被拒」那一刻才知道上限，派发前只能盲派；
+    这条提醒每步都在场，能提前看到还剩几个名额，就不会把额度用到报错。
     """
     parts: list[str] = []
     for _r in snapshot:
@@ -4075,9 +4091,18 @@ def _build_subagent_running_reminder(snapshot: list[dict]) -> str:
         if isinstance(_elapsed, (int, float)):
             _suffix = f"（已运行 {_format_elapsed_zh(float(_elapsed))}）"
         parts.append(f"#{_r.get('agent_id')}「{_title}」{_suffix}")
+    # 额度行只在调用方给出上限时出现（子代理自身线程不提醒，不传这两个参数）
+    quota = ""
+    if max_conc is not None and max_conc > 0:
+        used = pending if pending is not None else len(snapshot)
+        quota = (
+            f"并发额度：上限 {max_conc}，当前在跑 {used}，剩余 {max(0, max_conc - used)}。"
+            "剩余为 0 时不要再派发，先把已有结果收回来。\n"
+        )
     return (
         "[子代理运行中] 仍在运行：" + "、".join(parts) + "。"
         "子代理看起来慢通常只是还在跑，不代表卡死。\n"
+        + quota +
         "等待期纪律：① 不要自己执行它们的任务——重复劳动会双倍消耗 token 与时间；"
         "② 只做与它们不重叠的工作；"
         "③ 没有非重叠工作可做时，调用 collect_results(wait=true) 阻塞等待，完成后统一整合其报告。"
@@ -4249,6 +4274,115 @@ def _running_subagents_note(manager) -> str:
     return "、".join(parts)
 
 
+# plan-549-2281 复盘修复：操控子代理的档位解析抽成纯函数——此前逻辑内联在 spawn 分支里，
+# 测试只剩一条近乎永真的断言，真实解析（lowest=最低非关闭档 / follow / 指定档）零覆盖。
+_EFFORT_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
+
+
+# plan-549-2281 复盘修复：spawn 的执行模式解析抽成纯函数——此前逻辑内联在 spawn 分支，
+# 守护测试只能手工复刻一份等价实现（实现漂移时测试照样绿）。测试现在直接测本函数。
+def _mode_kind(mode: object) -> str:
+    """模式名 → 判定档（plan-560-2311 C1）。
+
+    本模块的模式护栏统一走这里，事实源在 `permission_profile_service.resolve_mode_kind`
+    （审批层、能力矩阵、提示词层共用同一份口径，避免各写一份而漂移）。
+    配置层不可用时退回内置四档匹配——行为与改造前一致，不放大拒绝面。
+    """
+    raw = str(mode or "").strip()
+    try:
+        from app.services.permission_profile_service import resolve_mode_kind
+
+        return resolve_mode_kind(raw)
+    except Exception:  # noqa: BLE001 — 配置层异常时按原名判定（旧行为）
+        logger.warning("[agent] 模式归一失败 mode=%s(按原名判定)", raw, exc_info=True)
+        return raw
+
+
+def resolve_subagent_readonly(mode: object, explore: bool, master_mode: str | None) -> bool:
+    """spawn_subagent 的执行模式解析：显式 mode（readonly/agent）压过兼容别名 explore；
+    主代理处于只读 / 计划模式时强制只读（模式语义护栏）。
+
+    操控子代理（purpose=operator）不在此函数职责内：只读会话里它被直接拒绝、
+    其余会话强制可写，见 spawn 分支。
+
+    plan-560-2311 C1：`master_mode` 按 kind 归一后再比较——此前拿原始模式名与
+    ("readonly", "plan") 做等值比较，自定义 kind=readonly/plan 模式两者都不等，
+    护栏被整体跳过（自定义只读模式可派可写子代理）。归一事实源在
+    `permission_profile_service.resolve_mode_kind`，不改写会话里存的模式名。
+    """
+    want = str(mode or "").strip().lower()
+    if want not in ("readonly", "agent"):
+        want = ""
+    readonly = (want == "readonly") if want else bool(explore)
+    if _mode_kind(master_mode) in ("readonly", "plan"):
+        readonly = True
+    return readonly
+
+
+def lowest_open_effort(levels: list[str]) -> str:
+    """模型声明的档位里取最低的「非关闭」档；读不到或全关闭时用 low。
+
+    不能直接取列表首元素——reasoning_efforts 的顺序由用户配置决定，未排序时取错档。
+    """
+    open_levels = [
+        str(x or "").lower() for x in (levels or [])
+        if str(x or "").strip() and str(x).lower() != "none"
+    ]
+    if not open_levels:
+        return "low"
+    open_levels.sort(key=lambda x: (_EFFORT_RANK.get(x, 50), x))
+    return open_levels[0]
+
+
+def _looks_like_effort_typo(word: str) -> bool:
+    """判断该值是否像是对已知档位名的拼写错误（lowestt / hihg …）。
+
+    只在「几乎拼错」的窄范围内判定，避免把供应商自定义档位名误伤成错值。
+    """
+    from difflib import get_close_matches
+
+    return bool(get_close_matches(
+        word, ["lowest", "follow", *sorted(_EFFORT_RANK)], n=1, cutoff=0.85,
+    ))
+
+
+def resolve_operator_effort(want: str, levels: list[str]) -> str | None:
+    """操控子代理思考档位：follow=跟随主档位（None）；lowest=最低非关闭档；其余按字面。
+
+    plan-549-2281 修复：旧实现把任意字符串原样透传（`return w[:20]`），
+    用户把 `operator_subagent_effort` 配成 "none" 或拼错成 "lowestt" 时，这个值会直接进
+    模型请求——网关要么拒绝要么静默降级，用户完全看不出是配置错了。现在按四档判定：
+      ① 命中模型本轮声明的档位（大小写不敏感）→ 返回声明里的原始字面量（部分模型区分大小写）；
+      ② 命中通用档位语义（minimal/low/medium/high）→ 按字面传，各供应商自行解释；
+      ③ 关闭语义（none）或明显拼错（lowestt）→ 记为无效配置，回落最低非关闭档；
+      ④ 其余未知值：模型已声明档位就按声明校验（无效即回落），读不到档位则保持旧的宽松透传
+         （供应商可能只在请求期才确定档位，硬拒会把可用配置变成不可用）。
+    """
+    w = str(want or "lowest").strip().lower() or "lowest"
+    if w == "follow":
+        return None
+    if w == "lowest":
+        return lowest_open_effort(levels)
+    declared = [str(x) for x in (levels or []) if str(x or "").strip()]
+    for level in declared:
+        if level.strip().lower() == w:
+            return level[:20]
+    if w in _EFFORT_RANK:
+        return w[:20]
+    if w == "none" or _looks_like_effort_typo(w):
+        # none = 关闭思考，不是可用档位；拼错值必然被网关拒绝或静默降级
+        logger.warning(
+            "[agent] 操控子代理档位配置无效(%r)，回落最低非关闭档", want,
+        )
+        return lowest_open_effort(declared)
+    if declared:
+        logger.warning(
+            "[agent] 操控子代理档位 %r 不在模型支持档位 %s 中，回落最低非关闭档", want, declared,
+        )
+        return lowest_open_effort(declared)
+    return w[:20]
+
+
 def _subagent_concurrency_rejection(running: int, max_conc: int, running_note: str = "") -> str:
     """并发已满时回给主模型的说明——**立即拒绝**，不再排队等空位。
 
@@ -4296,14 +4430,68 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         if bool(args.get("wait", False)) and manager.pending_count() > 0:
             # 分段等待而不是 wait_all 一等到底：期间有新消息（子代理提问 / 用户追加 / 子会话汇报）就让出，
             # 否则正在等答复的后台子代理与这里互相等，直到各自超时。
-            while manager.pending_count() > 0:
-                if _has_injected_inputs(turn_id, urgent_only=True):
-                    _wait_note = (
-                        "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
-                        "需要时再次调用 collect_results(wait=true)。\n\n"
-                    )
-                    break
-                await manager.wait_one(timeout=0.5)
+            #
+            # plan-560-2311 B5：这是一次真正的「等待」，必须登记工具运行态——子代理 P0 提问
+            # 触发的 `engine.request_interrupt` 在无运行态时会落进 `_pending_interrupts`，
+            # 随后同一 step 的下一个 `terminal_exec` 经 `claim_pending_interrupt` 把打断兑现到
+            # 自己头上（前台命令被莫名转后台）；同时循环内要能感知用户停止，否则取消后
+            # 还要空转到 `subagent_wait` 超时。
+            from app.orchestration.engine import (
+                claim_pending_interrupt as _claim_pending_interrupt,
+                clear_tool_state as _clear_tool_state,
+                set_tool_state as _set_tool_state,
+                wake_event_for as _wake_event_for,
+            )
+
+            _wait_event = _wake_event_for(turn_id)
+            _wait_cancel = subagent_context.get("cancel_event")
+            # 与主执行分支同口径：先清残留信号再登记运行态，否则上一个工具留下的 set 状态
+            # 会让本次等待刚进入就判定为「收到新消息」直接让出（消息本身仍在注入队列里）。
+            if _wait_event.is_set():
+                _wait_event.clear()
+            _set_tool_state(turn_id, tool="collect_results", interruptible="abort",
+                            detail="等待后台子代理结束")
+            try:
+                # plan-565-2323 G16：这里等的是「子代理跑完」，不是「人回答」——必须遵守总时长
+                # 上限（`subagent_wait_timeout_s`），与 `_await_background_subagents` 同口径。
+                # 旧实现只有「用户停止 / 收到新消息」两个出口，子代理因外部原因长期不结束时
+                # 主代理会无限阻塞在同一次工具调用里（turn 永不结束、停止按钮之外无法脱身）。
+                # 0/负数 = 不限制，与配置注释保持一致。
+                _wait_deadline = float(getattr(settings, "subagent_wait_timeout_s", 0.0) or 0.0)
+                _wait_started = time.monotonic()
+                while manager.pending_count() > 0:
+                    # 用户点了停止：立即结束等待（子代理已由 cancel_turn / cancel_all 取消）
+                    if _wait_cancel is not None and _wait_cancel.is_set():
+                        _wait_note = (
+                            "[已停止等待] 本轮已收到停止信号，不再阻塞等后台子代理。\n\n"
+                        )
+                        break
+                    # 邮箱打断：这条消息已在注入队列里，让出后下一次 LLM 调用前就能读到
+                    if _wait_event.is_set():
+                        _wait_event.clear()
+                        _wait_note = (
+                            "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
+                            "需要时再次调用 collect_results(wait=true)。\n\n"
+                        )
+                        break
+                    if _has_injected_inputs(turn_id, urgent_only=True):
+                        _wait_note = (
+                            "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
+                            "需要时再次调用 collect_results(wait=true)。\n\n"
+                        )
+                        break
+                    if _wait_deadline > 0 and (time.monotonic() - _wait_started) >= _wait_deadline:
+                        # 到上限不是失败：已在跑的继续跑，完成时走唤醒通道送达
+                        _wait_note = (
+                            f"[已停止等待] 已等待 {int(_wait_deadline)} 秒仍未结束，"
+                            "剩余子代理完成时会自动通知你；需要时可再次调用 collect_results。\n\n"
+                        )
+                        break
+                    await manager.wait_one(timeout=0.5)
+            finally:
+                _clear_tool_state(turn_id)
+                # 本次等待自己吸收掉的延后打断请求要一并清掉：留着会让下一个工具误以为自己该让出
+                _claim_pending_interrupt(turn_id)
         if _only is not None:
             h = manager.get(_only)
             if h is None:
@@ -4422,6 +4610,28 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         _smsg = str(args.get("message") or "").strip()
         if not _smsg:
             return "Error: message is required."
+        # plan-549-2281：若该子代理正在等一条提问答复，先直接唤醒它——旧实现先 push 再
+        # 靠子代理侧自取 inbox，答复与「普通指令」语义混在一起，容易错配或多等一轮。
+        from app.orchestration import subagent_comm
+
+        # plan-560-2311 B4：答复前先核验子代理**仍在运行**。旧实现只看登记表就 resolve，
+        # 子代理已结束（或登记已过期）时会给模型回一句「it resumes immediately」的假成功，
+        # 指令与答复双双丢失。终态清理已在 subagent._after_terminal 补上，这里是数据面兜底。
+        _target = manager.get(_said)
+        _target_alive = (
+            _target is not None and _target.status == "running"
+            and _target.task is not None and not _target.task.done()
+        )
+        _qid = subagent_comm.pending_question_of(session_id, _said)
+        if _qid and not _target_alive:
+            # 残留登记：丢弃它，下面走 push_agent_input 给出明确的「不在运行」失败
+            subagent_comm.discard_question(_qid)
+            _qid = None
+        if _qid and subagent_comm.resolve_question(_qid, _smsg):
+            return (
+                f"Reply delivered to subagent#{_said} (question_id={_qid}); it resumes immediately "
+                "with this answer and continues its work."
+            )
         if not manager.push_agent_input(_said, _smsg):
             _known = ", ".join(f"#{i}" for i in manager.agent_ids()) or "(none)"
             return (
@@ -4441,10 +4651,12 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             return "Error: agent_id is required (integer)."
         from app.orchestration.subagent import resume_subagent as _resume_subagent
         # 只读/计划模式下不得借续跑恢复可写子代理（沿用原运行模式）
+        # plan-560-2311 C1：改走判定档——原实现连 normalize_execution_mode 都没调，
+        # 自定义 kind=readonly/plan 模式因此可直接续跑恢复出可写子代理。
         _rstate, _rdetail = await _resume_subagent(
             session_id, _rid, turn_id=turn_id,
             cancel_event=subagent_context.get("cancel_event"),
-            readonly_only=str(subagent_context.get("permission_mode") or "") in ("readonly", "plan"),
+            readonly_only=_mode_kind(subagent_context.get("permission_mode")) in ("readonly", "plan"),
         )
         if _rstate == "resumed":
             return (
@@ -4482,19 +4694,46 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         task_title = str(args.get("task_title", ""))[:200]
         task_desc = str(args.get("task_description", ""))[:4000]
         acceptance = str(args.get("acceptance_criteria", ""))[:500]
-        # plan-541-2264：explore 退化为纯读写范围开关（只读调研 / 可写），不再有任何调度含义；
-        # 派发方式只有后台异步一种，因此无需从参数里解析调度选强。
-        explore = bool(args.get("explore", False))
-        # v36 (plan-321-1600 R1) + plan-330-1648 M1: 主代理处于只读/计划模式时，只允许派发
-        # 只读探索子代理（忽略模型传入的 explore）——主代理侧的**模式语义护栏**
-        # （该模式下不产生业务写入），与“子代理不继承会话模式”不冲突：explore 子代理本就只读。
-        # plan-541-2264：该护栏现在只锁「读写范围」，调度方式已无变量（一律后台）。
-        _pm = normalize_execution_mode(subagent_context.get("permission_mode"))
+        # plan-549-2281：执行模式显式化。子代理只有两种模式——readonly（只读调研/审阅）
+        # 与 agent（可写可执行）。`mode` 是正式入口，`explore` 保留为兼容别名
+        # （旧会话历史与 ta3 侧 subagent_type 还原都还产它）。
+        # 目标：让「实现」也能被合法委派，消除旧提示词「implementation is never delegated」
+        # 与实际工具面（explore=false 可写）的自相矛盾。
+        # 解析抽到 resolve_subagent_readonly（守护测试直接测它，不再手工复刻等价实现）。
+        # plan-560-2311 C1：`_pm` 取**判定档**（按 kind 归一）而非原始模式名——此前拿原始名
+        # 与 ("readonly","plan") 做等值比较，自定义 kind=readonly/plan 模式两者都不等，
+        # 护栏被整体跳过。会话里存的模式名不变，只在判定处归一。
+        _pm = _mode_kind(subagent_context.get("permission_mode"))
+        _is_operator = str(args.get("purpose") or "").strip().lower() == "operator"
+        # plan-560-2311 C3：设置里关掉操控子代理后，spawn 必须真的拒绝，而不是照旧派发并
+        # 套用最低思考档（此前该开关只在提示词处读取，运行时毫无效果）。
+        # 放在只读拦截**之前**：否则只读会话会先报「只读模式不能派 operator」，
+        # 掩盖真实原因（功能已关闭），模型会误以为切模式就能解决。
+        if _is_operator and getattr(settings, "operator_subagent_enabled", True) is False:
+            return (
+                "Error: 操控子代理已在设置中关闭（设置 → 子代理 → 操控子代理），无法派发 purpose=operator。"
+                "请自己完成该界面操作，或让用户在设置里开启后再派发。"
+            )
         if _pm in ("readonly", "plan"):
-            explore = True
-        # plan-330-1648 M1: 子代理执行模式**按类型锁定**（explore=只读 / general=可写工作区），
-        # 显式下发给 run_agent_loop——子代理不继承会话的执行模式，因此主代理的
-        # 计划/只读模式不会把子代理拖进“只能写计划文档 + 被纠偏催写”的状态。
+            # v36 (plan-321-1600 R1) + plan-330-1648 M1: 主代理处于只读/计划模式时，只允许派发
+            # 只读子代理——主代理侧的**模式语义护栏**（该模式下不产生业务写入）。
+            # 操控子代理必须可写（点按/输入/下载），只读会话里派它只会得到一个做不了事
+            # 的只读子代理——显式拒绝并给出出路，好过静默降级。
+            if _is_operator:
+                return (
+                    "Error: 当前会话为只读 / 计划模式，不能派发操控子代理（它需要可写权限操作界面）。"
+                    "请自己完成该操作；确需界面自动化时请用户切换到智能体模式。"
+                )
+        explore = resolve_subagent_readonly(
+            args.get("mode"), bool(args.get("explore", False)), _pm,
+        )
+        if _is_operator:
+            # plan-549-2281 修复：operator 一律可写（要调界面/浏览器工具），不能沿用
+            # explore 档案与 readonly 模式——此前 explore+operator 组合下档案按 explore
+            # 过闸、模式却保持只读，既绕过了 general 类型的停用闸门，也与「可写」语义矛盾。
+            explore = False
+        # plan-330-1648 M1: 子代理执行模式**按类型锁定**（readonly / agent），显式下发给
+        # run_agent_loop——子代理不继承会话的执行模式，也永远拿不到计划模式。
         _sub_mode = "readonly" if explore else "agent"
         if not task_title:
             return "Error: task_title is required"
@@ -4537,7 +4776,6 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # 原实现先排队等 60 秒再拒绝，主代理在等待期拿不到任何进度，用户只看到一张卡住的
         # 卡片，最终仍然是失败——等待没有收益，只是把「并发满」延后一分钟才告诉主代理。
         # 拒绝路径不创建 Agent / Task，也不占用任何名额。
-        from app.core.config import settings
         _max_conc = max(1, min(30, int(getattr(settings, "max_concurrent_subagents", 4) or 4)))
         _running = manager.pending_count()
         if _running >= _max_conc:
@@ -4594,6 +4832,28 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             or subagent_context.get("reasoning_effort")
             or None
         )
+        # plan-549-2281：操控子代理（原 purpose=operator 的子会话能力迁到子代理）。
+        # 界面操作每步都是一次模型往返，几乎不需要深度推理，却是延迟大户——统一压到
+        # 设置项 operator_subagent_effort 指定的档位（默认当前模型支持的最低非关闭档）。
+        # 档位解析抽到 resolve_operator_effort（含「不取列表首元素、按档位序取最低」修复）。
+        if _is_operator:
+            try:
+                _levels: list[str] = []
+                if _spawn_model_id:
+                    try:
+                        from app.persistence.models.model_reg import Model as _ModelRow
+                        _mrow = await db.get(_ModelRow, int(_spawn_model_id))
+                        _levels = [str(x) for x in (getattr(_mrow, "reasoning_efforts", None) or [])]
+                    except Exception:  # noqa: BLE001 — 读不到档位按 low 处理
+                        _levels = []
+                _want_effort = resolve_operator_effort(
+                    str(getattr(settings, "operator_subagent_effort", "lowest") or "lowest"),
+                    _levels,
+                )
+                if _want_effort:
+                    _spawn_effort = _want_effort
+            except Exception:  # noqa: BLE001 — 档位解析失败不改默认行为
+                logger.debug("[agent] 操控子代理档位解析失败(用默认)", exc_info=True)
         logger.info(
             "[agent] 子代理派发解析 type=%s model=#%s effort=%s (profile_model=%s session_model=%s)",
             _profile_name, _spawn_model_id, _spawn_effort, _profile_model_id,
@@ -4602,13 +4862,75 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # plan-330-1648 M7: 子代理 token 预算（0/负数 = 不限）
         _sub_budget = int(getattr(settings, "subagent_token_budget", 0) or 0) or None
 
+        # plan-568-2333：子代理工具面必须在**写库之前**定稿并校验。排在 Agent/Task 创建之后
+        # 就只能在事后告警——agent 行、task 行、并发名额都已占用，用户看到的是「跑着但永远没结果」。
+        # 两道校验都是 fail-closed：解析不出只读工具集、或类型白名单与可用工具无交集，直接拒绝派发。
+        from app.orchestration.tools.registry import tool_registry
+        sub_tools = tool_registry.all_schemas()
+
+        # v20: 探索子代理只读工具（探索 = 调研/阅读/分析，不产生写盘副作用）
+        if explore:
+            from app.orchestration.subagent_tools import EXPLORE_TOOLS
+            explore_schemas = tool_registry.all_schemas(EXPLORE_TOOLS)
+            if not explore_schemas:
+                # 注册表部分模块加载失败 / 工具名漂移时**不能**回落到全量工具：那会把 fs_write、
+                # terminal_exec 一并交给只读子代理，写权限只剩 executor 一层兜底（fail-open）。
+                logger.warning(
+                    "[agent] 只读子代理工具集解析为空（EXPLORE_TOOLS 无可注册项），拒绝派发 type=%s",
+                    _profile_name,
+                )
+                return (
+                    "Error: 无法解析只读子代理的工具集（工具注册表异常），已拒绝以只读模式派发。"
+                    "请改用 mode=\"agent\" 派发，或由你在主会话内直接完成该调研。"
+                )
+            sub_tools = explore_schemas
+
+        # v3.0 (plan-88): 子代理类型工具白名单——profile.tools_whitelist 非空时
+        # 在既有范围（探索只读 / 全量）上按名单收窄；勾选=允许，留空=全量（旧语义）。
+        from app.orchestration.subagent_tools import filter_tool_schemas
+        try:
+            _whitelist = list(_profile.tools_whitelist) if (_profile is not None and _profile.tools_whitelist) else None
+        except Exception:
+            _whitelist = None
+        if _whitelist:
+            sub_tools = filter_tool_schemas(sub_tools, _whitelist)
+            if not sub_tools:
+                # plan-568-2333：与可用工具集无交集时不再继续派发。此前只写一条 warning，
+                # 子代理最终只剩 report_to_leader，读不了文件也执行不了命令，却照样占用并发名额。
+                return (
+                    f"Error: 子代理类型「{_profile_name}」勾选的工具与子代理可用工具无交集，无法派发。"
+                    "请在设置 → 子代理里检查该类型的工具白名单，或取消勾选（留空表示使用全部可用工具）。"
+                )
+        # plan-330-1648 M4: 子代理的“与主代理通信”通道始终可用（不受类型工具白名单影响）
+        # ——否则用户勾选工具时会无意中切断子代理向主代理上报/求助的能力。
+        try:
+            from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
+            _have = {s.get("function", {}).get("name") for s in sub_tools}
+            for _own in SUBAGENT_OWN_TOOLS:
+                if _own["function"]["name"] not in _have:
+                    sub_tools.append(_own)
+        except Exception:
+            logger.debug("[agent] 子代理通信工具追加失败(非阻塞)", exc_info=True)
+
+        # plan-474-2105：子代理不得直接问用户，也不得再派生下级执行体（套娃 / 绕过并发上限）。
+        # 放在白名单与自有工具追加**之后**统一剥离：白名单是老配置，可能仍含这些工具名。
+        # plan-549-2281：剥离范围已含工作流工具（子代理不进计划模式、不使用工作流）。
+        try:
+            from app.orchestration.subagent_tools import strip_for_subagent
+            sub_tools = strip_for_subagent(sub_tools)
+        except Exception:
+            logger.warning("[agent] 子代理工具边界剥离失败(按原样继续)", exc_info=True)
+
         def _persist_spawn(s):
             from app.persistence.models.agent import Agent as _Agent
             from app.persistence.models.task import Task as _Task
+            # plan-565-2323 G9：派发即写 status="running"。此前不赋值、落到模型默认 "idle"，
+            # agents 行的状态对「子代理是否还在跑」失去意义，启动 reconcile 也无从按 agent 维度收尾。
             sa = _Agent(kind=AgentKind.SUB.value, name=task_title[:40],
                         model_id=_spawn_model_id,
                         session_id=session_id,
-                        turn_id=turn_id, parent_agent_id=parent_agent_id)
+                        turn_id=turn_id, parent_agent_id=parent_agent_id,
+                        status="running")
             s.add(sa)
             s.flush()
             aid = sa.id
@@ -4677,46 +4999,14 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             handoff_summary=task_desc,
             original_request=_orig_req,
         )
-        # 子代理工具范围：全量工具（不含子代理递归工具）
-        from app.orchestration.tools.registry import tool_registry
-        sub_tools = tool_registry.all_schemas()
-
-        # v20: 探索子代理只读工具（探索 = 调研/阅读/分析，不产生写盘副作用）
-        if explore:
-            from app.orchestration.subagent_tools import EXPLORE_TOOLS
-            explore_schemas = tool_registry.all_schemas(EXPLORE_TOOLS)
-            if explore_schemas:
-                sub_tools = explore_schemas
-
-        # v3.0 (plan-88): 子代理类型工具白名单——profile.tools_whitelist 非空时
-        # 在既有范围（探索只读 / 全量）上按名单收窄；勾选=允许，留空=全量（旧语义）。
-        from app.orchestration.subagent_tools import filter_tool_schemas
-        try:
-            _whitelist = list(_profile.tools_whitelist) if (_profile is not None and _profile.tools_whitelist) else None
-        except Exception:
-            _whitelist = None
-        if _whitelist:
-            sub_tools = filter_tool_schemas(sub_tools, _whitelist)
-            if not sub_tools:
-                logger.warning("[agent] 子代理类型 %s 白名单过滤后无可用工具", _profile_name)
-        # plan-330-1648 M4: 子代理的“与主代理通信”通道始终可用（不受类型工具白名单影响）
-        # ——否则用户勾选工具时会无意中切断子代理向主代理上报/求助的能力。
-        try:
-            from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
-            _have = {s.get("function", {}).get("name") for s in sub_tools}
-            for _own in SUBAGENT_OWN_TOOLS:
-                if _own["function"]["name"] not in _have:
-                    sub_tools.append(_own)
-        except Exception:
-            logger.debug("[agent] 子代理通信工具追加失败(非阻塞)", exc_info=True)
-
-        # plan-474-2105：子代理不得直接问用户，也不得再派生下级执行体（套娃 / 绕过并发上限）。
-        # 放在白名单与自有工具追加**之后**统一剥离：白名单是老配置，可能仍含这些工具名。
-        try:
-            from app.orchestration.subagent_tools import strip_for_subagent
-            sub_tools = strip_for_subagent(sub_tools)
-        except Exception:
-            logger.warning("[agent] 子代理工具边界剥离失败(按原样继续)", exc_info=True)
+        # plan-568-2333：工具面已在派发前（写库之前）定稿并校验，此处不再重复计算。
+        # plan-549-2281 双保险：工作流工具不在 tool_registry 里，子代理原本就拿不到；
+        # 但「类型工具白名单」「自定义权限模式」都可能把名字塞回来，这里再按名字硬剥一遍。
+        _wf_names = set(WORKFLOW_TOOL_NAMES)
+        sub_tools = [
+            s for s in sub_tools
+            if (s.get("function") or {}).get("name") not in _wf_names
+        ]
 
         from app.orchestration.subagent import get_subagent_manager
         mgr = manager or get_subagent_manager(session_id)
@@ -4752,6 +5042,11 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             f"Subagent #{sub_agent_id} dispatched in the background for task: {task_title}. "
             f"[运行参数] mode={_sub_mode} model=#{_spawn_model_id} "
             f"effort={_spawn_effort or 'default'}. "
+            # plan-549-2281（复盘）：并发额度必须**每次派发都回报**——
+            # 此前上限与占用只在「已满被拒」时第一次出现，模型派发前毫无信息，
+            # 只能按「一次发多条」的建议一路派到撞墙为止。这里的数字是刚派完的实时值。
+            f"[并发额度] 上限 {_max_conc}｜当前在跑 {_running + 1}｜剩余 {max(0, _max_conc - _running - 1)}。"
+            "剩余为 0 时不要再派发，先 collect_results(wait=true) 收取结果或自己接着做。"
             "It runs in an isolated context; its completion report is pushed back to you automatically. "
             "## Waiting discipline — while it runs: do NOT do its task yourself (duplicating a running "
             "subagent's work costs tokens and time twice over); take only NON-overlapping work; if none "
@@ -4759,6 +5054,65 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         )
 
     return "Error: unknown subagent tool"
+
+
+def _question_waiter_alive(manager, agent_id: int):
+    """构造「子代理仍在正常等待」的存活判定（plan-565-2323 G16）。
+
+    提问等待不设总时长上限，靠这条判定兜底：会话执行已结束、管理器已销毁、或该子代理已进入
+    终态时必须立刻停等，否则子代理会挂成僵尸（进程还在、永远不产出）。
+
+    为什么逐项看这几条：
+      · manager 仍在 `_managers` 注册表里 → 会话级管理器没被销毁（`subagent.cleanup` 会摘除并
+        同时 `clear_session`，两道防线互不依赖）；
+      · `owner_active` → 主代理 turn 仍存活（turn 收尾时 `pause_for_turn_end` 置 False 并取消
+        处于等待态的子代理任务）；
+      · handle 仍是 running 且任务未 done → 自己没被终止（用户「终止」→ `cancel()` →
+        `task.cancel()`，取消会直接穿透 `wait_reply`，这里只是数据面兜底）。
+
+    任何一步读不到状态都返回 True（按存活处理）：读不到状态不能成为误杀子代理的理由。
+
+    【等待靠什么结束】三条确定性信号，任一成立即立刻停等（绝不靠时间）：
+      1. 子代理被终止（用户「终止」/ turn 收尾）→ `task.cancel()` → `CancelledError` 从
+         `wait_reply` 直接穿透，本判定根本没机会参与；
+      2. 会话执行已结束 / 管理器已销毁 → `peek_subagent_manager` 取不到、或 `owner_active`
+         为假 → 本判定返回 False，`wait_reply` 清场后返回 None（子代理按最佳判断继续）；
+      3. 该子代理已不在 running（被别的路径落了终态）→ 同上返回 False。
+    **不要**在此基础上再加时间上限：用户口径是「等用户回答不设上限」，加了就退回到
+    「看门狗先杀子代理」的老缺陷（plan-565-2323 G16 的成因）。
+    """
+    from app.orchestration.subagent import peek_subagent_manager
+
+    try:
+        session_id = int(getattr(manager, "session_id", 0) or 0)
+    except (TypeError, ValueError):
+        return lambda: True
+    if session_id <= 0:
+        # 拿不到会话 id（manager 缺失 / 测试桩）：不做存活判定，靠取消传播兜底。
+        # 不能在这里返回 False——那等于把「读不到状态」当成「会话已死」，会误杀等待。
+        return lambda: True
+    aid = int(agent_id)
+
+    def _alive() -> bool:
+        try:
+            mgr = peek_subagent_manager(session_id)
+            if mgr is None:
+                return False
+            if not bool(getattr(mgr, "owner_active", True)):
+                return False
+            handle = mgr.get(aid)
+            if handle is None:
+                return False
+            if str(getattr(handle, "status", "running")) != "running":
+                return False
+            task = getattr(handle, "task", None)
+            if isinstance(task, asyncio.Task) and task.done():
+                return False
+            return True
+        except Exception:  # noqa: BLE001 — 判定失败按存活处理，不能误杀
+            return True
+
+    return _alive
 
 
 async def _run_report_to_leader(comm: dict, args: dict, *, session_id: int, turn_id: int,
@@ -4769,7 +5123,17 @@ async def _run_report_to_leader(comm: dict, args: dict, *, session_id: int, turn
     - 落子代理线程（面板可见）+ 进主代理注入队列（下一次 LLM 调用前可见）；
     - wait=true（提问并等答复）对所有子代理可用：plan-541-2264 起子代理一律后台执行，
       主代理不会阻塞在派发上，因此不存在“同步子代理等待会死锁”的情况；
-    - 超时（默认 300s）返回“未收到答复，按最佳判断继续”。
+    - 等待答复**没有总时长上限**（plan-565-2323 G16），未收到答复才返回“按最佳判断继续”。
+
+    plan-549-2281：`kind=question` 改走 mailbox P0（`subagent_comm.publish_question`）——
+    子会话下线后，它是唯一的「能打断主代理次要等待」的求助通道。旧实现只写
+    `_pending_inputs`，主代理正在跑前台命令或卡在 wait 轮询时读不到，子代理白等到超时。
+
+    plan-565-2323 G16：等待前把 `handle.waiting` 置真，让停滞看门狗把这段时间当作**正常等待**
+    （与瞬时故障保活同口径）。旧实现只靠 `wait_reply` 的 600s 超时，而看门狗阈值也是 600s，
+    于是看门狗必然先 cancel 掉驱动任务，子代理落 failed「长时间无活动」——「没等到答复就按
+    最佳判断继续」的分支永远走不到。现在的兜底不是时间，是 `alive` 判定 + 取消传播：
+    子代理被终止、turn 收尾、管理器销毁都会让等待立刻结束（见 `subagent_comm.wait_reply`）。
     """
     manager = comm.get("manager")
     message = str(args.get("message") or "").strip()
@@ -4791,16 +5155,63 @@ async def _run_report_to_leader(comm: dict, args: dict, *, session_id: int, turn
         )
     except Exception:
         logger.debug("[agent] 子代理上报落库失败(非阻塞)", exc_info=True)
-    # 2) 进主代理注入队列（下一次 LLM 调用前注入）
+
+    if kind == "question":
+        # 2a) 提问：P0 投递（能打断主代理等待）+ 阻塞等答复
+        from app.orchestration import subagent_comm
+
+        task_title = str(comm.get("task_title") or "")
+        qid = await subagent_comm.publish_question(
+            session_id=session_id, agent_id=agent_id,
+            task_title=task_title, message=message,
+            # plan-20261026-notice-turn：提问行归属主代理轮次，撤回该轮时一并软删
+            turn_id=turn_id,
+        )
+        reply = None
+        if wait:
+            # plan-565-2323 G16：等待前置真 handle.waiting——停滞看门狗据此走「正常等待」
+            # 豁免分支（与瞬时故障保活同口径）。`finally` 复位覆盖全部出口：
+            # 收到答复、取消（CancelledError 穿透）、会话结束（alive 判定返回 None）、异常。
+            # 不复位的后果：子代理此后每次模型调用之间都会被看门狗当成「等待中」无条件
+            # touch，真正的停滞再也检测不到（等于把看门狗关掉）。
+            #
+            # 【为什么缺省没有上限】用户口径：主代理也可能不确定而去问用户，用户可能很久才回答，
+            # 此时应当继续等。只有**模型自己显式传了 timeout_s** 才作为上限生效（那是它的主动
+            # 选择，也保住既有「限时提问」语义）；不传 = 一直等到收到答复或被兜底条件打断
+            # （终止 / turn 收尾 / 管理器销毁 / 被新提问取代），见 `subagent_comm.wait_reply`。
+            _limit = float(args.get("timeout_s") or 0) or None
+            handle = manager.get(agent_id) if manager is not None else None
+            if handle is not None:
+                handle.waiting = True
+            try:
+                reply = await subagent_comm.wait_reply(
+                    qid, _limit, alive=_question_waiter_alive(manager, agent_id),
+                )
+            finally:
+                if handle is not None:
+                    handle.waiting = False
+        if not wait:
+            # plan-549-2281 修复：不等答复的提问不能留在登记表里——主代理答复时
+            # resolve_question 会 set 一个没有等待者的 event，答复凭空丢失。
+            # 旧 subsession_tool_runner 在此显式 discard_question，迁移时丢了这道防线；
+            # 立刻作废后，主代理的 send_to_subagent 会走 push_agent_input 注入子代理上下文。
+            subagent_comm.discard_question(qid)
+            return (
+                f"Question delivered to the main agent (question_id={qid}). "
+                "Keep working on anything that does not depend on the answer; do NOT resend it. "
+                "If the main agent replies, the reply is injected into your context before your next model call."
+            )
+        if reply is None:
+            # 走到这里只有两种可能：模型自己限了时并到点，或等待被兜底条件打断
+            # （子代理被终止 / turn 收尾 / 管理器销毁 / 提问被新提问取代）。
+            _why = (f"within {int(_limit)}s " if _limit else "(the question was withdrawn or the wait was interrupted) ")
+            return (
+                f"No reply from the main agent {_why}. Continue with your best "
+                "judgment and record the open question in your final report."
+            )
+        return f"Reply from the main agent:\n{reply}"
+
+    # 2b) 进度上报：异步，不打断主代理
     if manager is not None:
         manager.notify_leader(agent_id, message, kind)
-    if not wait:
-        return "Reported to the main agent. Continue working — do NOT wait for an acknowledgement."
-    timeout_s = float(args.get("timeout_s") or 0) or 300.0
-    reply = await manager.wait_for_reply(agent_id, timeout_s) if manager is not None else None
-    if reply is None:
-        return (
-            f"No reply from the main agent within {int(timeout_s)}s. Continue with your best "
-            "judgment and record the open question in your final report."
-        )
-    return f"Reply from the main agent:\n{reply}"
+    return "Reported to the main agent. Continue working — do NOT wait for an acknowledgement."

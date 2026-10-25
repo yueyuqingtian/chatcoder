@@ -121,15 +121,12 @@ TO_TA3: dict[str, str] = {
     "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
     # plan-91-394: 续跑中断/暂停的子代理（自造伪装名，schema 从真实工具动态派生）
     "resume_subagent": "ResumeSubagent",     # agent_id ✓
-    # plan-156-619 S4：执行子会话工具（与探索子代理分开的一组）
-    "create_subsession": "CreateSubsession",      # title/task/context/mode/background ✓
-    "send_to_subsession": "SendToSubsession",     # subsession_id/message ✓
-    "get_subsession_progress": "SubsessionProgress",  # subsession_id/wait ✓
-    "interrupt_subsession": "InterruptSubsession",    # subsession_id ✓
-    "message_main": "MessageMain",                # message/kind/wait/timeout_s ✓
-    "message_peer": "MessagePeer",                # subsession_id/message ✓
     # plan-156-619 S10：后续任务建议（收尾时提一条可执行的下一步）
     "suggest_next_task": "SuggestNextTask",       # title/summary/steps/mode/rationale ✓
+    # plan-549-2281：执行子会话工具（create_subsession / send_to_subsession /
+    # get_subsession_progress / interrupt_subsession / message_main / message_peer）
+    # 已随子会话能力下线从映射表剔除——ta3 侧不再下发这些伪装名，
+    # 历史会话里的旧调用会落到「未知工具」，与其它已下线工具的处理一致。
     # 工作流工具（设计 §5.8）：主代理专用，经同一别名通道映射
     "plan_workflow": "PlanWorkflow",
     "start_workflow": "StartWorkflow",
@@ -142,6 +139,13 @@ TO_TA3: dict[str, str] = {
     # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
     # 缺映射会让子代理失去向主代理上报/求助的通道。
     "report_to_leader": "ReportToLeader",    # message/kind/wait/timeout_s ✓
+    # plan-548-2276：功能→模块地图与符号索引开关。
+    # 缺这两条映射时 disguise_tools 会把它们静默丢弃（见 ta3_tool_schemas.disguise_tools），
+    # 而主提示词仍在引导模型「只知道功能时就先用 feature_lookup」——
+    # ta3 会话里等于写了一条调不到的工具引导，模型只能退回全库 grep。
+    # 参考项目无对应工具，伪装名对齐自造 PascalCase 先例；参数键名与真实工具一致，无需 ARGS 适配。
+    "feature_lookup": "FeatureLookup",           # query/limit/rebuild ✓
+    "symbol_index_enable": "SymbolIndexEnable",  # 无参 ✓
 }
 
 # 伪装名 → 真实执行名（反查）
@@ -206,9 +210,8 @@ DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
     "CompactionIndex", "CompactionView", "SkillView", "MemoryWrite",
     # 子代理管理/上报（v43 补齐）
     "SubAgentInspect", "SendToSubagent", "ReportToLeader", "ResumeSubagent",
-    # plan-156-619 S4：执行子会话工具（与探索子代理分开的一组，参数与真实工具一致）
-    "CreateSubsession", "SendToSubsession", "SubsessionProgress", "InterruptSubsession",
-    "MessageMain", "MessagePeer",
+    # plan-548-2276：功能地图与符号索引开关（参数键名与真实工具一致，走动态派生）
+    "FeatureLookup", "SymbolIndexEnable",
     # plan-156-619 S10：后续任务建议
     "SuggestNextTask",
 })
@@ -236,6 +239,10 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
         "task_description": "prompt",
         "acceptance_criteria": None,   # ta3 无对应
         "explore": None,               # 出站丢弃：ta3 侧由 subagent_type 表达
+        # plan-549-2281：mode（readonly / agent）同样出站丢弃——
+        # ta3 侧的执行语义只由 subagent_type 表达（Explore=只读，其余=可写），
+        # 多传一个 mode 会让模型以为 ta3 支持本项目独有的三档语义。
+        "mode": None,
     },
     # plan-153-705: 后台进程工具键名适配（offset 键名一致免映射）
     "terminal_bg_status": {"shell_id": "shellId"},
@@ -341,12 +348,17 @@ def restore_args(ta3_name: str, args: dict) -> dict:
         # ta3 异步派发 → 本项目后台子代理（立即返回，完成时自动推送）
         # plan-73-322: 补透传只读语义——subagent_type=Explore 表示只读调研，须置 explore，
         # 否则会被派发成可写子代理（全工具），与「Explore=只读」约定不符。
+        # plan-549-2281：新增 mode 参数后，只读语义要**同时**产 mode="readonly"——
+        # agent_loop 的解析顺序是「mode 优先、回落 explore」，只给 explore 虽仍兼容，
+        # 但一旦调用方同时带了 mode 就会以 mode 为准，显式补上才与「Explore=只读」等价。
         if str(args.get("subagent_type") or "").strip().lower() == "explore":
             out["explore"] = True
+            out["mode"] = "readonly"
     elif ta3_name == "SubAgent":
         # plan-541-2264: SubAgent 只在历史会话回放时出现，语义与 SubAgentAsync 一致——
         # 只按 subagent_type 判定 explore，调度一律后台。
         _st = str(args.get("subagent_type") or "").strip().lower()
         if _st == "explore":
             out["explore"] = True
+            out["mode"] = "readonly"
     return out

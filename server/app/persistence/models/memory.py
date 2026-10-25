@@ -34,4 +34,15 @@ class MemoryEntry(Base):
     expires_at: Mapped[str | None] = mapped_column(String(40))
     # 被取代的旧记忆指向新记忆 id（整合去重时使用）
     superseded_by: Mapped[int | None] = mapped_column(BigInteger)
+    # plan-548-2276：检索键——JSON 数组字符串（如 ["上下文压缩","compaction"]）。
+    # 写入时由产出记忆的一方给出，缺省由 memory_service._derive_keywords 兜底生成，
+    # 供 memory_search 的一级召回与注入侧相关性打分使用（可空：旧数据没这列）。
+    keywords: Mapped[str | None] = mapped_column(Text)
+    # plan-548-2276：来源——manual 模型主动写 / extract turn 后抽取 / compaction 压缩时归档
+    # plan-156-621 复盘修复：显式声明 server_default 并与迁移 DDL（NOT NULL DEFAULT 'manual'）
+    # 对齐。此前只有 Python 侧 default，不经 ORM 的直插 SQL 会落下 NULL，建库与升级库的
+    # schema 也各不相同；同类写法见 message.py 的 approval_mode。
+    origin: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual", nullable=False
+    )
     generated_at: Mapped[str] = mapped_column(server_default=func.now())

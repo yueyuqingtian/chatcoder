@@ -50,8 +50,11 @@ const EXT_LANG: Record<string, string> = {
 const NUMBERED = /^\s*(\d+)(?:→|\t|:(?: |$)|\| )(.*)$/;
 /** fs_read 输出首行的文件头（「文件: path (共 N 行) | 显示第 a-b 行」）与末尾截断提示——不是文件内容。
  *  此前它们混在正文里：首行不带行号导致「整段带行号」判定失败，文件自带的行号被当成代码显示、高亮也错乱 */
-const READ_HEADER = /^文件: .+\(共 \d+ 行\)/;
-const READ_TRUNC = /^\.\.\.\(已截断/;
+const READ_HEADER = /^文件: .+\(共 (\d+) 行\)/;
+/** plan-20261025-shell（需求 1）：fs_read 的页脚已改为「（已到文件末尾，共 N 行）」「（显示第 a-b 行，共 N 行；继续读取请用 offset=…）」，
+ *  旧规则只认「...(已截断」，页脚混进正文后「整段带行号」判定失败，展开卡片里出现「行号槽 + 正文自带行号」两列行号 */
+const READ_TRUNC = /^\.\.\.\(已截断|^[（(](?:已到文件末尾|显示第|offset=|文件为空)/;
+const READ_RANGE = /显示第\s*(\d+)\s*-\s*(\d+)\s*行/;
 
 export function langOf(path: string): string | null {
   return EXT_LANG[(path.split(".").pop() || "").toLowerCase()] ?? null;
@@ -74,16 +77,27 @@ export function highlightLines(path: string, lines: string[]): string[] | null {
 export const CodeView = memo(function CodeView({ path, text }: { path: string; text: string }) {
   // 解析成「正文行 + 行号起点」：剥离文件头 / 截断提示后再判「整段带行号」，
   // 保证行号槽与文件真实行号对齐（plan-522-2209 R10 保留了这段逻辑）
-  const { body, start, total } = useMemo(() => {
+  const { body, start, total, meta } = useMemo(() => {
     const raw = splitClampLines(text);
-    if (raw.length > 1 && READ_HEADER.test(raw[0])) raw.shift();
-    if (raw.length > 1 && READ_TRUNC.test(raw[raw.length - 1])) raw.pop();
+    // 文件头里的总行数与页脚里的显示区间：用来在卡片头写「第 a–b 行 / 共 N 行」，不再混进正文
+    let fileTotal: number | null = null;
+    let footer = "";
+    const head = READ_HEADER.exec(raw[0] ?? "");
+    if (raw.length > 1 && head) { fileTotal = Number(head[1]); raw.shift(); }
+    if (raw.length > 1 && READ_TRUNC.test(raw[raw.length - 1])) footer = raw.pop() ?? "";
     const m0 = NUMBERED.exec(raw[0] ?? "");
     const allNumbered = m0 && raw.every((l) => l === "" || NUMBERED.test(l));
+    const begin = allNumbered ? Number(m0![1]) : 1;
+    const range = READ_RANGE.exec(footer);
+    const shownEnd = begin + raw.length - 1;
+    const partial = fileTotal != null && (begin > 1 || shownEnd < fileTotal || range != null);
+    const metaText = partial
+      ? `第 ${begin}–${range ? range[2] : shownEnd} 行 / 共 ${fileTotal} 行`
+      : `${fileTotal ?? raw.length} 行`;
     if (allNumbered) {
-      return { body: raw.map((l) => NUMBERED.exec(l)?.[2] ?? "").join("\n"), start: Number(m0![1]), total: raw.length };
+      return { body: raw.map((l) => NUMBERED.exec(l)?.[2] ?? "").join("\n"), start: begin, total: raw.length, meta: metaText };
     }
-    return { body: raw.join("\n"), start: 1, total: raw.length };
+    return { body: raw.join("\n"), start: 1, total: raw.length, meta: metaText };
   }, [text]);
   // 行号槽宽度按**总行数**算，不随折叠态变化——否则展开 / 收起时整块内容会横向跳一格
   const gutterW = String(start + total).length;
@@ -114,7 +128,7 @@ export const CodeView = memo(function CodeView({ path, text }: { path: string; t
         <FileIcon name={path} size={14} />
         <Tooltip content={path} side="top"><span className="cv-name">{baseName(path)}</span></Tooltip>
         {/* 文件属性（共 N 行）：截断说明由 ClampBlock 的折叠行统一给出，这里不再拼「已省略…」 */}
-        <span className="cv-meta">{total} 行</span>
+        <span className="cv-meta">{meta}</span>
       </div>
       <div className="cv-body" style={{ ["--cv-gutter" as string]: `${gutterW + 2}ch` }}>
         <ClampBlock text={body} render={renderLines} lang={langOf(path) ?? undefined} copyText={text} />

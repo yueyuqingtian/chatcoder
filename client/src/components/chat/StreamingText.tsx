@@ -34,15 +34,31 @@ export interface StreamingTextProps {
   threadId?: number;
 }
 
+/** 停滞追平时限（毫秒）：流式正文长时间不再增长（= 后端这一段已写完）时，
+ *  不再无限期等待几何运动结束，直接对齐到已到达的全文。
+ *  背景（用户反馈）：这条消息还没显示完，下方的编辑就已经跑完了。根因是平滑器在
+ *  isBusy() 为真时整段暂停，而运动标记一旦因事件丢失滞留，正文就会永久停在本段一半——
+ *  直到下一次布局变化或组件重挂才一次性补齐。 */
+const SMOOTH_STALL_MS = 600;
+
+/** 运动期复查间隔（毫秒）：运动标记可能滞留，平滑器需在运动期自行回来看一眼。 */
+const STALL_RECHECK_MS = 120;
+
 /** v40: 自适应"产字"平滑——delta 常成簇到达，按积压量比例逐帧释放，
  * 文字匀速出现而非成段跳变（追赶速率 backlog×12%/帧，延迟 ≲200ms，落库时整段对齐）。 */
 function useSmoothText(target: string): string {
   const [shown, setShown] = useState(target);
   const shownRef = useRef(target);
   const targetRef = useRef(target);
-  targetRef.current = target;
+  /** target 上一次变化的时刻（平滑器自愈用：判断这一段是否已经写完了） */
+  const targetChangedAtRef = useRef(0);
+  if (targetRef.current !== target) {
+    targetRef.current = target;
+    targetChangedAtRef.current = performance.now();
+  }
   useEffect(() => {
     let raf = 0;
+    let stallTimer = 0;
     let waitingForMotion = false;
     // 判定统一走 PerfBus（S3）：窗口运动 / 拖分隔条 / 面板过渡三源合并
     const isMotion = () => isBusy();
@@ -64,20 +80,33 @@ function useSmoothText(target: string): string {
     };
     const tick = () => {
       raf = 0;
-      if (isMotion()) {
-        // 不在每一帧 setState / 重解析 markdown；只保留最新 target，结束事件再追平。
+      const tNow = targetRef.current;
+      const backlogNow = tNow.length - shownRef.current.length;
+      const still = performance.now() - targetChangedAtRef.current >= SMOOTH_STALL_MS;
+      const motion = isMotion();
+      /* 强制追平：几何运动标记滞留（收尾事件丢失）+ 本段文字已停止到达。
+         两者同时成立才一次对齐到全文——单个网络抖动造成的 delta 间隔不会触发，
+         非运动状态仍走原来的比例释放（160ms 内自行追上，观感不变）。 */
+      const forceCatchUp = motion && still && backlogNow > 0;
+      if (motion && !forceCatchUp) {
+        /* 运动期不逐帧 setState / 重解析 markdown，只保留最新 target，等收尾事件再追平。
+           未触发强制追平时也要定期回来看一眼：本帧 return 后再无人调度，
+           事件一旦丢了就再也醒不过来（用户反馈的「正文停在半句、编辑却跑完了」）。 */
         if (!waitingForMotion) {
           waitingForMotion = true;
           window.addEventListener("chatcoder:window-motion", onMotion);
           window.addEventListener("pointerup", onPointerUp, true);
           window.addEventListener("chatcoder:panel-drag-end", onPanelDragEnd);
         }
+        /* 只有还有待追平的文字才定期回查（文字仍在到达时 target 变化会重建本 effect，
+           无需轮询；无积压时立刻停表，不在运动期空转 rAF）。 */
+        if (backlogNow > 0) stallTimer = window.setTimeout(schedule, STALL_RECHECK_MS);
         return;
       }
       const t = targetRef.current;
       let cur = shownRef.current;
-      if (!t.startsWith(cur) || t.length < cur.length) {
-        cur = t; // 内容重置（新 turn / 落库清缓冲）：直接对齐
+      if (forceCatchUp || !t.startsWith(cur) || t.length < cur.length) {
+        cur = t; // 内容重置（新 turn / 落库清缓冲）与强制追平：直接对齐到全文
       } else {
         const backlog = t.length - cur.length;
         // 窗口几何运动期间流式更新会暂停，结束后可能积累了较大 backlog；
@@ -94,6 +123,7 @@ function useSmoothText(target: string): string {
     if (shownRef.current.length < target.length || !target.startsWith(shownRef.current)) schedule();
     return () => {
       cancelAnimationFrame(raf);
+      if (stallTimer) window.clearTimeout(stallTimer);
       if (waitingForMotion) {
         window.removeEventListener("chatcoder:window-motion", onMotion);
         window.removeEventListener("pointerup", onPointerUp, true);

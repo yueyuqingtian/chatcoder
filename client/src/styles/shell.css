@@ -1,0 +1,301 @@
+/* ═══════════════════════════════════════════════════════════
+ * 主界面卡片化骨架（plan-20261025-shell，需求 5 / 6 / 7）
+ *
+ * 层次：左栏直接铺在窗口最底层（--bg-sidebar）；中间面板与右侧面板是浮在底层之上的微圆角卡片，
+ *       卡片与窗口边缘、卡片与卡片之间统一留 --shell-gap 的留白——分隔靠留白与卡片外环，不再画接缝线。
+ * 固定层：左上角导航组（.nav-cluster）与右上角控件组（.win-cluster）钉在窗口角落，
+ *       面板展开 / 收起时它们原地不动，只有卡片在其下方伸缩；卡片按 --wc-w / --wc-full-w 给控件组预留位置。
+ *       右面板收起时控件组压在中间卡片标题栏的右端，展开后压在右面板标签栏的右端（需求 5）。
+ * 设置页、拓展 / 自动化等页面同样渲染在中间卡片里（需求 6）；新建任务页没有右面板（需求 7，见 App.tsx）。
+ *
+ * 本文件最后加载：覆盖 global.css / revamp.css / panel.css 中旧的「贯通标题栏 + 接缝线」骨架规则，
+ * 旧规则的来龙去脉保留在原处注释里，这里只写新骨架的终态。
+ * ═══════════════════════════════════════════════════════════ */
+
+:root {
+  --shell-gap: 6px;
+  --shell-r: var(--r-lg);
+  /* 扁平分隔（用户要求「卡片无阴影分割」，参照 zcode）：卡片四周一条 1px 实色描边、不加任何投影。
+     描边画在卡片自己的 border 上而不是外扩的 box-shadow 外环——外环落在卡片盒子之外，
+     左侧那一圈会被 .app-right 的 overflow:hidden 裁掉，左栏与中间卡片的交界就看不出边线。
+     颜色取「底层色里混 8% 前景色」的不透明值：比底层 #ECECEF 深一档，在任何缩放下都是一条干净的线 */
+  --shell-border: color-mix(in srgb, var(--text-1) 8%, var(--bg-sidebar));
+  /* 右上角控件组几何（与 WindowControls.tsx 同源）：按钮 32 + 左右各 2 外距；分隔线 1 + 两侧各 6；右内距 8 */
+  --wc-unit: 36px;
+  --wc-sep-w: 13px;
+  --wc-pad: 8px;
+}
+:root[data-theme="dark"] {
+  --shell-border: color-mix(in srgb, var(--text-1) 10%, var(--bg-sidebar));
+}
+
+/* 控件组宽度：中间卡片标题栏在右面板收起时按 --wc-w 预留；右面板标签栏恒按 --wc-full-w 预留 */
+.app-shell {
+  --wc-w: calc(var(--wc-unit) * 3 + var(--wc-pad));
+  --wc-full-w: calc(var(--wc-unit) * 5 + var(--wc-sep-w) + var(--wc-pad));
+}
+.app-shell[data-wc="panel"] { --wc-w: calc(var(--wc-unit) * 4 + var(--wc-sep-w) + var(--wc-pad)); }
+
+/* 卡片之外的顶部留白条也能拖动窗口（卡片内的标题栏 / 标签栏另有各自的拖拽区） */
+.app-shell::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--shell-gap);
+  z-index: 1;
+  -webkit-app-region: drag;
+}
+
+/* ── 左栏：铺在底层，与窗口底同色；头部占位多出一段留白，与卡片顶边对齐 ──
+   plan-565-2323 G12：这里**不能**再声明 `-webkit-app-region: drag`。
+   .sb-head 是 aria-hidden 的纯占位（Sidebar.tsx / SidebarShell.tsx 都是空 div），盒为「左栏宽 × (标题栏+留白)」，
+   几何上完整罩住左上角全局导航组 .nav-cluster（148px 宽、同一行高）。Electron 的拖拽区会吞掉与之重叠的按钮点击
+   （且 23 起 drag 区在 no-drag 之上时以 drag 为准），表现为折叠 / 前进 / 后退点不动、悬停却正常。
+   窗口拖拽由 .app-shell::before 的顶部留白条与各卡片标题栏 / 标签栏承担，占位块不需要也不该参与。 */
+.app-pane-left .sb-head { height: calc(var(--titlebar-h) + var(--shell-gap)); }
+
+/* ── 卡片容器：横向排列中间卡片与右面板卡片，四周留白（左侧在左栏收起时才留） ── */
+.app-right {
+  position: relative;
+  flex-direction: row;
+  min-height: 0;
+  padding:
+    calc(var(--shell-gap) + var(--win-inset-top, 0px))
+    calc(var(--shell-gap) + var(--win-inset-right, 0px))
+    var(--shell-gap)
+    max(0px, calc(var(--shell-gap) - var(--pane-w)));
+}
+
+/* ── 中间卡片：标题栏 + 主区 ── */
+.app-center {
+  position: relative;
+  flex: 1 1 var(--main-min-w, 420px);
+  min-width: var(--main-min-w, 420px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--shell-border);
+  border-radius: var(--shell-r);
+  background: var(--bg-panel);
+  box-shadow: none;
+  overflow: hidden;
+}
+.app-shell:not(.rp-shown) .app-center { min-width: 0; }
+/* 主区在卡片里纵向撑满（旧规则按横向骨架写的 flex-basis / min-width 在纵向容器里会变成高度下限） */
+.app-center > .app-main { flex: 1 1 0; min-width: 0; min-height: 0; }
+
+/* 标题栏收进卡片：去掉贯通时代的底线与外扩 margin；左侧给导航组让位（左栏收起时导航组压在卡片上），
+   右侧给控件组让位——右面板展开后控件组移到右面板上方，这段预留随面板宽度同曲线收回 */
+.app-center > .titlebar {
+  margin-left: 0;
+  padding-top: 0;
+  padding-left: max(12px, calc(var(--nav-cluster-w) + 4px - max(var(--pane-w), var(--shell-gap))));
+  padding-right: calc(var(--wc-w) + 4px);
+  background: transparent;
+  border-bottom: none;
+  transition: padding-right var(--dur-pane) var(--ease-drawer);
+}
+.app-shell.rp-shown .app-center > .titlebar { padding-right: 8px; }
+
+/* ── 右面板卡片 ── */
+.app-right > .app-pane-right {
+  height: auto;
+  align-self: stretch;
+  margin-left: var(--shell-gap);
+  border: 1px solid var(--shell-border);
+  border-radius: var(--shell-r);
+  background: var(--bg-panel);
+  box-shadow: none;
+  max-width: calc(100% - var(--main-min-w, 420px) - var(--shell-gap));
+  transition:
+    width var(--dur-pane) var(--ease-drawer),
+    flex-basis var(--dur-pane) var(--ease-drawer),
+    margin-left var(--dur-pane) var(--ease-drawer),
+    border-width var(--dur-pane) var(--ease-drawer),
+    visibility 0s linear 0s;
+}
+/* 收起：描边随宽度一起收到 0（宽度为 0 时两侧 1px 描边仍会撑出 2px 的竖条） */
+.app-right > .app-pane-right.collapsed {
+  margin-left: 0;
+  border-width: 0 !important;
+  transition:
+    width var(--dur-pane) var(--ease-drawer),
+    flex-basis var(--dur-pane) var(--ease-drawer),
+    margin-left var(--dur-pane) var(--ease-drawer),
+    border-width var(--dur-pane) var(--ease-drawer),
+    visibility 0s linear var(--dur-pane);
+}
+/* 面板本体不再自带描边与圆角（由卡片承担），圆角跟随卡片裁切 */
+.app-pane-right > .right-panel { border: none; border-radius: inherit; }
+/* 全屏：铺满窗口的 fixed 卡片，四周保留同样的留白；导航组 / 控件组在它之上 */
+.app-right > .app-pane-right.fullscreen {
+  position: fixed;
+  inset:
+    calc(var(--shell-gap) + var(--win-inset-top, 0px))
+    calc(var(--shell-gap) + var(--win-inset-right, 0px))
+    var(--shell-gap)
+    var(--shell-gap);
+  width: auto !important;
+  flex-basis: auto !important;
+  max-width: none !important;
+  height: auto !important;
+  margin-left: 0;
+  z-index: 100;
+}
+
+/* 右面板标签栏：与中间卡片标题栏同高（控件组纵向居中对齐两者），是窗口顶部的拖拽区；
+   右端恒为控件组预留位置，全屏时左端再给导航组让位 */
+.app-pane-right .rp-head {
+  height: var(--titlebar-h);
+  padding-right: calc(var(--wc-full-w) + 2px);
+  border-bottom-color: var(--border-light, var(--border));
+  -webkit-app-region: drag;
+}
+.app-pane-right .rp-head :is(.rp-tab, .rp-hbtn, .rp-anchor, .ui-pop, [role="menu"]) { -webkit-app-region: no-drag; }
+.app-pane-right.fullscreen .rp-head { padding-left: calc(var(--nav-cluster-w) - var(--shell-gap) + 4px); }
+
+/* ── 分隔条：只保留拖拽命中区与悬停提示线，不再画常驻接缝线（卡片之间以留白分隔） ── */
+.resize-handle::after { display: none; }
+/* 右分隔条落在两张卡片之间的留白里：命中区 [中间卡片右缘 - 2, 右面板左缘 + 2]，提示线在留白正中 */
+.app-right > .resize-handle-right { margin-left: -2px; margin-right: -8px; }
+
+/* ── 左上角导航组：不再画「标题栏同款底色 + 底线」，透出下方的左栏或中间卡片，纵向与卡片标题栏对齐 ── */
+.nav-cluster {
+  top: var(--shell-gap);
+  z-index: 140;
+  background: none;
+}
+
+/* ── 右上角控件组（WindowControls）── */
+.win-cluster {
+  position: fixed;
+  top: calc(var(--shell-gap) + var(--win-inset-top, 0px));
+  right: calc(var(--shell-gap) + var(--win-inset-right, 0px));
+  z-index: 140;
+  display: flex;
+  align-items: center;
+  height: var(--titlebar-h);
+  padding-right: var(--wc-pad);
+  /* 容器本身不拦截指针：隐藏槽位与按钮间隙下方仍是卡片（标题栏可拖动、图标可点） */
+  pointer-events: none;
+}
+.wc-btn {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 0 2px;
+  border-radius: var(--r-md);
+  color: var(--text-2);
+  pointer-events: auto;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.wc-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-1); }
+.wc-btn.is-on { color: var(--text-1); }
+.wc-btn:disabled { cursor: default; }
+.wc-close:hover:not(:disabled) { background: var(--error); color: #fff; }
+.wc-btn .tb-ai-dot { position: absolute; top: 6px; right: 6px; }
+/* 可收拢槽位：全屏（面板展开时）与面板开关 + 分隔线（会话页）。宽度与透明度同曲线过渡，
+   右侧的窗口按钮不受影响；收起时不可点、不可聚焦 */
+.wc-slot {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    max-width var(--dur-pane) var(--ease-drawer),
+    opacity var(--dur-2) var(--ease-standard),
+    visibility 0s linear var(--dur-pane);
+}
+.wc-slot .wc-btn { pointer-events: none; }
+.win-cluster.is-panel .wc-slot-fs,
+.win-cluster.has-panel .wc-slot-panel {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    max-width var(--dur-pane) var(--ease-drawer),
+    opacity var(--dur-3) var(--ease-standard) var(--dur-1),
+    visibility 0s linear 0s;
+}
+.win-cluster.is-panel .wc-slot-fs { max-width: var(--wc-unit); }
+.win-cluster.has-panel .wc-slot-panel { max-width: calc(var(--wc-unit) + var(--wc-sep-w)); }
+.win-cluster.is-panel .wc-slot-fs .wc-btn,
+.win-cluster.has-panel .wc-slot-panel .wc-btn { pointer-events: auto; }
+.wc-sep { flex-shrink: 0; width: 1px; height: 16px; margin: 0 6px; background: var(--border); }
+
+/* ── 左栏列表（需求 2）──
+   · 不在项目分组下的会话行（置顶分区 / 分组视图）行首是所属项目的图标，悬停时同一槽位换成置顶按钮；
+   · 项目行尾是会话数，悬停 / 菜单打开时让位给操作按钮（同一位置，标题不位移）；
+   · 排序按钮写着当前方式，点一下切换，文字随切换淡入。 */
+.sb-session-slot.has-proj { position: relative; }
+.sb-session-slot .sb-slot-proj {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  pointer-events: none;
+  transition: opacity var(--dur-fast);
+}
+.sb-session:hover .sb-slot-proj,
+.sb-session.menu-open .sb-slot-proj,
+.sb-session-slot:has(.sb-slot-pin.is-armed, .sb-slot-pin:focus-visible) .sb-slot-proj { opacity: 0; }
+.sb-project-count {
+  flex-shrink: 0;
+  min-width: 16px;
+  color: var(--text-3);
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  transition: opacity var(--dur-fast);
+}
+.sb-project:hover .sb-project-count,
+.sb-project.menu-open .sb-project-count { opacity: 0; }
+.sb-view-actions .sb-sort-toggle { height: 24px; padding: 0 6px; gap: 4px; color: var(--text-3); border-color: transparent; }
+.sb-view-actions .sb-sort-toggle:hover:not(:disabled) { color: var(--text-1); }
+.sb-sort-label { display: inline-block; font-size: 12px; animation: mo-fade-in var(--dur-3) var(--ease-emphasized-decel) backwards; }
+/* plan-20261025-sidebar-row：窄侧栏（切换条内容宽 < 236px）下排序按钮只留图标——
+   否则「分组/项目 + 最近 + 新建项目」会折成两行、操作组孤零零落到第二行。
+   当前排序方式由 Tooltip 与 aria-label 承接，点击行为不变。 */
+.sb-viewbar[data-fit~="tight"] .sb-sort-label { display: none; }
+.sb-viewbar[data-fit~="tight"] .sb-view-actions .sb-sort-toggle { padding: 0 5px; }
+.sb-time-group + .sb-time-group { margin-top: 2px; }
+/* 空项目的「暂无任务」与会话标题左对齐（行内距 + 状态槽 + 间距），高度与会话行同档的一半，不显得空 */
+.sb-project-children > .sb-worktree-empty {
+  padding: 6px 0 6px calc(var(--sb-row-pad) + var(--sb-icon-slot) + var(--sb-row-gap));
+  font-size: 12px;
+}
+
+/* ── 底层的主题世界渐变：从左栏移到整个底层——卡片四周的留白与左栏同一张底，不会在左栏边缘断开；
+      默认石墨主题没有渐变（--world-scene-side: none，底色恒为 #ECECEF，见 themes.css），深色主题不叠渐变 ── */
+:root:not([data-glass="on"]) .app-shell { background-image: var(--world-scene-side, none); }
+:root[data-theme="dark"] .app-shell { background-image: none; }
+/* 左栏透出底层（底色与渐变都由 .app-shell 统一提供），自身不再铺一层同色底。
+   特异性要高过 themes.css 的 `:root:not([data-glass="on"]) .sidebar`（它给侧栏单独铺渐变） */
+:root .app-shell .app-pane-left,
+:root .app-shell .app-pane-left > .sidebar { background-color: transparent; background-image: none; }
+
+/* ── 扁平阴影（用户要求「全局卡片使用扁平弱阴影或无阴影分割」）──
+      常驻卡片一律只留 1px 级的弱投影：输入卡去掉 20px 的大范围晕影；右上角工具卡去掉 8px 的外扩投影；
+      卡片悬停不再「抬起 + 加投影」，只靠描边加深反馈。浮层（菜单 / 弹窗 / 提示）仍保留各自的投影以示层级。 */
+.composer-main { box-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.03 * var(--shadow-strength, 1))); }
+:root { --tcard-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength, 1))); }
+:root[data-theme="dark"] { --tcard-shadow: 0 1px 2px rgba(0, 0, 0, calc(0.24 * var(--shadow-strength, 1))); }
+.usage-card:hover { transform: none; box-shadow: none; }
+.mkt-card:hover { translate: none; box-shadow: none; }
+
+/* ── 毛玻璃：底层整体是玻璃面（卡片之间的留白同样透出材质），左栏自身不再叠一层底色 ── */
+:root[data-glass="on"] .app-shell {
+  background: color-mix(in srgb, var(--frost-left-tint) calc(var(--frost-left-alpha, 0.9) * 100%), transparent);
+}
+[data-glass="on"] .app-pane-left { background: transparent; }
+
+/* 运动期：窗口缩放 / 拖分隔条时卡片留白与预留宽度跟随几何即时变化，不追着过渡走 */
+html[data-window-motion="1"] :is(.app-center > .titlebar, .wc-slot),
+body.panel-dragging :is(.app-center > .titlebar, .wc-slot) { transition: none; }

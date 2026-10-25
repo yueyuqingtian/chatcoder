@@ -10,6 +10,7 @@ from app.orchestration.tools.codebase_search import CodebaseSearchTool
 from app.orchestration.tools.compaction_view import CompactionIndexTool, CompactionViewTool
 from app.orchestration.tools.desktop import ALL_DESKTOP_TOOLS
 from app.orchestration.tools.editor import EditorApplyDiffTool
+from app.orchestration.tools.feature_lookup import FeatureLookupTool
 from app.orchestration.tools.fs_list import FsListTool
 from app.orchestration.tools.fs_read import FsReadTool
 from app.orchestration.tools.fs_write import FsWriteTool
@@ -24,7 +25,11 @@ from app.orchestration.tools.read_attachment import ReadAttachmentTool
 from app.orchestration.tools.skill_view import SkillViewTool
 # plan-156-619 S10：后续任务建议（收尾时向用户提一条可执行的下一步）
 from app.orchestration.tools.suggestion import SuggestNextTaskTool
-from app.orchestration.tools.symbol_search import OutlineTool, SymbolSearchTool
+from app.orchestration.tools.symbol_search import (
+    OutlineTool,
+    SymbolIndexEnableTool,
+    SymbolSearchTool,
+)
 from app.orchestration.tools.terminal import TerminalExecTool
 from app.orchestration.tools.todo import TodoWriteTool
 from app.orchestration.tools.view_image import ViewImageTool
@@ -108,6 +113,8 @@ def _build_default_registry() -> ToolRegistry:
         ReadAttachmentTool, TodoWriteTool,
         # v2.2 (对齐 zcode 3.14): 补注册——多文件编辑/git 操作/代码库搜索/结构化提问
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
+        # plan-548-2276 阶段 4：功能 → 模块映射（先知道该读哪几个文件，再选具体检索工具）
+        FeatureLookupTool,
         # plan-20261019-suggestion-priority：后续任务建议卡（消息流底部）。
         # 前移到常用工具组——此前注册在清单最末尾，长工具表里模型对末尾工具注意力明显偏低，
         # 是「几十轮只有一次触发」的原因之一
@@ -117,7 +124,8 @@ def _build_default_registry() -> ToolRegistry:
         # plan-230-1144 M1.2: 技能正文按需加载（此前 content 从未送达模型，AI 无法主动使用技能）
         SkillViewTool,
         # plan-230-1144 M3: 符号索引检索与文件骨架（函数级定位，替代大范围扫描探索）
-        SymbolSearchTool, OutlineTool,
+        # plan-548-2276：symbol_index_enable 让模型自己开启索引（索引默认关闭是产品决定）
+        SymbolSearchTool, OutlineTool, SymbolIndexEnableTool,
         # plan-230-1144 M4.1: 记忆三层化——AI 主动写记忆（此前只有 turn 后被动抽取）
         MemoryWriteTool,
         # plan-20261015-browser-agent：浏览器工具套件（驱动右侧面板内置浏览器，无桌面端时回退后台浏览器）

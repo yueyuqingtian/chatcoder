@@ -48,9 +48,13 @@ def test_subagent_run_notifies_finished_on_terminal_state():
     """子代理终态收尾必须调用 notify_finished（否则完成通知无人接力调度唤醒）。
 
     plan-91-394: 收尾已从 spawn 内的 _run 迁入 _drive → _after_terminal（暂停态不唤醒）。
+    plan-565-2323 G7：成功终态被抽成 `_finish_done`（以便整段被 asyncio.shield 包住，
+    防二次取消打断写库），`notify=True` 随之落在这里；对外语义不变（完成必唤醒）。
     """
     assert "self.notify_finished(handle)" in inspect.getsource(SubagentManager._after_terminal)
-    assert "notify=True" in inspect.getsource(SubagentManager._drive)
+    assert "notify=True" in inspect.getsource(SubagentManager._finish_done)
+    # 成功路径必须经过 _finish_done（否则上面的 notify=True 永远跑不到）
+    assert "self._finish_done(" in inspect.getsource(SubagentManager._drive)
 
 
 # ── 会话运行计数 ─────────────────────────────────────────

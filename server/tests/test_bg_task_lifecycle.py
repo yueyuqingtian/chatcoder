@@ -103,7 +103,7 @@ def test_interruptible_for_only_opens_waiting_tools(tool, args, expected):
 
 
 def test_interrupt_label_names_the_real_source():
-    assert "子会话提问" in agent_loop._interrupt_source_label("subsession_question")
+    assert "子代理提问" in agent_loop._interrupt_source_label("subagent_question")
     assert "后台命令" in agent_loop._interrupt_source_label("bg_command_done")
     # 未知来源也不能硬说成「子会话消息」
     assert "子会话" not in agent_loop._interrupt_source_label("")
@@ -320,3 +320,102 @@ async def test_started_event_precedes_exited_even_for_instant_exit(monkeypatch):
     bg_process_registry.register(proc, "python -c pass", None, 51)
     await asyncio.sleep(1.0)
     assert order == ["bg.process.started", "bg.process.exited"]
+
+
+# ── plan-20261025-bgturn：撤回该轮时后台通知不能残留 ─────────────────────────
+
+def test_batch_turn_id_only_when_all_items_share_one_turn():
+    """同轮才落 turn_id：跨轮合并的通知不能误挂到其中一轮，否则撤回会带走不该撤的那条。"""
+    assert bg_notify._batch_turn_id([_payload("bg_a"), _payload("bg_b")]) == 5
+    assert bg_notify._batch_turn_id(
+        [_payload("bg_a"), {**_payload("bg_b"), "turn_id": 6}]
+    ) is None
+    assert bg_notify._batch_turn_id([{**_payload("bg_a"), "turn_id": None}]) is None
+
+
+@pytest.mark.asyncio
+async def test_flush_carries_turn_id_so_rollback_can_delete_it(monkeypatch):
+    """落库必须带 turn 归属——撤回按 `turn_id >= 目标轮` 软删，归属为空就永远删不掉。"""
+    monkeypatch.setattr(bg_notify, "MERGE_WINDOW_S", 0.02)
+    sent: list[tuple[str, int | None]] = []
+
+    async def fake_publish(kind, *, session_id, text, turn_id=None, **kw):
+        sent.append((kind.value, turn_id))
+        return {"delivered": "queued"}
+
+    async def none_revoked(turn_ids):
+        return set()
+
+    monkeypatch.setattr(mailbox, "publish", fake_publish)
+    monkeypatch.setattr(bg_notify, "_turn_revoked", none_revoked)
+    monkeypatch.setattr(bg_process_registry, "is_observed", lambda sid: False)
+
+    await bg_notify.on_bg_exit(_payload("bg_user", stopped_by="user", rc=1))
+    await asyncio.sleep(0.1)
+    assert sent == [("bg_command_stopped", 5)]
+
+
+@pytest.mark.asyncio
+async def test_flush_skips_commands_of_revoked_turn(monkeypatch):
+    """合并窗口内该轮已被撤回：不再投递，否则消息流里会重新冒出一条已撤销轮的提示。"""
+    monkeypatch.setattr(bg_notify, "MERGE_WINDOW_S", 0.02)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_publish(kind, *, session_id, text, **kw):
+        sent.append((kind.value, text))
+        return {"delivered": "queued"}
+
+    async def revoked(turn_ids):
+        return {5}
+
+    monkeypatch.setattr(mailbox, "publish", fake_publish)
+    monkeypatch.setattr(bg_notify, "_turn_revoked", revoked)
+    monkeypatch.setattr(bg_process_registry, "is_observed", lambda sid: False)
+
+    await bg_notify.on_bg_exit(_payload("bg_user", stopped_by="user", rc=1))
+    await asyncio.sleep(0.1)
+    assert sent == [], "已撤回轮的命令停止提示不该再投递"
+
+
+def test_drop_from_turn_discards_queued_notices_of_that_turn():
+    """队列里的待投递通知也要清：只软删落库副本的话，下一轮 take_pending 会把它带走。"""
+    mailbox._push(mailbox.MailItem(
+        kind="bg_command_stopped", session_id=61, text="stop", turn_id=7))
+    mailbox._push(mailbox.MailItem(
+        kind="subagent_question", session_id=61, text="ask", turn_id=None))
+    mailbox._push(mailbox.MailItem(
+        kind="bg_command_done", session_id=61, text="done", turn_id=8))
+
+    assert mailbox.drop_from_turn(61, 7) == 2
+    rest = mailbox.take_pending(61)
+    assert [it["content"] for it in rest] == ["ask"], "与轮次无关的消息不受影响到"
+
+
+@pytest.mark.asyncio
+async def test_kill_since_only_stops_processes_from_that_turn(monkeypatch):
+    """撤回只终止该轮及之后启动的后台命令，更早轮次仍在跑的服务不动。"""
+    import app.orchestration.agent_events as agent_events
+
+    async def noop(session_id, event):
+        return None
+
+    monkeypatch.setattr(agent_events, "broadcast", noop)
+    exits: list[dict] = []
+
+    p_old = await _spawn_sleeper()
+    s_old = bg_process_registry.register(
+        p_old, "old", None, 71, turn_id=3, on_exit=lambda p: exits.append(p))
+    p_new = await _spawn_sleeper()
+    s_new = bg_process_registry.register(
+        p_new, "new", None, 71, turn_id=9, on_exit=lambda p: exits.append(p))
+    try:
+        await asyncio.sleep(0.2)
+        assert await bg_process_registry.kill_since(71, 9) == [s_new]
+        await asyncio.sleep(0.5)
+        assert [r["shell_id"] for r in bg_process_registry.list_session(71)] == [s_old]
+        assert all(p["shell_id"] != s_new for p in exits), "撤回按 system 终止，不回报会话"
+    finally:
+        for p in (p_old, p_new):
+            if p.returncode is None:
+                p.kill()
+

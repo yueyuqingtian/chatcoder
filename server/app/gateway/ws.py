@@ -73,8 +73,8 @@ _GLOBAL_FORWARD_EVENTS = frozenset({
     # 工作流结束 → 主代理被唤醒之间的待唤醒状态（plan-20261014-actions-wait）：
     # 侧栏转圈要在这段空档里保持，非当前会话同样需要感知；低频、载荷极小
     "workflow.wakeup",
-    # plan-156-620：新建执行子会话 → 左栏在任意会话下都能即时插入子会话行（低频）
-    "subsession.created",
+    # plan-549-2281：子会话创建事件（subsession.created）已删除——创建能力已下线，
+    # 不再有任何代码会发出该事件；存量子会话由左栏一次性重建（/sessions/subsession-index）拉取。
 })
 
 
@@ -260,8 +260,29 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                 approval_id = payload.get("approval_id")
                 approved = bool(payload.get("approved"))
                 resolved = False
+                # 审批所属会话：0 表示查不到归属（已结束 / 超时），此时退回连接会话
+                _owner_sid = 0
                 if approval_id:
                     from app.orchestration.approval import approval_manager
+                    # 会话隔离：审批 / 提问只能由**所属会话**的连接作答。
+                    # 此前任意会话都能 resolve 任意 approvalId，且回执广播到提交方会话——
+                    # 在 B 会话答 A 会话的提问时，A 会话的前端条目永远收不到回执，
+                    # 卡片不消失、反复回到第 1 题。这里直接拒绝并回 ack 说明原因。
+                    _detail = approval_manager.get_detail(str(approval_id)) or {}
+                    _owner_sid = int(_detail.get("session_id") or 0)
+                    if _owner_sid and _owner_sid != session_id:
+                        logger.warning(
+                            "[approval] 拒绝跨会话作答 approval=%s 来源会话=%s 提交会话=%s",
+                            approval_id, _owner_sid, session_id,
+                        )
+                        await ws.send_text(json.dumps({
+                            "event": "ack",
+                            "payload": {
+                                "ref": approval_id, "resolved": False,
+                                "error": "session_mismatch",
+                            },
+                        }))
+                        continue
                     # v2.2: answer 为 ask_user_question 的结构化回答
                     _answer = payload.get("answer")
                     if isinstance(_answer, dict):
@@ -272,11 +293,17 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                     # v3.0 (plan-88): remember_scope 区分会话级/全局（global 规则 session_id=None）
                     if approved and payload.get("remember"):
                         scope = "global" if payload.get("remember_scope") == "global" else "session"
-                        await _remember_approval(approval_id, session_id, scope)
+                        await _remember_approval(approval_id, _owner_sid or session_id, scope)
                 await ws.send_text(json.dumps({
                     "event": "ack", "payload": {"ref": approval_id, "resolved": resolved},
                 }))
-                await manager.broadcast(session_id, {"event": "approval.response", "payload": payload})
+                # 回执广播到审批所属会话（不是提交方连接），保证发起会话的 UI 能关掉卡片，
+                # 并把 session_id 放进 payload 供多通道按会话过滤。
+                _broadcast_sid = _owner_sid or session_id
+                await manager.broadcast(_broadcast_sid, {
+                    "event": "approval.response",
+                    "payload": {**payload, "session_id": _broadcast_sid},
+                })
 
             elif event == "approval.explain":
                 # plan-75-332: 审批卡「解释」——异步生成说明并流式推送，不阻塞 ws 读取循环

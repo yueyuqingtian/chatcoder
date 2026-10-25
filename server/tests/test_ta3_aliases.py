@@ -536,6 +536,31 @@ def test_subagent_management_tools_mapped():
     assert restore_args("SendToSubagent", send) == send
 
 
+def test_feature_map_tools_mapped():
+    """plan-548-2276：功能地图与符号索引开关必须有 ta3 映射。
+
+    这两个工具缺映射时会被 `disguise_tools` 静默剔除：主提示词仍在引导
+    「只知道功能时就先用 feature_lookup」，但 ta3 会话里工具根本不在列表里，
+    模型只能退回全库 grep——提示词白写、能力白做，且没有任何报错。
+    参数键名与真实工具一致，走动态派生即可，不需要 ARGS 适配。
+    """
+    from app.orchestration.tools.registry import tool_registry
+
+    assert TO_TA3["feature_lookup"] == "FeatureLookup"
+    assert TO_TA3["symbol_index_enable"] == "SymbolIndexEnable"
+    assert "FeatureLookup" in DYNAMIC_SCHEMA_ALIASES
+    assert "SymbolIndexEnable" in DYNAMIC_SCHEMA_ALIASES
+    # 入站可还原（否则模型调用后落到「未知工具」）
+    assert FROM_TA3["FeatureLookup"] == "feature_lookup"
+    assert FROM_TA3["SymbolIndexEnable"] == "symbol_index_enable"
+    # 出站不被剔除，且参数原样保留
+    real = [tool_registry.get(n).function_schema()
+            for n in ("feature_lookup", "symbol_index_enable")]
+    out = {s["function"]["name"]: s for s in disguise_tools(real)}
+    assert set(out) == {"FeatureLookup", "SymbolIndexEnable"}
+    assert "query" in out["FeatureLookup"]["function"]["parameters"]["properties"]
+
+
 def test_toolkit_and_browser_tools_mapped():
     """v43: 新增工具（fetch/ci/git/检索/压缩/技能/记忆/浏览器）映射与参数透传。"""
     cases = {

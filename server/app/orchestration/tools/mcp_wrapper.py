@@ -5,6 +5,7 @@ MCP Server 通过 Model Context Protocol 暴露工具，
 让 agent_runtime 可以像调用内置工具一样调用 MCP 工具。
 """
 import asyncio
+import copy
 import json
 import logging
 from typing import Any
@@ -15,6 +16,63 @@ logger = logging.getLogger(__name__)
 
 # plan-20261020-pts：MCP 子进程 stdout 的单行读取上限（asyncio 默认 64KB，数据库查询等大结果会超）
 _MCP_STREAM_LIMIT = 16 * 1024 * 1024
+
+
+async def _read_stderr_briefly(
+    proc: asyncio.subprocess.Process, timeout: float = 2.0,
+) -> bytes:
+    """尽力读一小段 stderr 用于报错，**必须有超时**（plan-562-2318 M10）。
+
+    为什么不能直接 `await proc.stderr.read()`：调用点是「等响应超时之后」，此时子进程
+    通常仍存活（npm-shim 的子进程树会让管道不关闭），read() 会一直阻塞到进程退出——
+    本该 10s 返回的「无响应 + stderr 摘要」被拖成工具级超时（默认 600s）。
+    """
+    if proc.stderr is None:
+        return b""
+    try:
+        return await asyncio.wait_for(proc.stderr.read(), timeout=timeout)
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — 读不到 stderr 不影响报错本身
+        return b""
+
+
+def _sanitize_input_schema(schema: Any) -> dict:
+    """清洗 MCP 自报 JSON Schema 中 Gemini 系网关不接受的写法。
+
+    Gemini 的原生 function declaration 明确拒绝空枚举值（400：
+    `function_declarations[N].parameters.properties[x].enum[0]: cannot be empty`）。
+    而 MCP Server 常把「可选」写成 `enum: ["", "operator"]` 这类形态，直接把整轮
+    请求打成 400。这里只做无歧义的清理：丢掉枚举里的空字符串与 `null`
+    （以及因此变空的枚举），其余字段原样透传——不同网关对 `$ref` / `anyOf`
+    的接受度不一致，不做猜测性改写。MCP 返回的 schema 会被缓存复用，先深拷贝再改。
+
+    plan-560-2311 D9：`null` 也要丢。Gemini 的 `enum` 只接受字符串/数字/布尔，
+    MCP 习惯用 `enum: [null, "a"]` 表达可选，与空字符串一样会被判 400。
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    cleaned = copy.deepcopy(schema)
+
+    def _unacceptable(v: Any) -> bool:
+        return v is None or (isinstance(v, str) and v.strip() == "")
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            enum = node.get("enum")
+            if isinstance(enum, list):
+                kept = [v for v in enum if not _unacceptable(v)]
+                if len(kept) != len(enum):
+                    if kept:
+                        node["enum"] = kept
+                    else:
+                        node.pop("enum", None)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(cleaned)
+    return cleaned
 
 
 def _to_root_uri(root_path: str | None) -> str | None:
@@ -94,7 +152,11 @@ class McpToolWrapper(Tool):
             description or f"MCP 工具: {tool_name} (来自 {server_name})"
         ) + f"\n[MCP Server: {server_name}, Tool: {tool_name}]"
         self.risk_level = "medium"  # MCP 工具默认 medium 风险
-        self._input_schema = input_schema or {"type": "object", "properties": {}}
+        # 握手拿到的 schema 原样下发会被 Gemini 的空枚举/非法写法打成 400，
+        # 构造期统一清洗一次（见 _sanitize_input_schema）
+        self._input_schema = _sanitize_input_schema(
+            input_schema or {"type": "object", "properties": {}}
+        )
         self._server_config = server_config or {}
 
     def function_schema(self) -> dict:
@@ -217,7 +279,10 @@ class McpToolWrapper(Tool):
                 init_request["params"]["rootUri"] = root_uri
             init_resp = await self._send_and_read(proc, init_request, timeout=10)
             if not init_resp:
-                stderr = await proc.stderr.read() if proc.stderr else b""
+                # plan-562-2318 M10：stderr 读取必须带超时——子进程此时通常仍存活
+                # （npm-shim 的子进程树会让管道不关），无超时的 read() 会一直阻塞，
+                # 把「10s 超时返回」拖成「工具级超时（默认 600s）」。
+                stderr = await _read_stderr_briefly(proc)
                 return ToolResult(
                     ok=False, output="",
                     error=f"MCP initialize 无响应: {stderr.decode('utf-8', errors='replace')[:300]}",
@@ -244,7 +309,7 @@ class McpToolWrapper(Tool):
             }
             call_resp = await self._send_and_read(proc, call_request, timeout=60, expected_id=1)
             if not call_resp:
-                stderr = await proc.stderr.read() if proc.stderr else b""
+                stderr = await _read_stderr_briefly(proc)
                 return ToolResult(
                     ok=False, output="",
                     error=f"MCP tools/call 无响应: {stderr.decode('utf-8', errors='replace')[:300]}",

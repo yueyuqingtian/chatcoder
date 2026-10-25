@@ -413,7 +413,28 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     from app.services import task_service
     await task_service.cancel_turn_tasks(db, snap.session_id, turn_id)
 
-    # 2.2 产物清扫（v12）：收集该 turn 及其之后任务/产物的清理项（写统一在下方
+    # 2.2 plan-20261025-bgturn：终止该轮及之后启动的后台命令。
+    #     撤回 = 这一轮没发生过，它启动的 dev server 不能继续占着端口（右上角后台任务栏
+    #     也会一直挂着一行已撤销轮的卡片）。按 system 终止，不再向会话回报「被用户停止」——
+    #     那条提示本身就是撤回后应该消失的东西。
+    try:
+        from app.orchestration.tools.bg_process import bg_process_registry
+        await bg_process_registry.kill_since(snap.session_id, turn_id)
+    except Exception:  # noqa: BLE001 — 终止失败不能阻断回滚主流程
+        logger.warning("[rollback] 终止该轮后台命令失败 session=%s turn=%s",
+                       snap.session_id, turn_id, exc_info=True)
+
+    # 2.3 plan-20261025-bgturn / plan-20261026-notice-turn：丢掉邮箱队列里归属于该轮及之后的通知。
+    #     这些通知（后台命令完成 / 被停止、子代理提问 / 进度上报 / 完成行）一旦被下一轮
+    #     take_pending 带走，就会在消息流里重新弹出一条属于已撤销轮的提示——即使落库副本已被软删。
+    try:
+        from app.orchestration import mailbox
+        mailbox.drop_from_turn(snap.session_id, turn_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("[rollback] 清理待投递通知失败 session=%s turn=%s",
+                       snap.session_id, turn_id, exc_info=True)
+
+    # 2.4 产物清扫（v12）：收集该 turn 及其之后任务/产物的清理项（写统一在下方
     #     一次写引擎事务内提交，保持原子性；此处只读不写）。
     from app.persistence.models.task import Artifact, Task
     task_res = await db.execute(
@@ -571,6 +592,18 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         s.commit()
 
     await run_write_locked(_persist, label=f"rollback.persist.{turn_id}")
+
+    # 5.1 plan-20261025-bgturn / plan-20261026-notice-turn：兜底补删该轮及之后的邮箱通知。
+    #     上面的软删按「回滚开始时取到的消息列表」执行，而通知的落库可能正好发生在这之后
+    #     （进程在回滚途中退出 / 合并窗口到点 / 子代理取消收尾）。不补这一刀，用户就会看到
+    #     「撤回后还冒出一条后台命令提示、子代理进度上报或完成行」。
+    #     只删 mailbox 落库的通知（含提问 / 进度上报 / 完成行），不碰用户与代理正文。
+    try:
+        from app.orchestration import mailbox
+        await mailbox.mark_notices_deleted(snap.session_id, turn_id)
+    except Exception:  # noqa: BLE001 — 兜底清理失败不影响回滚结果
+        logger.warning("[rollback] 补删后台命令通知失败 session=%s turn=%s",
+                       snap.session_id, turn_id, exc_info=True)
 
     # plan-1094: 广播回滚完成——前端据此清除该 turn 及其之后的待审缓存。
     await broadcast(snap.session_id, {

@@ -37,7 +37,7 @@ import {
 import { IconPlusX, IconSendStop } from "../iconkit/MorphIcons";
 import { PlusMenu, type ModeOption } from "../composer/PlusMenu";
 import type { ExtItem } from "../composer/ExtensionPicker";
-import { EffortPicker } from "../composer/EffortPicker";
+import { ModelEffortPicker } from "../composer/ModelEffortPicker";
 import { ApprovalPicker } from "../composer/ApprovalPicker";
 import { WorkspaceChip } from "../composer/WorkspaceChip";
 import { QueueTray } from "../composer/QueueTray";
@@ -46,11 +46,9 @@ import { BUILTIN_MODES, GOAL_MODE, MODE_META, customModeIcon, EFFORT_RANK } from
 import type { ExtKind } from "../../store/navIntent";
 import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
-import { ModelPicker } from "./ModelPicker";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
 import { useChatStore, persistLastReasoning, patchSession, useCurrentSession, type UsageDetail } from "../../store/chat";
-import { usePendingInteractions } from "../../store/pendingInteractions";
 import { useScoped } from "./convoScope";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
@@ -350,8 +348,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  /** plan-20261025-composer：模型与思考深度合并为同一个浮层，一个开关 */
   const [showModels, setShowModels] = useState(false);
-  const [showReasoning, setShowReasoning] = useState(false);
   const [showSlash, setShowSlash] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   // plan-20261009-ui U2：+ 浮窗（执行模式 / 目标 / 插件·技能·连接器），与其它浮窗互斥
@@ -377,12 +375,11 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const [showSkills, setShowSkills] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillQuery, setSkillQuery] = useState("");
-  /** 同一时刻只开一个输入框浮窗（+ / 权限 / 模型 / 思考深度） */
+  /** 同一时刻只开一个输入框浮窗（+ / 权限 / 模型与思考深度） */
   const closeFloats = () => {
     setShowPlus(false);
     setShowApprovalMenu(false);
     setShowModels(false);
-    setShowReasoning(false);
   };
   /** / @ $ 弹层容器：用于"键盘上下键切换时把选中项滚入可视区"。
    *  弹层有 max-height + overflow-y:auto，此前只改 index 不滚动内容区，
@@ -423,13 +420,25 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   /** plan-546: 草稿防抖同步——输入/附件/配置变化 300ms 后写入草稿 store；
    * 发送成功后置 skipDraftSyncRef 跳过一次，避免空状态写回导致草稿复活 */
   const skipDraftSyncRef = useRef(false);
+  /** plan-568-2333：防抖窗口内「还没落盘的那一笔」。此前 cleanup 只 clearTimeout，
+   *  输入后 300ms 内切会话或中途卸载，这段输入与附件就直接丢了（切回来是空的）。
+   *  存 flush 闭包而不是 payload，避免在这里复刻 patchDraft 的参数类型。 */
+  const pendingDraftRef = useRef<{ draftKey: string; flush: () => void } | null>(null);
   useEffect(() => {
+    // 切到另一个 key（含「新建」页）时，上一个会话停在窗口里的那笔先落盘再换桶
+    const prev = pendingDraftRef.current;
+    if (prev && prev.draftKey !== draftKey) {
+      pendingDraftRef.current = null;
+      prev.flush();
+    }
     if (draftKey === "new") return;
     if (skipDraftSyncRef.current) {
       skipDraftSyncRef.current = false;
+      // 已发送成功：窗口里那笔属于刚发出去的内容，作废，否则卸载补发会让草稿复活
+      pendingDraftRef.current = null;
       return;
     }
-    const t = setTimeout(() => {
+    const flush = () => {
       useDraftsStore.getState().patchDraft(draftKey, {
         text: input,
         attachments,
@@ -439,9 +448,21 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           ? { modelId: homeModelId, mode: composerMode, approvalMode, projectId: currentProjectId }
           : {}),
       });
+    };
+    pendingDraftRef.current = { draftKey, flush };
+    const t = setTimeout(() => {
+      pendingDraftRef.current = null;
+      flush();
     }, 300);
     return () => clearTimeout(t);
   }, [draftKey, input, attachments, refs, effort, isHome, homeModelId, composerMode, approvalMode, currentProjectId]);
+  // plan-568-2333：真正卸载（切到设置页、关闭侧边对话等）时补发窗口内的最后一笔。
+  // 单独一个空依赖 effect：主 effect 的 cleanup 只清定时器，不清 pending，两者不抢同一份值。
+  useEffect(() => () => {
+    const pend = pendingDraftRef.current;
+    pendingDraftRef.current = null;
+    pend?.flush();
+  }, []);
 
   /** plan-546: 首页挂载时若草稿记录了工作目录，恢复全局 currentProjectId（侧栏高亮同步） */
   useEffect(() => {
@@ -1291,48 +1312,26 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   /** 当前会话所在项目（会话态工作区胶囊只读展示） */
   const sessionProject = projects.find((p) => p.id === (currentSession?.project_id ?? currentProjectId)) ?? null;
 
-  /** plan-522-2209：有效待审批项——当前会话有就用它，否则回退到跨会话索引里最早到达的一条。
-   *  为什么要回退：审批只广播到发起会话的通道，用户停在别的会话时那张卡根本不会出现，
-   *  子任务就在他眼皮底下卡到自动拒绝。两级回退保证「任何地方在等我」都能在当前输入区处理。
-   *  订阅整个索引是为了审批到达 / 结束时能重算，否则卡片会停在旧值。 */
-  const crossSessionPending = usePendingInteractions((s) => s.pendingBySession);
-  const effectivePendingApproval = useMemo(() => {
-    if (pendingApproval) return { approvalId: pendingApproval.approvalId, detail: pendingApproval.detail, fromOther: null as number | null };
-    // 只取「有 detail」的条目：没有详情就渲染不出卡片内容
-    let best: { sid: number; aid: string; detail: Record<string, unknown>; createdAt: number } | null = null;
-    for (const sidKey of Object.keys(crossSessionPending)) {
-      const sidNum = Number(sidKey);
-      if (sidNum === currentSessionId) continue;
-      const bucket = crossSessionPending[sidNum];
-      for (const aid of Object.keys(bucket)) {
-        const entry = bucket[aid];
-        if (!entry.detail || Object.keys(entry.detail).length === 0) continue;
-        if (!best || entry.createdAt < best.createdAt) {
-          best = { sid: sidNum, aid, detail: entry.detail, createdAt: entry.createdAt };
-        }
-      }
-    }
-    return best ? { approvalId: best.aid, detail: best.detail, fromOther: best.sid } : null;
-  }, [pendingApproval, crossSessionPending, currentSessionId]);
+  /** 会话隔离修复：提问 / 审批卡只渲染**当前会话**的队首（pendingApproval 随会话切片存取）。
+   *  此前在「当前会话无队首」时回退到跨会话索引里最早的一条，导致 A 会话的提问卡出现在 B 会话，
+   *  且作答时回执按提交方会话广播，原会话的索引条目永远不消失、卡片反复回到第 1 题。
+   *  其他会话的等待统一由侧栏等待标记提示，用户主动切过去处理。 */
+  const effectivePendingApproval = pendingApproval;
 
-  /** 来源标题：来自子会话时按 id 反查最新标题（子会话可能被重命名），查不到退编号。 */
-  const subsessionsByParent = useChatStore((s) => s.subsessionsByParent);
-  /** 跨会话待办总条数：跨会话回退时「另有 N 项」要用它，
-   *  不能沿用当前会话的 approvalQueue 长度（那是另一个会话的队列，语义对不上）。 */
-  const crossSessionPendingTotal = useMemo(() => {
-    let n = 0;
-    for (const bucket of Object.values(crossSessionPending)) n += Object.keys(bucket).length;
-    return n;
-  }, [crossSessionPending]);
+  /** 来源子代理：审批卡要根据来源反查子代理标题。
+   *  plan-549-2281：改按 agent_id + subagent_title 取，不再查子会话桶——并行执行已统一到子代理。 */
+  const subagentMeta = useChatStore((s) => s.subagentMeta);
+  /** 审批来源：只有「子代理发起」才需要标注（detail 的 is_subagent 由后端下发）。
+   *  标题优先取 detail.subagent_title（后端随审批下发），缺失时回退本会话 subagentMeta 的名称；
+   *  两者都拿不到就只留 #编号——猜一个名字比不显示更容易误导用户。 */
   const pendingSource = useMemo(() => {
-    const sid = effectivePendingApproval?.fromOther;
-    if (sid == null) return null;
-    for (const list of Object.values(subsessionsByParent)) {
-      const hit = list.find((c) => c.id === sid);
-      if (hit?.title) return { subsessionId: sid, title: hit.title };
-    }
-    return { subsessionId: sid, title: `子会话 #${sid}` };
-  }, [effectivePendingApproval, subsessionsByParent]);
+    const detail = effectivePendingApproval?.detail;
+    if (!detail || detail.is_subagent !== true) return null;
+    const agentId = typeof detail.agent_id === "number" && detail.agent_id > 0 ? detail.agent_id : 0;
+    const title = String(detail.subagent_title ?? "") || (agentId > 0 ? subagentMeta[agentId]?.name ?? "" : "");
+    if (agentId === 0 && !title) return null;
+    return { kind: "subagent" as const, agentId, title };
+  }, [effectivePendingApproval, subagentMeta]);
 
   // 是否处于 AI 结构化提问阶段（直接替换输入框主体）
   const isQuestionMode = !isHome && effectivePendingApproval?.detail?.kind === "question";
@@ -1370,7 +1369,6 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           onFlush={(id) => void flushQueuedInput(id)}
           onRemove={(id) => updateQueuedInput(id, null)}
           onEdit={editQueued}
-          onClear={() => queuedInputs.forEach((q) => { if (!q.flushing) updateQueuedInput(q.id, null); })}
         />
       )}
 
@@ -1396,7 +1394,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           onAllowOnce={() => respondApproval(effectivePendingApproval!.approvalId, true)}
           onAlwaysAllow={(scope) =>
             respondApproval(effectivePendingApproval!.approvalId, true, true, undefined, scope)}
-          queuedCount={pendingSource ? Math.max(0, crossSessionPendingTotal - 1) : Math.max(0, approvalQueueLength - 1)}
+          queuedCount={Math.max(0, approvalQueueLength - 1)}
           source={pendingSource}
         />
       ) : (
@@ -1722,8 +1720,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           </div>
           {/* plan-20261009-ui U2：工具条重做——
               左：+（模式 / 目标 / 插件·技能·连接器）· 附件 · 执行模式胶囊 · 权限模式胶囊；
-              右：模型 · 思考深度 · 上下文圆环（会话）· 发送/停止/排队（同一按钮形变）。
-              已移除语音按钮（功能未实现）。 */}
+              右：上下文圆环（会话）· 模型与思考深度（plan-20261025-composer 合并为一枚无图标文字触发器）·
+              发送/停止/排队（同一按钮形变）。已移除语音按钮（功能未实现）。 */}
           <div className="composer-toolbar cc-toolbar" ref={setToolbarEl}>
             <div className="composer-tools-left cc-tools-left">
               <div className="cc-anchor">
@@ -1787,28 +1785,21 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               />
             </div>
             <div className="composer-right cc-tools-right">
-              <ModelPicker
-                models={models}
-                value={sessionModelId}
-                onChange={changeModel}
-                open={showModels}
-                onToggle={() => { const next = !showModels; closeFloats(); setShowModels(next); }}
-              />
-              {supportsReasoning && (
-                <EffortPicker
-                  open={showReasoning}
-                  onToggle={() => { const next = !showReasoning; closeFloats(); setShowReasoning(next); }}
-                  onClose={() => setShowReasoning(false)}
-                  efforts={activeModel?.reasoning_efforts ?? []}
-                  value={activeEffort}
-                  onChange={changeReasoning}
-                />
-              )}
               {!isHome && (
                 <div className="composer-usage">
                   <UsageRing pct={usagePct} usage={usage} compacting={isCompacting} />
                 </div>
               )}
+              <ModelEffortPicker
+                models={models}
+                value={sessionModelId}
+                onChange={changeModel}
+                open={showModels}
+                onToggle={() => { const next = !showModels; closeFloats(); setShowModels(next); }}
+                onClose={() => setShowModels(false)}
+                effort={activeEffort}
+                onEffortChange={changeReasoning}
+              />
               {/* plan-547 → plan-20261009-ui U2：发送 / 停止 / 排队为同一个按钮的三种形态（图标弹性形变，位置不跳）——
                   空闲：发送；执行中（含后台工作流 / 子代理）且输入为空：停止；主代理轮次运行中有输入：加入排队；仅后台执行时有输入：直接发送。 */}
               {(() => {

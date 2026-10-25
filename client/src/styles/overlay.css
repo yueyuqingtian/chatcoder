@@ -91,15 +91,15 @@
   background: var(--color-popover);
   color: var(--text-1);
   box-shadow: var(--shadow-pop);
-  translate: var(--pop-shift-x, 0px) 0;
+  translate: var(--pop-shift-x, 0px) var(--pop-shift-y, 0px);
   outline: none;
 }
 .ui-pop.pl-top-start { bottom: calc(100% + var(--pop-gap)); left: 0; transform-origin: 0% 100%; --pop-dy: 6px; }
 .ui-pop.pl-top-end { bottom: calc(100% + var(--pop-gap)); right: 0; transform-origin: 100% 100%; --pop-dy: 6px; }
-.ui-pop.pl-top-center { bottom: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) 0; transform-origin: 50% 100%; --pop-dy: 6px; }
+.ui-pop.pl-top-center { bottom: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) var(--pop-shift-y, 0px); transform-origin: 50% 100%; --pop-dy: 6px; }
 .ui-pop.pl-bottom-start { top: calc(100% + var(--pop-gap)); left: 0; transform-origin: 0% 0%; --pop-dy: -6px; }
 .ui-pop.pl-bottom-end { top: calc(100% + var(--pop-gap)); right: 0; transform-origin: 100% 0%; --pop-dy: -6px; }
-.ui-pop.pl-bottom-center { top: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) 0; transform-origin: 50% 0%; --pop-dy: -6px; }
+.ui-pop.pl-bottom-center { top: calc(100% + var(--pop-gap)); left: 50%; translate: calc(-50% + var(--pop-shift-x, 0px)) var(--pop-shift-y, 0px); transform-origin: 50% 0%; --pop-dy: -6px; }
 /* 侧向（二级浮层）：贴父浮层外侧，垂直位置由调用方 style.top/bottom 指定 */
 .ui-pop.pl-right-start { left: calc(100% + var(--pop-gap)); top: calc(-1 * var(--pop-pad) - 1px); transform-origin: 0% 0%; --pop-dy: 0px; }
 .ui-pop.pl-right-end { left: calc(100% + var(--pop-gap)); bottom: calc(-1 * var(--pop-pad) - 1px); transform-origin: 0% 100%; --pop-dy: 0px; }
@@ -373,36 +373,39 @@
 
 /* ── ⑦ 新建 / 编辑项目弹窗（plan-20261009-ui U1）─────────────── */
 .pd-root { display: flex; flex-direction: column; }
-.pd-name { display: flex; align-items: center; gap: var(--sp-4); padding: 8px 14px 8px 8px; }
+/* plan-20261025-shell（需求 3）：名称做成标准输入框（与 .ui-input 同边框 / 圆角 / 悬停 / 聚焦），
+   左侧内嵌 28px 图标预览块；此前是灰色分组卡里放一个无边框输入，看起来不像可编辑 */
+.pd-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 40px;
+  padding: 0 var(--ctl-px) 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--color-input);
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.pd-name:hover { border-color: var(--border-hover); }
+.pd-name:focus-within { border-color: var(--text-2); }
 .pd-name-preview { display: inline-flex; flex-shrink: 0; }
 .pd-name-preview .proj-ic.is-tile { transition: background var(--dur-3) var(--ease-standard); }
 .pd-name-preview .proj-ic svg { transition: transform var(--dur-spring) var(--spring-bouncy); }
 .pd-name-input {
   flex: 1;
   min-width: 0;
-  height: 40px;
+  height: 38px;
   border: none;
   outline: none;
   background: transparent;
   color: var(--text-1);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
 }
 .pd-name-input::placeholder { color: var(--text-3); font-weight: 400; }
-.pd-sec + .pd-sec { margin-top: 20px; }
+.pd-sec + .pd-sec { margin-top: 18px; }
 
-/* 源文件夹投放区（参考图1）：白色分组卡里套一块虚线投放区；拖入时整块变蓝、图标跳一下 */
-.pd-drop-frame {
-  padding: 8px;
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-card);
-  background: var(--surface-inset);
-  transition: background var(--dur-3) var(--ease-standard), border-color var(--dur-3) var(--ease-standard), box-shadow var(--dur-3) var(--ease-standard);
-}
-.pd-drop-frame.is-over {
-  border-color: color-mix(in oklab, var(--info) 55%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--info) 14%, transparent);
-}
+/* 源文件夹投放区：单层虚线框（浅灰底），图标与标题同一行、说明在下；拖入时整块变蓝 */
 .pd-drop {
   display: flex;
   flex-direction: column;
@@ -410,17 +413,18 @@
   justify-content: center;
   gap: 6px;
   width: 100%;
-  min-height: 124px;
+  min-height: 112px;
   padding: 18px 20px;
-  border: 1.5px dashed color-mix(in oklab, var(--text-1) 20%, transparent);
-  border-radius: var(--r-ctl);
-  background: transparent;
+  border: 1px dashed color-mix(in oklab, var(--text-1) 22%, transparent);
+  border-radius: var(--r-card);
+  background: color-mix(in oklab, var(--text-1) 2.5%, transparent);
   color: var(--text-2);
   font: inherit;
   text-align: center;
   cursor: pointer;
   transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
+.pd-drop-main { display: inline-flex; align-items: center; gap: 8px; }
 .pd-drop:hover:not(:disabled) { border-color: color-mix(in oklab, var(--text-1) 38%, transparent); color: var(--text-1); background: color-mix(in oklab, var(--text-1) 3%, transparent); }
 .pd-drop:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
 .pd-drop:disabled { cursor: progress; opacity: 0.85; }
@@ -432,10 +436,10 @@
 }
 .pd-drop-ic { display: inline-flex; color: var(--text-1); transition: transform var(--dur-spring) var(--spring-bouncy), color var(--dur-2) var(--ease-standard); }
 .pd-drop.is-over .pd-drop-ic { color: var(--info); }
-.pd-drop:hover:not(:disabled) .pd-drop-ic { transform: translateY(-2px); }
-.pd-drop.is-over .pd-drop-ic { transform: translateY(-4px) scale(1.14); }
+.pd-drop:hover:not(:disabled) .pd-drop-ic { transform: scale(1.08); }
+.pd-drop.is-over .pd-drop-ic { transform: scale(1.16); }
 .pd-drop.is-over svg.ic .ic-spin { transform: rotate(90deg); }
-.pd-drop-title { font-size: 14px; font-weight: 600; }
+.pd-drop-title { font-size: 13px; font-weight: 500; color: var(--text-1); }
 .pd-drop-sub { font-size: 12px; color: var(--text-3); }
 .pd-drop.is-over .pd-drop-sub { color: color-mix(in oklab, var(--info) 70%, var(--text-3)); }
 .pd-drop.is-invalid { border-color: var(--error); animation: mo-shake var(--dur-4) var(--ease-standard) 1; }
@@ -538,15 +542,14 @@
 .pd-cand:hover { background: var(--bg-hover); }
 .pd-cand-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* plan-20261025-shell（需求 3）：图标 / 颜色选择不再套灰色容器框，直接铺在弹窗白底上；
+   图标格未选中是中性灰线稿，悬停加深，选中项着项目色 + 浅色底 + 描边（不再满屏彩色）。 */
 .pd-icons {
   display: grid;
-  /* 固定 15 列 × 2 行（30 个图标恰好排满，参考图2的一行一组） */
+  /* 固定 15 列 × 2 行（30 个图标恰好排满） */
   grid-template-columns: repeat(15, minmax(0, 1fr));
   gap: 4px;
-  padding: 8px;
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-card);
-  background: var(--surface-inset);
+  margin: 0 -2px;
 }
 .pd-icon-cell {
   display: inline-flex;
@@ -557,30 +560,33 @@
   border: none;
   border-radius: var(--r-ctl);
   background: transparent;
+  color: var(--text-3);
   cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard), box-shadow var(--dur-2) var(--ease-standard);
+  transition: background var(--dur-2) var(--ease-standard), box-shadow var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
 .pd-icon-cell .proj-ic svg { transition: transform var(--dur-spring) var(--spring-bouncy); }
-.pd-icon-cell:hover { background: var(--bg-hover); }
-.pd-icon-cell:hover .proj-ic svg { transform: scale(1.14) rotate(-6deg); }
+.pd-icon-cell:hover { background: var(--bg-hover); color: var(--text-1); }
+.pd-icon-cell:hover .proj-ic svg { transform: scale(1.1); }
+.pd-icon-cell:focus-visible { outline: none; box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--text-1) 35%, transparent); }
 .pd-icon-cell.is-active {
-  background: color-mix(in oklab, var(--pick-c) 13%, transparent);
-  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--pick-c) 70%, transparent);
+  background: color-mix(in oklab, var(--pick-c) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--pick-c) 55%, transparent);
 }
 .pd-icon-cell.is-active .proj-ic .ph-duo { opacity: 0.32; }
+/* 单色线稿：取宿主文字色，不画底色层 */
+.proj-ic.is-mono { color: inherit; }
+.proj-ic.is-mono .ph-duo { opacity: 0 !important; }
 
 .pd-colors {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-card);
-  background: var(--surface-inset);
+  align-items: center;
+  gap: 12px;
+  padding: 2px 2px 4px;
 }
 .pd-color {
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: none;
   border-radius: var(--r-pill);
@@ -590,13 +596,14 @@
   transition: transform var(--dur-spring) var(--spring-bouncy), box-shadow var(--dur-2) var(--ease-standard);
 }
 .pd-color:hover { transform: scale(1.12); }
-.pd-color.is-active { box-shadow: 0 0 0 2px var(--surface-inset), 0 0 0 4px var(--swatch); transform: scale(1.04); }
+.pd-color:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--surface-dialog), 0 0 0 3.5px color-mix(in oklab, var(--text-1) 40%, transparent); }
+.pd-color.is-active { box-shadow: 0 0 0 2px var(--surface-dialog), 0 0 0 3.5px var(--swatch); }
 
-.pd-divider { height: 1px; margin: 22px 0 16px; background: var(--surface-inset-border); }
+.pd-divider { height: 1px; margin: 20px 0 14px; background: var(--border-light, var(--border)); }
 .pd-index { display: flex; align-items: center; gap: var(--sp-6); }
 .pd-index-text { flex: 1; min-width: 0; }
-.pd-index-title { font-size: 13.5px; font-weight: 600; color: var(--text-1); }
-.pd-index-desc { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--text-3); }
+.pd-index-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.pd-index-desc { margin-top: 3px; font-size: 12px; line-height: 1.6; color: var(--text-3); }
 
 /* ── ⑧ 分档滑块（ui/StepSlider；思考深度等「几档选一档」的场景）──────────
  * 拇指拖动期间 1:1 跟手（不加 left 过渡）；松手 / 点击 / 键盘切换时走弹簧过渡。
@@ -715,6 +722,8 @@
   width: max-content; max-width: min(520px, calc(100vw - 32px));
   transform: translateX(-50%); pointer-events: none;
 }
+/* plan-20261025-shell（需求 9）：字号跟随外观设置的界面字号（--ui-base-fs，缺省 14px 时为 13px），
+   行首改为实心语气徽标，与首行文字垂直居中 */
 .toast {
   pointer-events: auto;
   display: flex; align-items: flex-start; gap: 10px;
@@ -725,11 +734,11 @@
   border: 1px solid var(--border);
   box-shadow: var(--shadow-lg);
   color: var(--text-1);
-  font-size: 13px; line-height: 20px;
+  font-size: calc(var(--ui-base-fs, 14px) - 1px); line-height: 1.55;
   animation: toast-enter var(--dur-4) var(--ease-emphasized-decel);
 }
 .toast.toast-out { animation: toast-leave var(--dur-normal) var(--ease-emphasized-accel) forwards; }
-.toast-icon { flex-shrink: 0; display: inline-flex; height: 20px; align-items: center; }
+.toast-icon { flex-shrink: 0; display: inline-flex; height: 1.55em; align-items: center; }
 .toast-info .toast-icon { color: var(--text-2); }
 .toast-success .toast-icon { color: var(--success); }
 .toast-warning .toast-icon { color: var(--warning); }

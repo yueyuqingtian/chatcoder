@@ -10,6 +10,25 @@
 /** 时间线里承载「子会话提问」的伪工具名（与 bg_command_done 同属消息流伪工具，只用于展示）。 */
 export const SUBSESSION_QUESTION_TOOL = "subsession_question";
 
+// ── plan-549-2281：子代理提问 / 汇报 ──────────────────────────────
+// 子会话下线后，提问与汇报全部来自子代理。它们与子会话那套共用同一行版式，
+// 但来源是「子代理 #N「任务标题」」，动作是「打开执行过程」（右面板）而不是「前往子会话」。
+/** 子代理提问的伪工具名 */
+export const SUBAGENT_QUESTION_TOOL = "subagent_question";
+/** 子代理进度上报的伪工具名 */
+export const SUBAGENT_REPORT_TOOL = "subagent_report";
+/** 子代理完成通知的伪工具名 */
+export const SUBAGENT_COMPLETION_TOOL = "subagent_completion";
+/** 三类子代理通知共用一行渲染 */
+export const SUBAGENT_NOTICE_TOOLS: ReadonlySet<string> = new Set([
+  SUBAGENT_QUESTION_TOOL, SUBAGENT_REPORT_TOOL, SUBAGENT_COMPLETION_TOOL,
+]);
+
+/** 子代理头部标记：「【子代理提问 subagent#12「标题」】问题」；完成通知是
+ *  「【子代理已完成/失败/已取消 subagent#12「标题」】…」（plan-549-2281 补：后端
+ *  format_completion_row 落库成行）。标题可缺省，编号必须有。 */
+const SUBAGENT_HEAD_RE = /^\s*【子代理(提问|进度上报|已完成|失败|已取消)\s*subagent#(\d+)(?:「([\s\S]*?)」)?】\s*/;
+
 /** 头部标记：可选的「[子会话汇报]」前缀 + 「标题」+ 提问（question_id=…）：。标题用惰性匹配，靠后面的固定锚点收尾。 */
 const HEAD_RE = /^\s*(?:\[子会话汇报\]\s*)?(?:「([\s\S]*?)」\s*)?提问\s*（question_id=[^）]*）\s*[：:]/;
 
@@ -110,4 +129,52 @@ export function parseSubsessionNotice(raw: string): ParsedSubsessionNotice {
     }
   }
   return { title: (head[1] ?? "").trim(), kind, status, body: body || text };
+}
+
+// ── plan-549-2281：子代理提问 / 汇报 / 完成通知的解析 ──────────────────────
+// 后端格式（见 server/app/orchestration/subagent_comm.publish_question、
+// engine._on_agent_report 与 subagent.format_completion_row）：
+//   【子代理提问 subagent#12「修 bug」】要改 A 还是 B？
+//   （答复：send_to_subagent 12）
+//   【子代理进度上报 subagent#12】…
+//   【子代理已完成 subagent#12「修 bug」】结论首段
+// 尾部「（答复：…）」是给主代理的工具调用说明，不属于提问内容，要截掉。
+export interface ParsedSubagentNotice {
+  /** 来源子代理 id（解析不出为 null） */
+  agentId: number | null;
+  /** 提问 / 进度上报 / 完成通知 */
+  kind: "question" | "report" | "completion";
+  /** 派发时的任务标题（解析不出为空串） */
+  title: string;
+  /** 结束状态（已完成 / 失败 / 已取消）；提问与进度上报为空串，语义与 ParsedSubsessionNotice.status 对齐。
+   *  plan-560-2311 E2：此前头部捕获组被丢弃，渲染层拿不到状态，失败 / 取消的行与成功行长得一样。 */
+  status: string;
+  /** 正文（已去掉头部标记与尾部答复说明；头部解析不出时为原文） */
+  body: string;
+}
+
+/** 尾部答复说明行：本行及其后全部丢弃。 */
+const SUBAGENT_REPLY_HINT_RE = /^\s*（?答复[：:]/;
+
+export function parseSubagentNotice(raw: string): ParsedSubagentNotice {
+  const text = (raw ?? "").trim();
+  const head = SUBAGENT_HEAD_RE.exec(text);
+  if (!head) {
+    // 兜底：解析不出头部时整段当正文，绝不丢内容
+    return { agentId: null, kind: "report", title: "", status: "", body: text };
+  }
+  const kind = head[1] === "提问" ? "question"
+    : head[1] === "进度上报" ? "report" : "completion";
+  const agentId = Number(head[2]) || null;
+  const title = (head[3] ?? "").trim();
+  // 状态词只对完成通知有意义（提问 / 进度上报的「提问」「进度上报」本身就是 kind，
+  // 拿到动词位置上会变成「子代理提问」这种读不通的句子）。
+  const status = kind === "completion" ? head[1].trim() : "";
+  const lines = text.slice(head[0].length).split(/\r?\n/);
+  const hint = lines.findIndex((l) => SUBAGENT_REPLY_HINT_RE.test(l));
+  if (hint >= 0) lines.length = hint;
+  // plan-560-2311 E2：头部命中却无正文时返回空串，**绝不**回退整段原文——
+  // 回退会把「【子代理已取消 subagent#12「修 bug」】」这种内部协议头直接摆给用户看。
+  // 界面层对空正文给出用户可读占位（见 SubsessionQuestionRow）。
+  return { agentId, kind, title, status, body: lines.join("\n").trim() };
 }

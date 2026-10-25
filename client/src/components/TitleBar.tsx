@@ -1,58 +1,52 @@
-/** 自定义标题栏（v7 对齐 ZCode）：
- * 左：折叠侧栏钮
+/** 自定义标题栏（v7 对齐 ZCode；plan-20261025-shell 收进中间卡片）：
+ * 左：折叠侧栏钮（全局固定层 WindowNavCluster 悬浮在此）
  * 中：会话标题 + 项目 chip + 「...」会话操作菜单
- * 右：打开工作区(黄文件夹) + 任务卡开关 + 右面板开关 + 窗口控制
+ * 右：打开工作区(黄文件夹) + 终端；右面板开关与窗口控制已移到全局固定层 WindowControls，
+ *     这里只按 shell.css 的 --wc-w 给它留出位置
  */
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useRef, useState } from "react";
 import { api } from "../api/client";
 import { useChatStore, useCurrentSession } from "../store/chat";
 import { usePanelStore } from "../store/panel";
-import { sessionKey, useBrowserStore } from "../store/browser";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { Input, Tooltip } from "./ui";
+import { Floating, Input, Tooltip } from "./ui";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
 import { IconGitBranch as IconGitBranchTb } from "./icons";
 import {
-  IconMinus, IconSquare, IconX, IconFolder,
+  IconFolder,
   IconGitBranch, IconTerminal,
-  IconMoreHorizontal, IconPanelRight,
+  IconMoreHorizontal,
   IconChevronDown, IconCheck,
   IconBrandExplorer, IconBrandVSCode, IconBrandIdea, IconBrandWindowsTerminal,
   IconPencil, IconArchive, IconTrash,
 } from "./icons";
 
-/** plan-31-152 S5-2：窗口按钮级 no-drag 加固。
- *  用户反馈"只有缩放按钮点击无反应，最小化/关闭正常"——同容器按钮行为不一致，
- *  说明点击在该按钮位置被系统 caption 命中区吞掉（而非 CSS 继承链问题）。
- *  这里给三个按钮各自挂 inline app-region，不依赖任何选择器/继承。 */
-const NO_DRAG = { WebkitAppRegion: "no-drag" } as CSSProperties;
-
 interface TitleBarProps {
   leftCollapsed: boolean;
-  rightCollapsed: boolean;
   /** 设置页态——不展示项目/会话/外部打开/命令行/侧边栏等信息 */
   settings?: boolean;
   /** plan-41-233：页面态（拓展/定时任务/设置等 nav 页）——不展示会话标题与右侧图标组；
    *  左侧 logo/折叠/前进后退属导航控件，**始终保留**（用户反馈：这组不能被页面态隐藏）。 */
   page?: boolean;
-  /** 兼容插件槽位契约：左侧导航控件已提到 WindowNavCluster，标题栏不再使用这两个回调 */
+  /** plan-20261025-shell：当前页面有没有右面板（新建任务页没有）——没有时不提供打开终端标签的入口 */
+  panelAvailable?: boolean;
+  /** 兼容插件槽位契约：左侧导航控件已提到 WindowNavCluster、右面板开关已提到 WindowControls，
+   *  标题栏不再使用这些回调与状态 */
+  rightCollapsed?: boolean;
   onToggleLeft?: () => void;
-  onToggleRight: () => void;
+  onToggleRight?: () => void;
   onSessionFocus?: () => void;
 }
 
-export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page = false, onToggleRight }: TitleBarProps) {
+export function TitleBar({ leftCollapsed, settings = false, page = false, panelAvailable = true }: TitleBarProps) {
   const { t } = useI18n();
   // plan-41-233：裸态 = 设置页 ∪ 页面态——仅约束「会话标题 / 项目 chip / 右侧图标组」；
   // 左侧 logo/折叠/前进后退不在其内（用户要求保留）。
   const bare = settings || page;
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  // plan-20261015-browser-agent：面板收起时 AI 仍可能在后台操作浏览器——开关上给出状态点
-  const browserAgentBusy = useBrowserStore((s) => (s.sessions[sessionKey(currentSessionId)]?.agent.phase ?? "idle") === "working");
   const projects = useChatStore((s) => s.projects);
   const currentProjectId = useChatStore((s) => s.currentProjectId);
-  const loadBootstrap = useChatStore((s) => s.loadBootstrap);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   // plan-156-620：子会话不在主会话列表里，统一走 findSession（否则标题栏显示「新任务」）
@@ -70,19 +64,11 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
     try { return localStorage.getItem("chatcoder.preferred_open_target") || "explorer"; }
     catch { return "explorer"; }
   });
-  const menuRef = useRef<HTMLDivElement>(null);
-  const folderMenuRef = useRef<HTMLDivElement>(null);
-
-
-  useEffect(() => {
-    if (!menuOpen && !folderMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (menuOpen && !menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
-      if (folderMenuOpen && !folderMenuRef.current?.contains(e.target as Node)) setFolderMenuOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [menuOpen, folderMenuOpen]);
+  /** plan-20261025-popclip：两个菜单改走 ui/Floating（挂到 body + 视口碰撞）——标题栏在中间卡片里，
+   *  卡片的 overflow:hidden 会把越过卡片右缘的菜单裁掉（窄窗口下会话「⋯」菜单只剩半截）。
+   *  点外部 / Esc 关闭由 Floating 统一处理，触发按钮自身不算外部。 */
+  const moreBtnRef = useRef<HTMLButtonElement>(null);
+  const folderBtnRef = useRef<HTMLButtonElement>(null);
 
   const projectName = project?.path
     ? project.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() || project.path
@@ -224,11 +210,13 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
           </>
         )}
         {session && (
-          <div className="titlebar-more" ref={menuRef}>
+          <div className="titlebar-more">
             <button
+              ref={moreBtnRef}
               className="titlebar-btn titlebar-more-btn"
               title={t("titlebar.session_actions")}
-              onMouseDown={(e) => e.stopPropagation()}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
               onClick={(e) => {
                 e.stopPropagation();
                 setMenuOpen((v) => !v);
@@ -237,12 +225,18 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
             >
               <IconMoreHorizontal size={16} />
             </button>
-            {menuOpen && (
-              <div
-                className="context-menu titlebar-menu"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => setMenuOpen(false)}
-              >
+            <Floating
+              open={menuOpen}
+              anchorRef={moreBtnRef}
+              onClose={() => setMenuOpen(false)}
+              side="bottom"
+              align="start"
+              gap={4}
+              className="titlebar-pop"
+              role="menu"
+              aria-label={t("titlebar.session_actions")}
+            >
+              <div onClick={() => setMenuOpen(false)}>
                 <div className="context-menu-item" onClick={() => setRenaming(session.title || "")}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
                 {/* 归档限制：正在执行任务的会话不允许归档（与侧栏一致）——
                     执行中归档会让运行中的 turn 与它所属的会话被拆散。
@@ -253,13 +247,14 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
                   onClick={() => {
                     setMenuOpen(false);
                     if (session.has_running) return;
-                    void api.updateSession(session.id, { status: "archived" }).then(() => loadBootstrap());
+                    // plan-20261025-shell（需求 8）：走统一归档动作——归档当前会话后自动回退到上一个会话或新建任务页
+                    void useChatStore.getState().archiveSession(session.id);
                   }}
                 ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
                 <div className="context-menu-divider" />
                 <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
               </div>
-            )}
+            </Floating>
           </div>
         )}
           </>
@@ -272,10 +267,12 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
         {/* 打开工作区下拉菜单 */}
         {!bare && (
         <>
-        <div className="titlebar-folder-dropdown-wrap" ref={folderMenuRef}>
+        <div className="titlebar-folder-dropdown-wrap">
           <button
+            ref={folderBtnRef}
             className="titlebar-btn titlebar-folder-combo"
-            onMouseDown={(e) => e.stopPropagation()}
+            aria-haspopup="menu"
+            aria-expanded={folderMenuOpen}
             onClick={(e) => {
               e.stopPropagation();
               setFolderMenuOpen((v) => !v);
@@ -287,12 +284,18 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
             {renderOpenTargetIcon(openTarget, 15)}
             <IconChevronDown size={10} className="titlebar-folder-caret" />
           </button>
-          {folderMenuOpen && (
-            <div
-              className="context-menu titlebar-folder-menu"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={() => setFolderMenuOpen(false)}
-            >
+          <Floating
+            open={folderMenuOpen}
+            anchorRef={folderBtnRef}
+            onClose={() => setFolderMenuOpen(false)}
+            side="bottom"
+            align="end"
+            gap={4}
+            className="titlebar-pop is-folder"
+            role="menu"
+            aria-label={t("titlebar.open_external_tip")}
+          >
+            <div onClick={() => setFolderMenuOpen(false)}>
               <div className={`context-menu-item titlebar-folder-menu-item${openTarget === "explorer" ? " active" : ""}`} onClick={() => handleOpenInApp("explorer")}>
                 <div className="titlebar-folder-menu-item-left">
                   <IconBrandExplorer size={15} />
@@ -338,58 +341,19 @@ export function TitleBar({ leftCollapsed, rightCollapsed, settings = false, page
                 </div>
               )}
             </div>
-          )}
+          </Floating>
         </div>
-        {/* 终端入口移至顶栏右上 */}
-        <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title={t("titlebar.terminal_btn")}>
-          <IconTerminal size={16} />
-        </button>
+        {/* 终端入口移至顶栏右上；新建任务页没有右面板，入口一并隐藏（plan-20261025-shell 需求 7） */}
+        {panelAvailable && (
+          <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title={t("titlebar.terminal_btn")}>
+            <IconTerminal size={16} />
+          </button>
+        )}
         </>
         )}
-        {!bare && (
-        <button
-          className={`app-pane-toggle titlebar-btn${rightCollapsed ? " collapsed" : ""}`}
-          onClick={onToggleRight}
-          title={rightCollapsed && browserAgentBusy ? "AI 正在操作浏览器，展开面板查看" : rightCollapsed ? t("titlebar.panel_expand") : t("titlebar.panel_collapse")}
-        >
-          {/* plan-234-1171 R6: 传 open 让图标随右面板开合变形态 */}
-          <IconPanelRight size={16} open={!rightCollapsed} />
-          {rightCollapsed && browserAgentBusy && <span className="tb-ai-dot" aria-hidden />}
-        </button>
-        )}
-        <span className="titlebar-sep" />
-        {/* plan-31-152 S5-2（用户反馈"只有缩放按钮点击无反应，最小化/关闭正常"）：
-            三个按钮结构相同，唯独缩放失效 ⇒ 排除 drag 区吞点击（同容器会全吞），
-            问题在该按钮自身：要么被系统 caption 命中区吞掉，要么 maximize() 未生效。
-            双重加固：① 按钮级 inline no-drag（不依赖 CSS 继承链）；
-            ② 点击日志便于核对 IPC 是否到达（主进程 console-message 会写进 main.log）。 */}
-        <button
-          className="titlebar-btn"
-          style={NO_DRAG}
-          onClick={() => { console.log("[chatcoder] titlebar: minimize clicked"); winApi?.minimizeWindow?.(); }}
-          title={t("titlebar.min")}
-          disabled={!winApi}
-        >
-          <IconMinus size={14} />
-        </button>
-        <button
-          className="titlebar-btn"
-          style={NO_DRAG}
-          onClick={() => { console.log("[chatcoder] titlebar: maximize toggle clicked"); winApi?.toggleMaximize?.(); }}
-          title={t("titlebar.max")}
-          disabled={!winApi}
-        >
-          <IconSquare size={14} />
-        </button>
-        <button
-          className="titlebar-btn titlebar-close"
-          style={NO_DRAG}
-          onClick={() => { console.log("[chatcoder] titlebar: close clicked"); winApi?.closeWindow?.(); }}
-          title={t("titlebar.close")}
-          disabled={!winApi}
-        >
-          <IconX size={14} />
-        </button>
+        {/* plan-20261025-shell：右面板开关与「最小化 / 最大化 / 关闭」已移到全局固定层 WindowControls——
+            它钉在窗口右上角，右面板收起时压在本标题栏右端（这里由 shell.css 预留 --wc-w），
+            展开后压在右面板标签栏右端，面板开合时按钮位置不变。 */}
       </div>
 
       <ConfirmDialog

@@ -1,9 +1,13 @@
-/** 后续任务建议卡片（plan-156-619 S10）。
+/** 后续任务建议卡片（plan-156-619 S10 · plan-549-2281 改为主会话内执行）。
  *
  * 展示位置：消息流底部（`MessageFlow` 的 trailingNode），只在最新一轮之后出现。
  * 两个动作：
- *   · 在新子会话执行 —— 后端建子会话并下发建议步骤，成功后左栏出现该子会话；
+ *   · 开始执行 —— 后端在**当前会话**里开新一轮执行建议的步骤，卡片消失、消息流继续；
  *   · 取消 —— 后端置 dismissed，本卡片消失且刷新/重启都不会再出现。
+ *
+ * 为什么不再新建子会话（plan-549-2281）：并行执行统一收敛到子代理，子会话的创建入口下线；
+ * 建议卡是「用户点一下就开工」的轻量入口，直接在主会话续跑最直观——不必再跳去另一个会话
+ * 才知道任务有没有开始。
  *
  * 视觉（项目规则）：
  *  · 纯色底 + 1px 边框 + `--r-lg`，不使用彩色渐变或毛玻璃（浮层不透明原则）；
@@ -14,15 +18,13 @@ import { memo, useState } from "react";
 import { useChatStore } from "../../store/chat";
 import { IconChevronDown, IconCheck, IconCpu } from "../icons";
 import { Button, Collapse } from "../ui";
-import { api, ApiError } from "../../api/client";
 
 const MAX_VISIBLE_STEPS = 2;
 
 export const SuggestionCard = memo(function SuggestionCard() {
   const suggestion = useChatStore((s) => s.pendingSuggestion);
   const dismissSuggestion = useChatStore((s) => s.dismissSuggestion);
-  const loadSubsessionIndex = useChatStore((s) => s.loadSubsessionIndex);
-  const switchSession = useChatStore((s) => s.switchSession);
+  const acceptSuggestion = useChatStore((s) => s.acceptSuggestion);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
 
   const [expanded, setExpanded] = useState(false);
@@ -43,30 +45,28 @@ export const SuggestionCard = memo(function SuggestionCard() {
     </li>
   );
 
-  /** 接受建议：建子会话 → 清卡片 → 刷新左栏子会话桶 → 切到新子会话。 */
+  /** 接受建议：交给 store 动作统一收尾（运行态、左栏 has_running、心跳、刷新）。
+   *  plan-560-2311 E4：卡片等刷新完成后**才**清自己这张——先清会让组件卸载，
+   * 之后的刷新异常写不进任何可见位置（用户只看到卡片消失、消息没变）。 */
   const onAccept = async () => {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.acceptSuggestion(suggestion.id);
-      // 先清卡片：后端已置 accepted，本地保留会与「已消费」状态不一致（只清自己这张）
-      if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) useChatStore.setState({ pendingSuggestion: null });
-      if (res?.subsession_id != null) {
-        // plan-156-620：后端返回的 session_id 是根主会话；子会话桶整体重建，
-        // 无论建议来自主会话还是子会话，新子会话都出现在左栏同一父会话下方
-        await loadSubsessionIndex();
-        await switchSession(res.subsession_id);
-      }
-    } catch (e) {
-      // 后端已是终态（已处理过）：卡片是过期残留，直接清掉
-      if (e instanceof ApiError && /已处理过|不存在/.test(e.message)) {
-        // 只清自己这张：期间若已到达新建议，不能一并抹掉
-        if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) useChatStore.setState({ pendingSuggestion: null });
+      const res = await acceptSuggestion(suggestion.id);
+      // 后端已是终态：卡片是过期残留，直接清掉（只清自己这张，期间到达的新建议不能一并抹掉）
+      if (res.stale) {
+        if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) {
+          useChatStore.setState({ pendingSuggestion: null });
+        }
         return;
       }
-      // 失败保留卡片可重试——后端 accept 是「先建会话、成功后才置状态」，
-      // 因此这里失败意味着建议仍是 pending，重试安全。
-      setError("创建子会话失败：" + String(e));
+      if (res.error) setError(res.error);
+      if (res.ok) {
+        // 刷新已完成（或仅刷新失败但这一轮确实开始了）：此时再移除卡片
+        if (useChatStore.getState().pendingSuggestion?.id === suggestion.id) {
+          useChatStore.setState({ pendingSuggestion: null });
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -120,7 +120,7 @@ export const SuggestionCard = memo(function SuggestionCard() {
           onClick={() => void onAccept()}
         >
           <IconCpu size={12} />
-          <span>在新子会话执行</span>
+          <span>开始执行</span>
         </Button>
         <Button
           variant="ghost"
@@ -131,7 +131,7 @@ export const SuggestionCard = memo(function SuggestionCard() {
           <IconCheck size={12} />
           <span>取消</span>
         </Button>
-        {busy && <span className="sg-busy">正在创建子会话…</span>}
+        {busy && <span className="sg-busy">正在开始执行…</span>}
       </div>
     </div>
   );

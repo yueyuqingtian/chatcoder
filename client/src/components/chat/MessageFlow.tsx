@@ -38,6 +38,31 @@ import { StickyBottom } from "./stickyBottom";
  *  运动结束由收敛序列（order 20）立即提交最终 rect 保证精确。 */
 const MOTION_RECT_THROTTLE_MS = 120;
 
+/** plan-20261024-jumpfix：跳转后 scrollspy 焦点锁定的兜底时长（毫秒）。
+ *  覆盖平滑滚动 + 落点校正的收敛窗口即可，到期即交还控制，避免锁滞留。 */
+const JUMP_LOCK_TTL_MS = 1600;
+
+/** plan-20261024-jumpfix：跳转收敛后的落点守护时长（毫秒）。
+ *  期间目标项被贴底补滞 / 虚拟化测量补偿 / 内容增长推走时立即拉回；
+ *  用户任何滚动输入都会提前结束守护。 */
+const JUMP_HOLD_MS = 700;
+
+/* plan-549-2281（第13项）：定位的丝滑缓动参数。
+ *
+ * 为什么自己用 rAF 插值，而不是给 scrollToIndex 传 behavior:"smooth"：
+ * 浏览器平滑滚动会「接管」scrollTop 的写入权限，校正循环（jumpToIndex 里的 step）
+ * 写进去的值会被动画覆盖，落点最终停在估算位置——这正是 plan-20261024-jumpfix
+ * 记录的「点倒数第二个却落到倒数第一条用户消息」的根因，当时的结论就是「不用 smooth」。
+ * 现在改成自己在动画期间写 scrollTop、动画结束才启动校正：两者不重叠，既拿到过渡动画，
+ * 又保住落点精度。 */
+const JUMP_ANIM_MIN_PX = 32;      // 距离小于此值直接瞬时到位（一帧的事，动画反而是噪音）
+const JUMP_ANIM_MAX_DIST_PX = 2400; // 超过约两屏不缓动：途中要跨越大量未测量项，长动画只会更晃
+const JUMP_ANIM_BASE_MS = 180;
+const JUMP_ANIM_MAX_MS = 520;
+
+/** 缓动曲线：ease-out-cubic（快速起步、末端收敛，长距离定位不至于拖沓）。 */
+const jumpEase = (t: number): number => 1 - Math.pow(1 - t, 3);
+
 /** plan-20261021-scroll-comp：条目尺寸变化后要不要补偿 scrollTop（上滑经过用户消息处回弹 / 跳变的根治）。
  *
  *  现象：向上滚动时，视口上方某个历史轮次（刚被挂载进 overscan 的那条）的高度在挂载后继续变化——
@@ -286,6 +311,17 @@ function MessageFlowCore({
   /** 问题12: scrollspy——当前视口焦点 entry 下标，用于 JumpDots 自动聚焦对应小横条 */
   const [activeEntryIndex, setActiveEntryIndex] = useState(0);
 
+  /** plan-20261024-jumpfix：跳转落点校正 + scrollspy 焦点锁定的收敛状态。
+   *  - spyLockRef：锁定的目标 entry 下标（null=未锁定）；
+   *  - jumpTokenRef：跳转代号，重入（连点刻度 / 搜索连跳）时旧校正循环立即作废；
+   *  - jumpRafRef / jumpTtlRef：校正循环帧句柄与解锁兜底定时器；
+   *  - jumpCleanupRef：本轮跳转的收尾函数（取消帧、定时器与用户接管监听）。 */
+  const spyLockRef = useRef<number | null>(null);
+  const jumpTokenRef = useRef(0);
+  const jumpRafRef = useRef(0);
+  const jumpTtlRef = useRef(0);
+  const jumpCleanupRef = useRef<(() => void) | null>(null);
+
   const hasStreaming = Boolean(running && streamingNode);
   const hasTrailing = Boolean(trailingNode);
   const totalCount = entries.length + (hasStreaming ? 1 : 0) + (hasTrailing ? 1 : 0);
@@ -481,6 +517,8 @@ function MessageFlowCore({
 
   /** 问题12: scrollspy——取视口上 1/3 焦点线所在虚拟项，映射为 entry 下标传给 JumpDots */
   const updateActiveEntry = useCallback((el: HTMLDivElement) => {
+    // plan-20261024-jumpfix：跳转收敛期间焦点锁定在目标项，不被焦点线重算覆盖
+    if (spyLockRef.current != null) return;
     const items = virtualizer.getVirtualItems();
     if (items.length === 0) return;
     const focusY = el.scrollTop + el.clientHeight * 0.33;
@@ -527,6 +565,8 @@ function MessageFlowCore({
   useEffect(() => () => {
     window.clearTimeout(scrollIdleTimerRef.current);
     parentRef.current?.classList.remove("is-scrolling", "is-scrollbar-hover");
+    // plan-20261024-jumpfix：卸载时收尾跳转校正（取消帧、定时器与用户接管监听）
+    jumpCleanupRef.current?.();
   }, []);
 
   /** v45: 滚动条显现的指针热区 = 消息流右侧的滚动条条带（宽 6px + 少量容差）。
@@ -949,12 +989,145 @@ function MessageFlowCore({
   }, [search]);
 
   /** plan-20261020-pts：主动跳到某条消息（搜索命中 / JumpDots / 任务卡定位）是用户意图，
-   *  先解除跟随——否则下一次内容增长会把视图拉回底部，跳转白做。 */
+   *  先解除跟随——否则下一次内容增长会把视图拉回底部，跳转白做。
+   *
+   *  plan-20261024-jumpfix：落点做像素级校正。scrollToIndex 的目标偏移来自尺寸缓存，
+   *  目标之前未测量项按 estimateSize 累计，长会话里估算误差可达数百像素，会把落点向下
+   *  推过目标 turn（现象：点倒数第二个刻度，视图落到倒数第一条用户消息处）。
+   *  因此平滑滚动停稳后直接量目标项真实 DOM 位置收敛（与宽度还原的 correctAnchor 同思路）；
+   *  收敛期间把 scrollspy 焦点锁定到目标项，用户一滚动即交还。 */
   const jumpToIndex = useCallback((index: number, align: "start" | "center") => {
     if (index < 0) return;
     sticky.release();
-    virtualizer.scrollToIndex(index, { align, behavior: "smooth" });
-  }, [sticky, virtualizer]);
+
+    // 上一轮跳转收尾（重入：连点两个刻度 / 搜索连跳）——动画与校正一并在 cleanup 里取消
+    jumpCleanupRef.current?.();
+    const cleanup = () => {
+      spyLockRef.current = null;
+      jumpTokenRef.current += 1; // 仍在排队的动画 / 校正帧按 token 失效
+      if (jumpRafRef.current) {
+        cancelAnimationFrame(jumpRafRef.current);
+        jumpRafRef.current = 0;
+      }
+      window.clearTimeout(jumpTtlRef.current);
+      jumpTtlRef.current = 0;
+      window.removeEventListener("wheel", cleanup, true);
+      window.removeEventListener("pointerdown", cleanup, true);
+      window.removeEventListener("touchstart", cleanup, true);
+      window.removeEventListener("keydown", cleanup, true);
+      if (jumpCleanupRef.current === cleanup) jumpCleanupRef.current = null;
+      // 锁定期间 scrollspy 不重算：解锁后刷新一次，避免高亮停在旧值
+      scheduleSpy();
+    };
+    jumpCleanupRef.current = cleanup;
+    // 用户接管判定：捕获阶段监听，任何滚轮/按下/触摸/按键都视为接管，立即交还控制
+    window.addEventListener("wheel", cleanup, true);
+    window.addEventListener("pointerdown", cleanup, true);
+    window.addEventListener("touchstart", cleanup, true);
+    window.addEventListener("keydown", cleanup, true);
+    jumpTtlRef.current = window.setTimeout(cleanup, JUMP_LOCK_TTL_MS);
+    spyLockRef.current = index;
+    setActiveEntryIndex(index);
+
+    const token = jumpTokenRef.current;
+    /** 落点守护截止时间：收敛后到此时间前持续盯住目标位置（防贴底/测量补偿推走） */
+    const holdUntil = performance.now() + JUMP_HOLD_MS;
+    let lastTop = -1;
+    let stableFrames = 0;
+    let fixRounds = 0;
+    let mountRetries = 0;
+    let elapsed = 0;
+    /** 落点校正：等滚动停稳后按目标项真实 DOM 位置收敛（plan-20261024-jumpfix 原逻辑）。
+     *  plan-549-2281（第13项）：它只在缓动动画**结束之后**才启动——两者都要写 scrollTop，
+     *  同时写会互相覆盖，落点就又回到「估算位置」了。 */
+    const correct = () => {
+      if (token !== jumpTokenRef.current) return; // 新一轮跳转已接管
+      if (spyLockRef.current === null || sticky.isFollowing()) { cleanup(); return; } // 用户接管 / 已恢复跟随
+      const el = parentRef.current;
+      if (!el) return;
+      const node = el.querySelector<HTMLElement>(`[data-index="${index}"]`);
+      if (!(node instanceof HTMLElement)) {
+        // 目标项未挂载（还在虚拟窗外）：按缓存几何拉进视口，下帧再量（同 correctAnchor 的重试）
+        if (mountRetries >= 4) { cleanup(); return; }
+        mountRetries++;
+        virtualizer.scrollToIndex(index, { align, behavior: "auto" });
+        lastTop = -1;
+        stableFrames = 0;
+        elapsed = 0;
+        jumpRafRef.current = requestAnimationFrame(correct);
+        return;
+      }
+      elapsed++;
+      if (el.scrollTop === lastTop) stableFrames++;
+      else { stableFrames = 0; lastTop = el.scrollTop; }
+      // 滚动还没停稳（测量补偿正在写 / 动画尾部）时先别校正：等连续两帧不变；
+      // 约 750ms 仍未稳则直接校正兜底（写进去被覆盖会在下一轮再收敛）
+      if (stableFrames < 2 && elapsed <= 45) {
+        jumpRafRef.current = requestAnimationFrame(correct);
+        return;
+      }
+      const cur = node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+      const want = align === "start" ? 0 : Math.max(0, (el.clientHeight - node.offsetHeight) / 2);
+      const delta = cur - want;
+      if (Math.abs(delta) <= 2) {
+        // 已对齐：守护窗口内继续盯（不写，只观察），到期交还控制
+        if (performance.now() < holdUntil) {
+          lastTop = el.scrollTop;
+          jumpRafRef.current = requestAnimationFrame(correct);
+          return;
+        }
+        cleanup();
+        return;
+      }
+      // 守护期内的反复推走也要拉回，但给个上限避免与外部机制无休止互搏
+      if (fixRounds >= 12) { cleanup(); return; }
+      fixRounds++;
+      const before = el.scrollTop;
+      el.scrollTop = before + delta;
+      // 写不进去 = 被 maxScroll / 顶部钳制：目标已尽可能对齐（钳制语义下完整可见），接受现状
+      if (el.scrollTop === before) { cleanup(); return; }
+      lastTop = -1;
+      stableFrames = 0;
+      jumpRafRef.current = requestAnimationFrame(correct);
+    };
+
+    /* plan-549-2281（第13项）：先缓动、再校正。
+     * 目标偏移取自虚拟器尺寸缓存（getOffsetForIndex），只用来决定「往哪滚、滚多远」——
+     * 它本来就不精确，精确落点交给动画结束后的 correct 收敛。
+     * 近距离（一次微调）与超远距离（途中跨越大量未测量项，长动画只会更晃）直接瞬时到位，
+     * 保持改动前的干脆手感。 */
+    const el = parentRef.current;
+    const target = virtualizer.getOffsetForIndex(index, align);
+    const from = el ? el.scrollTop : 0;
+    const to = target ? target[0] : null;
+    const dist = to == null ? 0 : Math.abs(to - from);
+    if (!el || to == null || dist < JUMP_ANIM_MIN_PX || dist > JUMP_ANIM_MAX_DIST_PX) {
+      virtualizer.scrollToIndex(index, { align, behavior: "auto" });
+      jumpRafRef.current = requestAnimationFrame(correct);
+      return;
+    }
+
+    // 动画期间逐帧直接写 scrollTop，先按 scrollToFn 同口径把内容撑到总高，
+    // 否则靠近底部时会被旧高度钳制，动画中途「粘住」再跳一下。
+    const inner = innerRef.current;
+    if (inner) inner.style.height = `${virtualizer.getTotalSize()}px`;
+    const duration = Math.min(JUMP_ANIM_MAX_MS, JUMP_ANIM_BASE_MS + dist * 0.12);
+    const startedAt = performance.now();
+    const animate = (now: number) => {
+      if (token !== jumpTokenRef.current) return; // 新一轮跳转 / cleanup 已接管
+      if (spyLockRef.current === null || sticky.isFollowing()) { cleanup(); return; }
+      const box = parentRef.current;
+      if (!box) { cleanup(); return; }
+      const p = Math.min(1, (now - startedAt) / duration);
+      box.scrollTop = from + (to - from) * jumpEase(p);
+      if (p < 1) {
+        jumpRafRef.current = requestAnimationFrame(animate);
+        return;
+      }
+      jumpRafRef.current = requestAnimationFrame(correct);
+    };
+    jumpRafRef.current = requestAnimationFrame(animate);
+  }, [sticky, virtualizer, scheduleSpy]);
 
   useEffect(() => {
     setActiveMatchIndex(0);
@@ -970,13 +1143,20 @@ function MessageFlowCore({
 
   useEffect(() => {
     if (!scrollTarget) return;
-    if (scrollTarget.turnId != null) {
-      const idx = entries.findIndex((e) => e.kind === "turn" && e.turnId === scrollTarget.turnId);
-      if (idx >= 0) {
-        jumpToIndex(idx, "start");
-        clearScrollTarget?.();
-      }
+    /* plan-549-2281（第7项）：定位链路此前是断的——
+     *  ① 任务摘要面板写的是 { threadId }（点「定位到执行消息」传子代理 id），
+     *     而这里只处理 turnId，threadId 分支从来没实现；
+     *  ② 全库也没有任何地方把 scrollTarget 传进 MessageFlow（插件只注册 props={source:"main"}）。
+     * 现在：threadId → turn 的解析在主消息流层完成（那里才有 subagentMeta），
+     * 内核算通用，只认 turnId；但仍要**解析不到也清理**——否则目标一直挂在 store 里，
+     * 下次进会话还会莫名跳一次。 */
+    if (scrollTarget.turnId == null) {
+      clearScrollTarget?.();
+      return;
     }
+    const idx = entries.findIndex((e) => e.kind === "turn" && (e.turnId === scrollTarget.turnId || (e.turnIds?.includes(scrollTarget.turnId!) ?? false)));
+    if (idx >= 0) jumpToIndex(idx, "start");
+    clearScrollTarget?.();
   }, [scrollTarget, entries, jumpToIndex, clearScrollTarget]);
 
   return (
@@ -1310,6 +1490,26 @@ function MainMessageFlow({
   const flowError = useScoped("flowError");
   const clearFlowError = useScoped("clearFlowError");
   const dismissTurnError = useScoped("dismissTurnError");
+  /* plan-549-2281（第7项）：主消息流**自己**订阅滚动目标。
+   * 此前靠外层把 scrollTarget 一路传下来，但唯一渲染点（plugins/builtin.ts 注册的
+   * props={source:"main"}）从来没传过——任务摘要面板点「定位到执行消息」写进 store 后
+   * 没有任何消费者，表现为「点了没反应」，目标还一直挂着不清。
+   * 允许外部 props 覆盖（侧边对话等复用场景可以自行控制），缺省读 store。 */
+  const storeScrollTarget = useChatStore((s) => s.scrollTarget);
+  const storeClearScrollTarget = useChatStore((s) => s.clearScrollTarget);
+  const effectiveScrollTarget = scrollTarget !== undefined ? scrollTarget : storeScrollTarget;
+  const effectiveClearScrollTarget = clearScrollTarget ?? storeClearScrollTarget;
+  /* plan-549-2281（第7项）：子代理 → 所属 turn 的解析放在这一层——
+   * subagentMeta 只有主消息流作用域里才有，内核是主/子代理共用的通用组件。
+   * 解析不到 turnId 时传 null 给内核，由内核负责清理（目标不能一直挂在 store 里）。 */
+  const resolvedScrollTarget = useMemo(() => {
+    if (!effectiveScrollTarget) return null;
+    if (effectiveScrollTarget.turnId != null) return effectiveScrollTarget;
+    const tid = effectiveScrollTarget.threadId;
+    if (tid == null) return null;
+    const agentTurnId = subagentMeta[tid]?.turnId;
+    return agentTurnId != null ? { turnId: agentTurnId } : null;
+  }, [effectiveScrollTarget, subagentMeta]);
 
   return (
     <MessageFlowCore
@@ -1357,8 +1557,8 @@ function MainMessageFlow({
       sessionKey={currentSessionId ?? 0}
       jumpDots
       search
-      scrollTarget={scrollTarget}
-      clearScrollTarget={clearScrollTarget}
+      scrollTarget={resolvedScrollTarget}
+      clearScrollTarget={effectiveClearScrollTarget}
       className={className}
       emptyText={emptyText ?? "选择或创建会话，开始你的任务"}
     />
@@ -1394,12 +1594,16 @@ function SubagentMessageFlow({
   // 与事件桶按 id 去重后并入（升序），不覆盖已有流式状态。
   useEffect(() => {
     if (threadId == null || currentSessionId == null) return;
+    const requestedSid = currentSessionId;
     let cancelled = false;
     void (async () => {
       try {
-        const fetched = await api.listSessionMessages(currentSessionId, threadId);
+        const fetched = await api.listSessionMessages(requestedSid, threadId);
         if (cancelled || fetched.length === 0) return;
         useChatStore.setState((s) => {
+          // plan-560-2311 E5：请求期间可能已切走会话——迟到的历史不得写进新会话的
+          // 同号线程桶（agent id 跨会话会复用），否则切回新会话说看到上一个会话的执行过程。
+          if (s.currentSessionId !== requestedSid) return {};
           const bucket = s.subagentMessages[threadId] ?? [];
           const known = new Set(bucket.map((m) => m.id));
           const merged = [...bucket, ...fetched.filter((m) => !known.has(m.id))];
@@ -1488,6 +1692,10 @@ export function MessageFlow(props: MessageStreamProps) {
     <MainMessageFlow
       actions={props.features?.actions ?? "full"}
       suggestionCard={props.features?.suggestionCard ?? true}
+      /* plan-549-2281（第7项）：这里**不要**无条件把 props.scrollTarget 传下去。
+       *  props 上没传时它是 undefined，而不是 null——传给 MainMessageFlow 会盖掉
+       *  「props 未指定就回落到 store」的语义（见那边的 effectiveScrollTarget）。
+       *  显式写了才透传，否则留在 undefined 让主消息流自己订阅 store。 */
       scrollTarget={props.scrollTarget}
       clearScrollTarget={props.clearScrollTarget}
       className={props.className}

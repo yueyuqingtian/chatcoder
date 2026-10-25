@@ -1,7 +1,7 @@
 /** 设置中心：常规（v2.2 对齐 zcode 3.18）。
  * 界面语言、HTTP 代理、终端 Shell / 字体、增强搜索、消息区与智能体的运行开关、异常自动重试等。
  * 所有设置项「修改即保存」（300ms 防抖），走 /settings/global 持久化（config.json），重启不丢。
- * 外观（主题、字号、行距、宽度）见「外观」页；电脑操控与内置浏览器见「电脑操控」页；子代理 / 子会话见「子代理」页。 */
+ * 外观（主题、字号、行距、宽度）见「外观」页；电脑操控与内置浏览器见「电脑操控」页；子代理见「子代理」页。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type TerminalShellOption } from "../../api/client";
 import { useUiStore } from "../../store/ui";
@@ -72,6 +72,9 @@ export function GeneralPanel() {
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一。
   const saveTimerRef = useRef<number | null>(null);
+  /** plan-568-2333：防抖窗口内待落盘的最新配置。此前卸载只 clearTimeout，改完 300ms 内
+   *  切页/关设置就丢掉最后一笔（违反「修改即保存」），这里记下来在卸载时补发。 */
+  const pendingSaveRef = useRef<typeof cfg | null>(null);
   const flushSave = useCallback(async (payload: typeof cfg) => {
     try {
       await api.setGlobalSettings({
@@ -84,10 +87,22 @@ export function GeneralPanel() {
     } catch (e) { useChatStore.setState({ error: "保存失败: " + String(e) }); }
   }, []);
   const scheduleSave = useCallback((next: typeof cfg) => {
+    pendingSaveRef.current = next;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => { void flushSave(next); }, 300);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      pendingSaveRef.current = null;
+      void flushSave(next);
+    }, 300);
   }, [flushSave]);
-  useEffect(() => () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current); }, []);
+  // plan-568-2333：卸载（切页 / 关闭设置）时把窗口里的最后一笔补发出去
+  useEffect(() => () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
+    const pend = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (pend) void flushSave(pend);
+  }, [flushSave]);
 
   // 终端 Shell：后端按本机实际安装情况给出可用性，未安装的置灰并标注
   const [shells, setShells] = useState<TerminalShellOption[] | null>(null);

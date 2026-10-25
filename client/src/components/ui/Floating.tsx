@@ -21,6 +21,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { usePresence } from "./usePresence";
+import { isTopLayer, pushLayer, removeLayer } from "../../utils/layerStack";
 
 export type FloatingSide = "left" | "right" | "top" | "bottom";
 export type FloatingAlign = "start" | "center" | "end";
@@ -64,8 +65,7 @@ export function placeFloating(
 }
 
 /** 打开中的浮层栈：Esc 只关闭栈顶 */
-const openStack: Array<{ id: number; close: () => void }> = [];
-let seq = 0;
+/** 浮层栈（已收敛到 `utils/layerStack`，与 Popover 共用一份）：Esc 只关闭栈顶。 */
 
 export interface FloatingProps {
   open: boolean;
@@ -103,6 +103,9 @@ export function Floating({
   const [place, setPlace] = useState<Placement | null>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  // plan-562-2318 B7：`ignoreRefs` 只走 ref，不进 effect 依赖（调用方普遍传内联数组）
+  const ignoreRefsRef = useRef(ignoreRefs);
+  ignoreRefsRef.current = ignoreRefs;
 
   /** 取锚点与浮层的最新矩形重新落位；锚点已卸载返回 false。 */
   const reposition = useCallback((): boolean => {
@@ -150,21 +153,20 @@ export function Floating({
   // 点外部 + Esc（Esc 只关栈顶）
   useEffect(() => {
     if (!open) return;
-    const id = ++seq;
-    openStack.push({ id, close: () => closeRef.current?.() });
+    // plan-562-2318 B6/B7：与 Popover 共用同一份浮层栈；`ignoreRefs` 只走 ref 不入依赖
+    const id = pushLayer(() => closeRef.current?.());
     const onDown = (e: PointerEvent) => {
       if (!closeOnOutside) return;
       const t = e.target as Node | null;
       if (!t) return;
       if (ref.current?.contains(t)) return;
       if (anchorRef.current?.contains(t)) return;
-      if (ignoreRefs?.some((r) => r.current?.contains(t))) return;
+      if (ignoreRefsRef.current?.some((r) => r.current?.contains(t))) return;
       closeRef.current?.();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || !closeOnEscape) return;
-      const top = openStack[openStack.length - 1];
-      if (top?.id !== id) return;
+      if (!isTopLayer(id)) return;
       e.stopPropagation();
       closeRef.current?.();
     };
@@ -173,10 +175,9 @@ export function Floating({
     return () => {
       document.removeEventListener("pointerdown", onDown, true);
       document.removeEventListener("keydown", onKey, true);
-      const i = openStack.findIndex((x) => x.id === id);
-      if (i >= 0) openStack.splice(i, 1);
+      removeLayer(id);
     };
-  }, [open, closeOnOutside, closeOnEscape, anchorRef, ignoreRefs]);
+  }, [open, closeOnOutside, closeOnEscape, anchorRef]);
 
   // 重新打开时先清掉旧落点，避免短暂停在上一次的位置
   useEffect(() => {

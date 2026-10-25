@@ -11,6 +11,7 @@
 import { create } from "zustand";
 import { api, type ComposerRefOut, type MessageOut, type TurnOut } from "../api/client";
 import { WsClient } from "../api/ws";
+import { pendingActions } from "./pendingInteractions";
 
 export interface SideApproval { approvalId: string; detail: Record<string, unknown> }
 
@@ -326,6 +327,8 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
         const queue = c.approvalQueue.filter((a) => a.approvalId !== approvalId);
         return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
       });
+      // 会话隔离修复：同步摘掉侧栏等待索引里的这一条，避免回执丢失后侧边会话一直显示等待。
+      pendingActions.clearByApprovalId(approvalId);
     },
 
     clearSideError: (sessionId) => patch(sessionId, () => ({ error: null })),

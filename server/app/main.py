@@ -49,6 +49,54 @@ from app.gateway.routers import (
 from app.gateway.ws import ws_router
 
 
+def repair_stale_rows(s) -> tuple[int, int]:
+    """plan-565-2323 G9：把「所属轮次已结束、子代理任务却仍非终态」的残留收尾。
+
+    事故复盘：停止 / 超时的终态路径从不批量收尾子任务（engine 在 active=False 时跳过收尾），
+    而启动修复原先只扫 `Turn.status == "running"`；turn 已是终态时其下 `tasks.status='in_progress'`
+    永远没人清理，前端据此把会话锁成 busy（输入框一直停在停止态、发不出消息）。
+
+    范围（实测校准，plan-565-2323 偏差记录）：**只处理子代理任务（agents.kind='sub'）与其 agent 行**。
+    原方案还打算连主任务的 pending/running 一起清，但在真实库上核到 169 条残留里只有 2 条是子代理
+    任务，另外 167 条是主任务的步骤——它们前端本来就不算「子代理运行中」，清了只会把历史会话里
+    一批无关任务改成「已取消」，属无收益的可见改动。收窄后事故会话照样解锁。
+
+    只做一次性平移，不新增迁移；由启动流程经 WriteEngine 单写线程调用，也可被测试直接调用。
+    返回（收尾的子任务数, 收尾的子代理数）。
+    """
+    from sqlalchemy import or_, select
+
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.task import Task
+    from app.persistence.models.turn import Turn
+
+    # inner join agents 即「只取有归属子代理的任务」，主任务（agent_id 为空或 kind='main'）不受影响
+    open_tasks = s.execute(
+        select(Task)
+        .join(Agent, Agent.id == Task.agent_id)
+        .join(Turn, Turn.id == Task.turn_id)
+        .where(Agent.kind == "sub",
+               Task.status.in_(["proposed", "pending", "running", "in_progress"]),
+               or_(Turn.status.is_(None), Turn.status != "running"))
+    ).scalars().all()
+    for task in open_tasks:
+        task.status = "cancelled"
+        task.note = task.note or "所属轮次已结束，残留任务已收尾"
+    # 子代理 agent 行同理：所属 turn 已终态却仍标 idle/running 的一并收尾。
+    stale_agents = s.execute(
+        select(Agent)
+        .join(Turn, Turn.id == Agent.turn_id)
+        .where(Agent.kind == "sub",
+               Agent.status.in_(["idle", "running"]),
+               or_(Turn.status.is_(None), Turn.status != "running"))
+    ).scalars().all()
+    for agent in stale_agents:
+        agent.status = "terminated"
+    if open_tasks or stale_agents:
+        s.commit()
+    return len(open_tasks), len(stale_agents)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(debug=settings.debug)
@@ -102,6 +150,20 @@ async def lifespan(app: FastAPI):
                     s.commit()
 
                 await run_write_locked(_persist, label="startup.repair")
+
+            from app.persistence.database import run_write_locked as _write_locked
+
+            try:
+                _residue = await _write_locked(repair_stale_rows, label="startup.repair_residue")
+                if _residue and any(_residue):
+                    import logging as _lg
+
+                    _lg.getLogger(__name__).info(
+                        "启动修复：残留子任务 %s 条 / 残留子代理 %s 条已收尾", *_residue)
+            except Exception:  # noqa: BLE001 — 修复失败不阻塞启动
+                import logging as _lg2
+
+                _lg2.getLogger(__name__).warning("启动修复：残留行收尾失败（不阻塞启动）", exc_info=True)
         await seed()
 
         # 启动时自动扫描一次外部工具技能目录（skills CLI / Claude / Codex 等），

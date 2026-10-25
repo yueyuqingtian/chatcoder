@@ -9,6 +9,7 @@ import { ResizeHandle } from "./components/ResizeHandle";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Toast } from "./components/Toast";
 import { WindowNavCluster } from "./components/WindowNavCluster";
+import { WindowControls } from "./components/WindowControls";
 // plan-24-106 M5：原 `@tomagranate/liquid-glass` 折射叠加层已整体移除（该包不可用，
 // 且其 SVG feDisplacementMap 只对元素背后的背景副本做位移，无法采样窗口外桌面）。
 // 真正的桌面折射改由主进程的原生面板承担（electron/liquid-glass.cjs）。
@@ -66,8 +67,14 @@ export default function App() {
   // plan-memory-fix：拓展/自动化等页面态不属于任何会话，右面板（会话工作台）一律收起；
   // 只派生显示态、不改面板桶状态，回到会话时自然恢复原先的展开与否。
   const pageMode = nav !== null && nav !== "chat";
-  const rightShown = rightExpanded && !pageMode;
+  /** plan-20261025-shell（需求 7）：新建任务页（空态首页）同样没有右面板——面板与它的开关一并隐藏，
+   *  只派生显示态、不改面板桶状态，进入会话后按原先的展开与否恢复。 */
+  const homePage = !pageMode && currentSessionId == null;
+  const rightAvailable = !pageMode && !homePage;
+  const rightShown = rightExpanded && rightAvailable;
   const rightFull = rightShown && rightFullscreen;
+  const rightAvailableRef = useRef(rightAvailable);
+  rightAvailableRef.current = rightAvailable;
   /** plan-20261016-ux（问题 10）：右面板全屏时左栏按折叠处理——全屏面板盖住了左栏，但左上角导航区仍按
    *  左栏宽度画侧栏底色，顶部出现一块颜色不一致的区域和一道接缝；折叠后导航区与标题栏连成一条。
    *  只派生显示态，不改用户的折叠偏好，退出全屏即恢复。 */
@@ -162,7 +169,8 @@ export default function App() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
-        usePanelStore.getState().openTab("terminal");
+        // 新建任务页 / 设置等页面态没有右面板：此时打开终端只会改不可见的面板状态，进会话后面板莫名弹出
+        if (rightAvailableRef.current) usePanelStore.getState().openTab("terminal");
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
@@ -319,9 +327,23 @@ export default function App() {
       {/* S1（plan-41-197）：接管存量原生 title——全站悬停提示统一为圆角卡片浮层，
           与 ui/Tooltip 共享展示延迟（不再出现浏览器自带的方形浮块）。 */}
       <NativeTitleTooltip />
-      <div className="app-shell" style={{ ["--pane-w" as string]: sidebarHidden ? "0px" : `${leftPanelWidth}px` }}>
-        {/* plan-128-518：左上角 logo / 折叠 / 前进后退——全局固定层，折叠展开都是同一个实例、同一个位置 */}
-        <WindowNavCluster collapsed={sidebarHidden} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
+      {/* plan-20261025-shell（需求 5）：左栏铺在最底层，中间 / 右侧面板是浮在其上的微圆角卡片。
+          rp-shown / rp-full 与 data-wc 只驱动卡片预留给右上角控件组的宽度（见 shell.css）。 */}
+      <div
+        className={"app-shell" + (rightShown ? " rp-shown" : "") + (rightFull ? " rp-full" : "")}
+        data-wc={rightAvailable ? "panel" : "win"}
+        style={{ ["--pane-w" as string]: sidebarHidden ? "0px" : `${leftPanelWidth}px` }}
+      >
+        {/* plan-565-2323 G15：两个全局固定浮层（左上导航组 / 右上控件组）必须排在**所有**
+            `-webkit-app-region: drag` 元素之后（即 .app-right 之后、本容器末尾）。
+
+            原因（本次事故根因，plan-282-1520 已记录过同类机制）：
+            Electron 的拖拽区仲裁以 DOM 顺序为准——drag 元素的后代声明 no-drag 能从拖拽区里「挖洞」，
+            但**独立的固定浮层**落在某个 drag 元素的矩形之上时，不会挖洞，drag 直接吞掉点击。
+            折叠侧栏后中间卡片左移，`.titlebar`（drag 区）的矩形从 x=6 起重新罩住左上导航组，
+            于是「第一次折叠能点、折叠后就点不了」；右上控件组则从一开始就叠在 `.titlebar` /
+            `.rp-head` 的 drag 区上，所以窗口按钮始终点不动。
+            把这两个浮层放到 DOM 末尾后，它们的 no-drag 位于所有 drag 声明之后，仲裁以它们为准。 */}
         <Toast />
         <RollbackConfirmModal />
         <ImageGallery />
@@ -347,11 +369,12 @@ export default function App() {
         {/* plan-20261016-ux（问题 10）：左栏上限随窗口宽适度放大（max(480, 窗口宽 × 24%)，store 兜底 640） */}
         <ResizeHandle side="left" baseWidth={leftPanelWidth} minWidth={240} maxWidth={480} maxViewportRatio={0.24} reservePx={MAIN_MIN_W} panelEl={leftPanelElRef} onCommit={setLeftPanelWidth} freezeRefs={[leftPanelElRef]} disabled={sidebarHidden} />
         <div className="app-right">
-          {/* v19: 标题栏与右面板经插件 slot 渲染。
-              plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
-              与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
-          <PluginSlot slot="titlebar" leftCollapsed={sidebarHidden} rightCollapsed={!rightShown} page={pageMode} onToggleRight={toggleRightPanelFromTitlebar} />
-          <div className="app-body">
+          {/* plan-20261025-shell：中间卡片 = 标题栏 + 主区；设置页同样渲染在这张卡片里（需求 6） */}
+          <div className="app-center">
+            {/* v19: 标题栏与右面板经插件 slot 渲染。
+                plan-41-233：页面态（拓展/定时任务/设置等 nav 页）传 page——隐藏会话标题、项目
+                与右侧图标组；左侧 logo/折叠/前进后退保留，页面态的会话聚焦由 Sidebar 抑制。 */}
+            <PluginSlot slot="titlebar" leftCollapsed={sidebarHidden} rightCollapsed={!rightShown} page={pageMode} panelAvailable={rightAvailable} onToggleRight={toggleRightPanelFromTitlebar} />
             <main ref={mainElRef} className={`app-main${!rightShown ? " right-panel-collapsed" : ""}`}>
               {/* plan-282-1421（第3项）：设置 ↔ 工作区切换过渡（id 为页面标识）。
                   plan-353-1738 M3（S1）：id 收敛为二值语义——此前用 `ws-${nav}`，
@@ -365,21 +388,29 @@ export default function App() {
                   : <Workspace nav={nav} onSessionStart={() => setNav(null)} />}
               </PageTransition>
             </main>
-            {/* plan-95: 动态上限 = 容器宽 − reservePx，防溢出裁剪。
-                plan-20261016-ux（问题 10）：去掉静态 1200px 上限（大屏上只能拖到约一半），只保留中列最小宽；
-                渲染期另有 CSS max-width 同口径钳制（见 .app-pane-right）。
-                RFL-1（S4）：freezeRefs 收窄为仅右面板内容根——中列实时跟随（消息流逐帧折行），
-                右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
-            {rightShown && !rightFull && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={Number.POSITIVE_INFINITY} reservePx={MAIN_MIN_W} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
-            <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightShown ? "" : " collapsed"}${rightFull ? " fullscreen" : ""}`} style={{ width: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px", flexBasis: rightShown ? (rightFull ? "100%" : `${rightPanelWidth}px`) : "0px" }}>
-              {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
-                  终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
-              <PluginSlot slot="right-panel" />
-            </div>
+          </div>
+          {/* plan-95: 动态上限 = 容器宽 − reservePx，防溢出裁剪。
+              plan-20261016-ux（问题 10）：去掉静态 1200px 上限（大屏上只能拖到约一半），只保留中列最小宽；
+              渲染期另有 CSS max-width 同口径钳制（见 .app-pane-right）。
+              RFL-1（S4）：freezeRefs 收窄为仅右面板内容根——中列实时跟随（消息流逐帧折行），
+              右面板内的 Monaco/xterm 不逐帧重排，松手后由收敛序列一次解冻。 */}
+          {rightShown && !rightFull && <ResizeHandle side="right" baseWidth={rightPanelWidth} minWidth={280} maxWidth={Number.POSITIVE_INFINITY} reservePx={MAIN_MIN_W} panelEl={rightPanelElRef} onCommit={setRightPanelWidth} freezeRefs={[rightPanelElRef]} />}
+          {/* plan-20261025-shell：全屏态改为铺满窗口的 fixed 卡片（四周留同样的卡片间距），宽度交给 inset 推导 */}
+          <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightShown ? "" : " collapsed"}${rightFull ? " fullscreen" : ""}`} style={{ width: rightShown ? (rightFull ? "auto" : `${rightPanelWidth}px`) : "0px", flexBasis: rightShown ? (rightFull ? "auto" : `${rightPanelWidth}px`) : "0px" }}>
+            {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
+                终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
+            <PluginSlot slot="right-panel" />
           </div>
         </div>
         {/* plan-20261016-ux（问题 10）：右面板全屏时右下角的主对话小窗（隐藏 / 打开 / 常驻） */}
         {rightFull && <MiniChat />}
+        {/* plan-565-2323 G15：两个全局固定浮层放在本容器**最后**——DOM 顺序在所有 drag 元素之后，
+            它们的 `-webkit-app-region: no-drag` 才会被 Electron 的拖拽区仲裁采纳（详见上方说明）。
+            位置由 CSS 的 fixed 定位决定，与文档顺序无关，移到末尾不改变任何视觉位置。 */}
+        {/* plan-128-518：左上角 logo / 折叠 / 前进后退——全局固定层，折叠展开都是同一个实例、同一个位置 */}
+        <WindowNavCluster collapsed={sidebarHidden} onToggle={toggleSidebar} onSessionFocus={() => setNav(null)} />
+        {/* plan-20261025-shell：右上角 全屏 / 面板开关 / 窗口按钮——同样是全局固定层，面板展开收起时位置不变 */}
+        <WindowControls panelAvailable={rightAvailable} panelShown={rightShown} fullscreen={rightFull} onTogglePanel={toggleRightPanelFromTitlebar} />
       </div>
       </TooltipProvider>
     </ErrorBoundary>

@@ -16,7 +16,7 @@ import { ToolShotCard } from "./ToolShotCard";
 import { WorkflowNotice } from "../workflow/WorkflowNotice";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
-import { ErrorCard } from "./ErrorCard";
+import { DismissibleErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
 import { Tooltip } from "../ui";
 import type { FlowSegment, TimelineEntry, TurnItem } from "./timeline";
@@ -426,17 +426,26 @@ export const TurnGroup = memo(function TurnGroup({
   const onRollback = turnId != null && !rolledBack ? rollbackFn : undefined;
 
   const renderedSubagentNames = new Set<string>();
+  /** plan-568-2333：resume_subagent 的调用参数只有 agent_id（没有 task_title），
+   *  按名称认领不到它自己派出的子代理（同一子代理再续跑一次时更明显）。这里按 agent_id
+   *  记录已落位，否则它会在时间线位置渲染一次、又在轮次末尾的兜底槽位再渲染一次。 */
+  const renderedSubagentIds = new Set<number>();
   for (const it of items) {
     if (it.kind === "subagent") {
-      const args = (it.msg.content as Record<string, unknown>)?.args as Record<string, unknown> | undefined;
+      const c = it.msg.content as Record<string, unknown> | undefined;
+      const args = (c?.args && typeof c.args === "object" ? c.args : undefined) as
+        Record<string, unknown> | undefined;
       const title = String(args?.task_title ?? "");
       if (title) renderedSubagentNames.add(title);
+      const rid = Number(args?.agent_id);
+      if (Number.isFinite(rid) && rid > 0) renderedSubagentIds.add(rid);
     }
   }
 
   const unplacedSubagents = (subagents || [])
     .filter(
       (sa) =>
+        !renderedSubagentIds.has(sa.agentId) &&
         !renderedSubagentNames.has(sa.name) &&
         !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
     )
@@ -580,16 +589,26 @@ export const TurnGroup = memo(function TurnGroup({
       case "subagent": {
         const c = item.msg.content as Record<string, unknown>;
         const args = (c?.args && typeof c.args === "object" ? c.args : {}) as Record<string, unknown>;
-        const taskTitle = String(args.task_title ?? "子代理");
-        const matched = (subagents || []).find(
-          (sa) => sa.name === taskTitle || sa.name === `探索·${taskTitle}` || sa.name.includes(taskTitle)
-        );
+        // plan-568-2333：resume_subagent 的 args 只有 agent_id——按 id 精确认领，
+        // 不再依赖「名称包含」模糊匹配（续跑卡片此前匹配不到、只能落到轮次末尾的兜底槽位）。
+        const resumeId = Number(args.agent_id);
+        const isResume = String(c?.tool ?? "") === "resume_subagent"
+          && Number.isFinite(resumeId) && resumeId > 0;
+        const taskTitle = String(args.task_title ?? "") || (isResume ? `子代理 #${resumeId}` : "子代理");
+        const matched = isResume
+          ? (subagents || []).find((sa) => sa.agentId === resumeId)
+          : (subagents || []).find(
+              (sa) => sa.name === taskTitle || sa.name === `探索·${taskTitle}` || sa.name.includes(taskTitle)
+            );
         const dispatchError = subagentDispatchError(item.result);
+        const fallbackName = matched?.name ?? taskTitle;
         const meta: SubagentMetaLite = matched || (dispatchError
           // plan-20261022-subagent-dispatch-fail：派发被拒 → 明确的失败行 + 原因，
           // 不再兜底成「执行中」；agentId=0 表示没有可打开的子代理会话。
-          ? { agentId: 0, name: taskTitle, status: "failed", error: dispatchError, dispatchFailed: true }
-          : { agentId: Number(item.msg.sender_id ?? item.msg.id), name: taskTitle, status: "running" });
+          // plan-568-2333：续跑失败时子代理本身还在（agentId 已知），仍允许点开查看，
+          // 不能退化成「无会话可打开」的派发失败态。
+          ? { agentId: isResume ? resumeId : 0, name: fallbackName, status: "failed", error: dispatchError, dispatchFailed: !isResume }
+          : { agentId: isResume ? resumeId : Number(item.msg.sender_id ?? item.msg.id), name: fallbackName, status: "running" });
         // v36 修复：去掉内联 28px 左缩进——子代理行此前比工具调用行右移 28px，
         // 与「子代理卡片与工具调用行共用同一左侧边界」的规范不一致（用户反馈未对齐）。
         return (
@@ -626,11 +645,8 @@ export const TurnGroup = memo(function TurnGroup({
       case "error":
         // plan-41-228：与末尾错误卡重复的那条不再渲染（见 suppressTurnError）
         if (suppressTurnError) return null;
-        return (
-          <div key={i} className="turn-item-wrap">
-            <ErrorCard text={msgText(item.msg.content) || "执行出错"} />
-          </div>
-        );
+        // plan-20261025-shell（需求 9）：轮次内报错同样可关闭（关闭记在本机，刷新后不再出现）
+        return <DismissibleErrorCard key={i} msgId={item.msg.id} text={msgText(item.msg.content) || "执行出错"} />;
       case "plan": {
         // plan-865: 计划预览/确认消息——按数据库时间线位置渲染；同 turn 多条 plan 消息
         // 只在最后一条位置渲染卡片（携带最新状态），之前的渲染为细提示行

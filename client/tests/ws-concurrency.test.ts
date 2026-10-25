@@ -73,6 +73,9 @@ async function main() {
   const ws1 = FakeWebSocket.instances[0];
   assert(!!ws1, "connect(1) 后创建了会话 1 的 socket");
   ws1.onopen?.();
+  // plan-20261025-shell：连上后先进入补发阶段，服务端回 sync.response 才恢复逐条派发
+  inject(ws1, "sync.response", { last_seq: 0, count: 0 });
+  received.length = 0;
 
   inject(ws1, "turn.started", { turn_id: 1 });
   assert(received.length === 1 && received[0].event === "turn.started", "会话 1 的事件正常派发");
@@ -85,6 +88,8 @@ async function main() {
   assert(!!ws2, "connect(2) 后创建了会话 2 的 socket");
   assert(ws1.closed, "旧 socket 已关闭");
   ws2.onopen?.();
+  inject(ws2, "sync.response", { last_seq: 0, count: 0 });
+  received.pop(); // 去掉结束帧本身，只比对业务事件
 
   inject(ws2, "turn.started", { turn_id: 2 });
   assert(received.length === 2 && received[1].event === "turn.started", "会话 2 的事件正常派发");
@@ -108,6 +113,36 @@ async function main() {
   ws2b.onopen?.();
   inject(ws2, "turn.completed", { turn_id: 2 }); // 旧的 ws2 已关闭，迟到消息
   assert(received.length === receivedAfter, "重连后旧连接迟到事件被丢弃");
+
+  // —— plan-20261025-shell（需求 10）：进会话时服务端补发的历史事件不得逐条派发 ——
+  // 补发期间（sync.request → sync.response）事件先缓存：中间态（提问 / 审批出现又消失）不会各自渲染一帧；
+  // 结束帧到达时按原顺序一次派发，结束帧排在最后（store 据此刷新消息）
+  const sent = ws2b.sent.map((s) => JSON.parse(s) as { event: string });
+  assert(sent.some((m) => m.event === "sync.request"), "连上后发出 sync.request");
+  inject(ws2b, "approval.request", { approval_id: "a1" }, 11);
+  inject(ws2b, "approval.response", { approval_id: "a1" }, 12);
+  inject(ws2b, "message.created", { id: 99 }, 13);
+  assert(received.length === receivedAfter, "补发阶段的事件先缓存、不逐条派发");
+  inject(ws2b, "sync.response", { last_seq: 0, count: 3 });
+  const batch = received.slice(receivedAfter).map((e) => e.event);
+  assert(
+    batch.join(",") === "approval.request,approval.response,message.created,sync.response",
+    "结束帧到达后按原顺序一次派发，结束帧排在最后",
+  );
+  inject(ws2b, "turn.started", { turn_id: 3 }, 14);
+  assert(received[received.length - 1].event === "turn.started", "补发结束后恢复逐条派发");
+
+  // —— 结束帧丢失（旧后端 / 丢帧）：兜底计时到点照常派发，不会把事件永远压住 ——
+  client.connect(3);
+  register();
+  await tick();
+  const ws3 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  ws3.onopen?.();
+  const before = received.length;
+  inject(ws3, "turn.started", { turn_id: 5 }, 1);
+  assert(received.length === before, "等待结束帧期间暂不派发");
+  await tick(3200);
+  assert(received.length === before + 1, "兜底计时到点后派发已缓存事件");
 
   client.disconnect();
   console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

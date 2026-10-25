@@ -71,6 +71,9 @@ export function ProjectDialog() {
   // 每次打开按模式初始化（关闭期间保留上一次内容，避免退场动画中内容跳变）
   useEffect(() => {
     if (!open) return;
+    // plan-562-2318：异步回来的索引状态必须确认弹窗还停在同一个项目上，
+    // 否则快速切项目时 A 的索引状态会写进 B 的表单（保存时按差异把 B 改错）
+    let alive = true;
     setError(null);
     setNotice(null);
     setBusy(false);
@@ -88,12 +91,17 @@ export function ProjectDialog() {
       setIndexInitial(null);
       void api.symbolIndexWorkspaces()
         .then((res) => {
+          if (!alive) return;
           const hit = res.workspaces.find((w) => samePath(w.workspace, editing.path));
           const on = Boolean(hit?.enabled);
           setIndex(on);
           setIndexInitial(on);
         })
-        .catch(() => { setIndex(false); setIndexInitial(false); });
+        .catch(() => {
+          if (!alive) return;
+          setIndex(false);
+          setIndexInitial(false);
+        });
       window.setTimeout(() => nameRef.current?.focus(), 60);
     } else {
       setName("");
@@ -104,6 +112,7 @@ export function ProjectDialog() {
       setIndexInitial(null);
       autoNameRef.current = true;
     }
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, projectId]);
 
@@ -257,7 +266,7 @@ export function ProjectDialog() {
         <>
           <Button variant="secondary" onClick={hide}>取消</Button>
           <Button variant="primary" onClick={() => void submit()} loading={busy} disabled={mode === "create" && !path}>
-            {mode === "edit" ? "保存" : "创建项目"}
+            {mode === "edit" ? "保存" : "创建"}
           </Button>
         </>
       }
@@ -268,7 +277,7 @@ export function ProjectDialog() {
           {browsing ? (
             <FolderBrowser onPick={applyPath} onCancel={() => setBrowsing(false)} />
           ) : path ? (
-            <InsetCard>
+            <InsetCard className="pd-folder-card">
               <div className="pd-folder">
                 <FileIcon name={path} folder size={20} />
                 <span className="pd-folder-main">
@@ -290,20 +299,21 @@ export function ProjectDialog() {
               {mode === "create" && over && <div className="pd-folder-over">松开即可换成这个文件夹</div>}
             </InsetCard>
           ) : (
-            <div className={"pd-drop-frame" + (over ? " is-over" : "")}>
-              <button
-                type="button"
-                className={"pd-drop" + (over ? " is-over" : "") + (error && !candidates.length ? " is-invalid" : "")}
-                onClick={() => void pickFolder()}
-                disabled={picking || resolving}
-              >
-                <span className="pd-drop-ic"><IconFolderPlus size={24} /></span>
+            // plan-20261025-shell（需求 3）：单层虚线投放区（此前是「白卡 + 内嵌虚线框」两层框），图标与标题同一行
+            <button
+              type="button"
+              className={"pd-drop" + (over ? " is-over" : "") + (error && !candidates.length ? " is-invalid" : "")}
+              onClick={() => void pickFolder()}
+              disabled={picking || resolving}
+            >
+              <span className="pd-drop-main">
+                <span className="pd-drop-ic"><IconFolderPlus size={16} /></span>
                 <span className="pd-drop-title">
-                  {over ? "松开，添加这个文件夹" : resolving ? "正在定位文件夹…" : picking ? "请在弹出的窗口中选择文件夹…" : "拖入文件夹，或点击选择"}
+                  {over ? "松开，添加这个文件夹" : resolving ? "正在定位文件夹…" : picking ? "请在弹出的窗口中选择文件夹…" : "点击添加可读写文件夹，或把文件夹拖进来"}
                 </span>
-                <span className="pd-drop-sub">智能体可读写该文件夹，会话、文件与索引都以它为根目录</span>
-              </button>
-            </div>
+              </span>
+              <span className="pd-drop-sub">会话、文件与索引都以它为根目录</span>
+            </button>
           )}
           {candidates.length > 0 && (
             <div className="pd-cands" role="group" aria-label="找到多个同名文件夹">
@@ -321,31 +331,31 @@ export function ProjectDialog() {
         </DialogSection>
 
         <DialogSection title="项目名称" className="pd-sec">
-          {/* 左侧为图标实时预览，右侧输入名称（参考图1）：选图标 / 颜色时这里同步变化 */}
-          <InsetCard className="pd-name-card">
-            <div className="pd-name">
-              <Tooltip content={`${iconLabel} · ${colorLabel}`} side="top">
-                <span className="pd-name-preview">
-                  <ProjectIcon icon={icon} color={color} size={22} tile tileSize={40} />
-                </span>
-              </Tooltip>
-              <input
-                ref={nameRef}
-                className="pd-name-input"
-                value={name}
-                placeholder="输入名称…"
-                maxLength={80}
-                onChange={(e) => { setName(e.target.value); autoNameRef.current = e.target.value.trim() === ""; }}
-                onKeyDown={(e) => {
-                  const native = e.nativeEvent as KeyboardEvent & { isComposing?: boolean };
-                  if (e.key === "Enter" && !native.isComposing && e.keyCode !== 229) { e.preventDefault(); void submit(); }
-                }}
-              />
-            </div>
-          </InsetCard>
+          {/* 标准输入框外观（与 .ui-input 同高同圆角），左侧内嵌图标实时预览：选图标 / 颜色时这里同步变化 */}
+          <div className="pd-name">
+            <Tooltip content={`${iconLabel} · ${colorLabel}`} side="top">
+              <span className="pd-name-preview">
+                <ProjectIcon icon={icon} color={color} size={16} tile tileSize={28} />
+              </span>
+            </Tooltip>
+            <input
+              ref={nameRef}
+              className="pd-name-input"
+              value={name}
+              placeholder="输入名称…"
+              maxLength={80}
+              onChange={(e) => { setName(e.target.value); autoNameRef.current = e.target.value.trim() === ""; }}
+              onKeyDown={(e) => {
+                const native = e.nativeEvent as KeyboardEvent & { isComposing?: boolean };
+                if (e.key === "Enter" && !native.isComposing && e.keyCode !== 229) { e.preventDefault(); void submit(); }
+              }}
+            />
+          </div>
         </DialogSection>
 
-        <DialogSection title="项目图标" className="pd-sec">
+        <DialogSection title="项目图标" aside={<span>{iconLabel}</span>} className="pd-sec">
+          {/* plan-20261025-shell（需求 3）：未选中的格子是中性灰线稿（30 个彩色图标并排太花），
+              选中项才着项目色并带浅色底与描边；不再套灰色容器框 */}
           <div className="pd-icons" role="radiogroup" aria-label="项目图标" style={{ ["--pick-c" as string]: `var(--pc-${color})` }}>
             {PROJECT_ICON_DEFS.map((d) => (
               <Tooltip key={d.key} content={d.label} side="top">
@@ -357,7 +367,7 @@ export function ProjectDialog() {
                   className={"pd-icon-cell" + (icon === d.key ? " is-active" : "")}
                   onClick={() => setIcon(d.key)}
                 >
-                  <ProjectIcon icon={d.key} color={color} size={18} />
+                  <ProjectIcon icon={d.key} color={color} size={18} mono={icon !== d.key} />
                 </button>
               </Tooltip>
             ))}

@@ -102,6 +102,42 @@ class EditorApplyDiffTool(Tool):
         res = apply_replacement(tf.text, str(old_text), str(new_text), replace_all)
         if not res.ok:
             return ToolResult(ok=False, output="", error=res.error)
+        # plan-548-2277：「先读后改」闸门。默认 warn（放行 + 警告），strict 才拒绝——
+        # 机械批改时逐段先读代价过高，过严会逼模型绕去 terminal_exec 写文件。
+        from app.core.config import settings
+
+        _gate_warning = ""
+        _read_verified = True
+        _gate_mode = str(getattr(settings, "edit_gate_mode", "warn") or "warn").lower()
+        if _gate_mode != "off" and res.start_line > 0:
+            _rc = getattr(ctx, "read_cache", None)
+            if _rc is not None:
+                # plan-549-2281 复盘修复：replace_all 时逐处校验（res.spans 为全部命中
+                # 区间），此前只查第一处——其余替换位置未读过时静默放行。
+                _gate_spans = list(res.spans) or [(res.start_line, res.end_line)]
+                _uncovered = [(s, e) for s, e in _gate_spans if not _rc.covers(target, s, e)]
+                if _uncovered:
+                    _read_verified = False
+                    _s0, _e0 = _uncovered[0]
+                    _more = f" 等 {len(_uncovered)} 处" if len(_uncovered) > 1 else ""
+                    _hint = (
+                        f'fs_read(path="{path}", offset={max(1, _s0 - 20)}, '
+                        f"limit={max(40, _e0 - _s0 + 40)})"
+                    )
+                    # 缓存为空（进程刚重启 / 首轮）时不拒绝，沿用 fs_write 的既有口径
+                    if _gate_mode == "strict" and _rc.has_any():
+                        return ToolResult(
+                            ok=False, output="",
+                            error=(
+                                f"拒绝修改未读取的区域：第 {_s0}-{_e0} 行{_more}本会话没有读过。"
+                                f"请先调用 {_hint} 确认原文后重试（若确认目标正确，可改用 fs_write 整文件重写）。"
+                            ),
+                            error_code="STALE_READ",
+                        )
+                    _gate_warning = (
+                        f"（提示：{len(_uncovered)} 处替换位置本会话未读取过（首处第 {_s0}-{_e0} 行），"
+                        f"本次修改未经读取确认；如需核对请调用 {_hint}）"
+                    )
         try:
             write_text_file(target, tf, res.text)
         except OSError as e:
@@ -112,14 +148,25 @@ class EditorApplyDiffTool(Tool):
             output += f"（共替换 {res.count} 处）"
         if note:
             output += f"（{note}）"
+        if _gate_warning:
+            output += _gate_warning
         # plan-1085: data 带回新内容，供 agent_loop 磁盘读取失败时兜底统计/记录（不进模型上下文）
         # plan-20261019-diff: 同时带回写前内容——写前读盘失败时若没有它，整篇会被误算为新增
         _data: dict[str, Any] = {"path": path, "delta": len(str(new_text)) - len(str(old_text))}
+
+        # plan-548-2277：闸门结果带给 agent_loop（写后检查与前端变更卡可据此标注）
+        _data["read_verified"] = _read_verified
+        _data["edit_lines"] = [res.start_line, res.end_line]
         if len(tf.text) <= _NEW_CONTENT_MAX_CHARS:
             _data["old_content"] = tf.text
         if len(res.text) <= _NEW_CONTENT_MAX_CHARS:
             _data["new_content"] = res.text
         _rc = getattr(ctx, "read_cache", None)
         if _rc is not None:
-            _rc.mark_known(target)
+            # plan-560-2311 D1：这里是**局部**编辑，只能登记刚写过的那些行。
+            # 此前调 mark_known 把整文件标成「内容已知」，于是本会话后续对任意行
+            # 的编辑/覆盖都被无条件放行，两个门禁（covers / has_read）一起失守。
+            _gate_spans_after = list(res.spans) or [(res.start_line, res.end_line)]
+            _line_delta = res.text.count("\n") - tf.text.count("\n")
+            _rc.record_edit(target, _gate_spans_after, _line_delta)
         return ToolResult(ok=True, output=output, data=_data)

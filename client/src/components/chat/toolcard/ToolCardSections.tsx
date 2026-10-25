@@ -4,7 +4,8 @@
  * 容器与折叠在 `SessionToolCard.tsx`，Git 栏自成一体见 `GitToolSection.tsx`。
  *
  * 交互：
- *  · 计划 → 文件标签预览计划文档；进程步骤由子会话执行时，行尾「子会话」标记切换到该子会话；
+ *  · 计划 → 文件标签预览计划文档；进程步骤由子代理执行时，行尾「子代理」标记打开其执行过程
+ *    （升级前的历史步骤 label 为「历史子会话」，点击切到那个子会话）；
  *  · 子代理 → 子代理标签查看执行过程；工作流 → 工作流标签并定位到该运行；
  *  · 每项**一行**（行高固定，省略号截断），被截断时悬停显示完整内容（ui/Tooltip，不用原生 title）；
  *  · 折叠行（进程「已完成 N 项 / 待处理 N 项」、子代理 / 工作流「已完成 N 个」）悬停（或点击固定）
@@ -15,7 +16,7 @@
  *  · 行首图标统一放在 `.tcard-ic` 固定槽位（16px），状态切换（转圈 → 勾）不改变文字起点。
  */
 import { createContext, memo, useContext, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { IconChevronLeft, IconCpu, IconListChecks, IconStop, IconTerminal } from "../../icons";
+import { IconBot, IconChevronLeft, IconCpu, IconListChecks, IconStop, IconTerminal } from "../../icons";
 import { IxWorkflow } from "../../iconkit/StackIcons";
 import { HoverCard, IconButton, Tooltip } from "../../ui";
 import { useChatStore } from "../../../store/chat";
@@ -85,10 +86,11 @@ export const Row = memo(function Row({ icon, text, strong, className = "", trail
   return <Tooltip content={tipText} disabled={!tipText} side="left">{el}</Tooltip>;
 });
 
-/** 步骤状态图标（进程栏）：四态共用同一环径（24 网格 r=8、线宽 2、16px 渲染），切换时不跳大小。
- *  完成 = 绿色圆环 + 对勾；进行中 = 强调色转圈；待办 = 灰色空心圆；中断 = 警示色圆环 + 暂停竖线。
+/** 步骤状态图标（进程 / 子代理栏）：各态共用同一环径（24 网格 r=8、线宽 2、16px 渲染），切换时不跳大小。
+ *  完成 = 绿色圆环 + 对勾；进行中 = 强调色转圈；待办 = 灰色空心圆；中断 = 警示色圆环 + 暂停竖线；
+ *  失败（仅子代理）= 错误色圆环 + 叉。
  *  描边而非实心：整列步骤里大量「已完成」时，实心绿圆会糊成一片抢走正在做的那一项。 */
-export const StepIcon = memo(function StepIcon({ status }: { status: ProgressRow["status"] }) {
+export const StepIcon = memo(function StepIcon({ status }: { status: ProgressRow["status"] | "failed" }) {
   return (
     <svg
       className={`tcard-step is-${status}`}
@@ -112,34 +114,96 @@ export const StepIcon = memo(function StepIcon({ status }: { status: ProgressRow
       )}
       {status === "done" && <path d="M8 12l3 3 5-6" />}
       {status === "interrupted" && <path d="M10 9v6M14 9v6" />}
+      {status === "failed" && <path d="M9 9l6 6M15 9l-6 6" />}
     </svg>
   );
 });
 
-/** 子会话标题（进程行标记的提示） */
-function useSubsessionTitle(id: number): string {
-  return useChatStore((s) => {
+/** 子代理结果 → 步骤图标态（已停止与进程栏的「中断」同形） */
+const SUBAGENT_STEP: Record<"done" | "failed" | "stopped", "done" | "failed" | "interrupted"> = {
+  done: "done", failed: "failed", stopped: "interrupted",
+};
+
+/** 历史子会话标题（进程行标记的提示）；查不到退编号，不猜名字。
+ *  plan-562-2318：同时回报是否存在——此前查不到也返回编号，调用方无从区分
+ *  「有历史子会话」与「只是个孤立的 owner id」，于是渲染成可点击、点了跳到不存在的会话。 */
+function useSubsessionTitle(id: number): { title: string; exists: boolean } {
+  // 两个原子 selector（返回布尔 / 字符串）而不是返回对象，避免每次渲染都是新引用
+  const exists = useChatStore((s) => {
+    for (const list of Object.values(s.subsessionsByParent)) {
+      if (list.some((c) => c.id === id)) return true;
+    }
+    return false;
+  });
+  const title = useChatStore((s) => {
     for (const list of Object.values(s.subsessionsByParent)) {
       const hit = list.find((c) => c.id === id);
-      if (hit) return hit.title || `子会话 #${id}`;
+      if (hit?.title) return hit.title;
     }
-    return `子会话 #${id}`;
+    return "";
   });
+  return { title: title || `历史子会话 #${id}`, exists };
 }
 
-/** 进程行尾的「子会话」标记：点击切到该子会话。 */
-const OwnerChip = memo(function OwnerChip({ id }: { id: number }) {
-  const title = useSubsessionTitle(id);
+/** 进程行尾的执行者标记（plan-549-2281）。
+ *
+ * 并行执行已统一到子代理，所以新数据的 owner 是子代理 id——点击打开右面板的子代理执行过程；
+ * 升级前落库的步骤 owner 存的是子会话 id（ownerKind="subsession"），历史数据仍要能用：
+ * 点击切到那个历史子会话，不因为入口下线就看不了。
+ * 两者都不确定时（既无子代理元信息也无子会话行）只当作普通子代理角标，不做点击——
+ * 跳到一个不存在的目标比不可点更让人困感。
+ * plan-562-2318：注释与实现此前相反（旧代码在都不确定时仍渲染可点按钮去 switchSession）；
+ * 现在只有确认存在的历史子会话才可点击，否则一律渲染为不可点的子代理角标。 */
+const OwnerChip = memo(function OwnerChip({ id, kind }: { id: number; kind?: "subagent" | "subsession" | null }) {
+  const agentName = useChatStore((s) => s.subagentMeta[id]?.name ?? "");
+  const agentStatus = useChatStore((s) => String(s.subagentMeta[id]?.status ?? ""));
+  const legacy = useSubsessionTitle(id);
   const switchSession = useChatStore((s) => s.switchSession);
+  const openSubagent = usePanelStore((s) => s.openSubagent);
+
+  // plan-20261025-shell（需求 4）：执行者标记由「图标 + 子代理」文字胶囊改为一枚 16px 图标——
+  // 进程栏每行只有一行高，文字胶囊会挤掉步骤标题；名称与操作说明放进悬停提示。
+  // 图标色表达该子代理的状态：执行中 = 强调色，失败 / 取消 = 错误色，其余中性。
+  // 类型未知时：先看当前会话有没有这个子代理，没有才当作历史子会话
+  // plan-562-2318：历史子会话必须确实存在才按子会话渲染，否则退回子代理角标（不绑 onClick）
+  const resolved: "subagent" | "subsession" = kind === "subsession" && legacy.exists ? "subsession" : "subagent";
+  if (resolved === "subagent") {
+    const tone = agentStatus === "running" || agentStatus === "in_progress" ? "run"
+      : agentStatus === "failed" || agentStatus === "cancelled" ? "fail" : undefined;
+    const tip = agentName ? `由子代理「${agentName}」执行，点击查看过程` : `由子代理 #${id} 执行`;
+    // 没有子代理元信息时目标不明：同一枚图标，但渲染成不可点的静态角标
+    if (!agentName) {
+      return (
+        <Tooltip content={tip} side="left">
+          <span className="tcard-owner" data-tone={tone} aria-label={`子代理 #${id}`}>
+            <IconBot size={16} />
+          </span>
+        </Tooltip>
+      );
+    }
+    return (
+      <Tooltip content={tip} side="left">
+        <button
+          type="button"
+          className="tcard-owner"
+          data-tone={tone}
+          aria-label={`查看子代理「${agentName}」的执行过程`}
+          onClick={(e) => { e.stopPropagation(); openSubagent(id, agentName); }}
+        >
+          <IconBot size={16} />
+        </button>
+      </Tooltip>
+    );
+  }
   return (
-    <Tooltip content={`由子会话「${title}」执行，点击切换`} side="left">
+    <Tooltip content={`由历史子会话「${legacy.title}」执行，点击切换`} side="left">
       <button
         type="button"
-        className="tcard-chip"
+        className="tcard-owner"
+        aria-label={`切换到历史子会话「${legacy.title}」`}
         onClick={(e) => { e.stopPropagation(); void switchSession(id); }}
       >
-        <IconCpu size={11} />
-        <span className="tcard-chip-text">子会话</span>
+        <IconCpu size={16} />
       </button>
     </Tooltip>
   );
@@ -222,7 +286,7 @@ export const ProcessSection = memo(function ProcessSection({ data }: { data: Pro
               className={`tcard-proc is-${row.status}`}
               icon={<StepIcon status={row.status} />}
               text={row.title}
-              trailing={row.owner != null ? <OwnerChip id={row.owner} /> : undefined}
+              trailing={row.owner != null ? <OwnerChip id={row.owner} kind={row.ownerKind} /> : undefined}
             />
           );
         }
@@ -262,18 +326,36 @@ export const SubagentSection = memo(function SubagentSection({ data }: { data: S
           onClick={() => openSubagent(s.id, s.name)}
         />
       ))}
-      {/* 已完成的全部折成一行；运行中的不折叠（用户口径） */}
-      {data.finished.length > 0 && (
-        <FoldRow label={`已完成 ${data.finished.length} 个`}>
-          {data.finished.map((s) => (
+      {/* 尚未开始的折成一行（工作流排队节点可能很多），不混进「已完成」 */}
+      {data.pending.length > 0 && (
+        <FoldRow label={`待开始 ${data.pending.length} 个`}>
+          {data.pending.map((s) => (
             <FoldItem
-              key={`done-${s.id}`}
-              className="tcard-proc is-done"
-              icon={<StepIcon status="done" />}
+              key={`wait-${s.id}`}
+              className="tcard-proc is-pending"
+              icon={<StepIcon status="pending" />}
               text={s.name}
               onClick={() => openSubagent(s.id, s.name)}
             />
           ))}
+        </FoldRow>
+      )}
+      {/* 已结束的全部折成一行；运行中的不折叠（用户口径）。
+          逐项保留真实结果：有失败 / 已停止时折叠行写「已结束」，不把它们算进「已完成」（与右面板摘要一致） */}
+      {data.finished.length > 0 && (
+        <FoldRow label={`${data.finished.every((s) => s.state === "done") ? "已完成" : "已结束"} ${data.finished.length} 个`}>
+          {data.finished.map((s) => {
+            const step = SUBAGENT_STEP[s.state];
+            return (
+              <FoldItem
+                key={`done-${s.id}`}
+                className={`tcard-proc is-${step}`}
+                icon={<StepIcon status={step} />}
+                text={s.name}
+                onClick={() => openSubagent(s.id, s.name)}
+              />
+            );
+          })}
         </FoldRow>
       )}
     </>

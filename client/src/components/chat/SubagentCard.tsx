@@ -4,8 +4,15 @@
  */
 import { memo } from "react";
 import { usePanelStore } from "../../store/panel";
-import { IconCpu, IconSpinner, IconX, IconCheck, IconChevronRight } from "../icons";
+import { IconBot, IconSpinner, IconX, IconCheck, IconChevronRight, IconPause } from "../icons";
 import { Tooltip } from "../ui";
+import { subagentState, type SubagentState } from "./subagentStatus";
+
+/** 状态词与右面板摘要、工具卡同一口径（subagentStatus.ts，plan-20261025-progress-keep）：
+ *  已取消 / 已终止是「已停止」而不是失败，排队中的是「待开始」——此前一律写「失败」，与摘要的「已停止」自相矛盾 */
+const STATE_TEXT: Record<SubagentState, string> = {
+  running: "执行中", done: "已完成", failed: "失败", stopped: "已停止", pending: "待开始",
+};
 
 export interface SubagentMetaLite {
   agentId: number;
@@ -24,36 +31,45 @@ export interface SubagentMetaLite {
 
 export const SubagentCard = memo(function SubagentCard({ meta }: { meta: SubagentMetaLite }) {
   const openSubagent = usePanelStore((s) => s.openSubagent);
-  const running = meta.status === "running" || meta.status === "in_progress";
-  const failed = meta.status === "failed" || meta.status === "cancelled";
-  const done = meta.status === "done";
+  const state = subagentState(meta.status);
+  const running = state === "running";
+  const failed = state === "failed";
+  const stopped = state === "stopped";
+  const done = state === "done";
 
-  const errText = failed && meta.error ? String(meta.error).trim() : "";
+  const errText = (failed || stopped) && meta.error ? String(meta.error).trim() : "";
   // plan-20261022-subagent-dispatch-fail：派发被拒时没有对应会话，整行静态展示
   const dispatchFailed = meta.dispatchFailed === true;
   const clickable = !dispatchFailed && meta.agentId > 0;
 
+  // plan-20261025-shell（需求 1）：与工具行同一写法——「子代理 任务名 · 状态」，图标与其它行同为 16px 槽位；
+  // 状态只在行尾（转圈 / 勾 / 叉 / 暂停 + 一个弱色状态词），动作词不再随状态改写，整列起点与宽度稳定
+  const stateText = running ? "执行中" : dispatchFailed ? "派发失败" : STATE_TEXT[state];
+  const tip = dispatchFailed
+    ? `${meta.name}（派发失败：${errText || "未知原因"}）`
+    : errText
+      ? `${meta.name}（${stopped ? "已停止" : "失败"}：${errText}）点击查看完整会话`
+      : `${meta.name}（点击查看完整会话）`;
   return (
     <div className="tc-node tc-subagent">
-      <div
-        className={"tc-row tc-subagent-row" + (clickable ? " has-output" : "")}
-        title={dispatchFailed
-          ? `${meta.name}（派发失败：${errText || "未知原因"}）`
-          : errText
-            ? `${meta.name}（失败：${errText}）点击查看完整会话`
-            : `${meta.name}（点击查看完整会话）`}
-        onClick={clickable ? () => openSubagent(meta.agentId, meta.name) : undefined}
-      >
-        <span className="tc-icon"><IconCpu size={13} /></span>
-        <span className={"tc-verb" + (running ? " text-shine" : "")}>
-          {running ? "子代理执行中" : dispatchFailed ? "子代理派发失败" : done ? "子代理已完成" : "子代理失败"}
-        </span>
-        <Tooltip content={meta.name}><span className="tc-query">{meta.name}</span></Tooltip>
-        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
-        {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
-        {failed && <span className="tc-status fail"><IconX size={11} /></span>}
-        {clickable && <span className="tc-chevron"><IconChevronRight size={11} /></span>}
-      </div>
+      <Tooltip content={tip}>
+        <div
+          className={"tc-row tc-subagent-row" + (clickable ? " has-output" : "")}
+          data-tool-state={running ? "running" : failed ? "fail" : "done"}
+          onClick={clickable ? () => openSubagent(meta.agentId, meta.name) : undefined}
+        >
+          <span className="tc-icon"><IconBot size={16} /></span>
+          <span className={"tc-verb" + (running ? " text-shine" : "")}>子代理</span>
+          <span className="tc-query">{meta.name}</span>
+          <span className="tc-sep" aria-hidden>·</span>
+          <span className="tc-meta">{stateText}</span>
+          {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
+          {done && <span className="tc-status ok"><IconCheck size={11} /></span>}
+          {failed && <span className="tc-status fail"><IconX size={11} /></span>}
+          {stopped && <span className="tc-status stop"><IconPause size={11} /></span>}
+          {clickable && <span className="tc-chevron"><IconChevronRight size={11} /></span>}
+        </div>
+      </Tooltip>
       {/* plan-330-1648 M7: 失败原因（单行截断，完整内容见 title / 右面板） */}
       {errText && (
         <Tooltip content={errText}>

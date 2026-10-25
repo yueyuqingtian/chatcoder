@@ -20,7 +20,7 @@ import { formatRelativeTime, parseUtc } from "../utils/time";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { MergeDialog } from "./worktree/MergeDialog";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
-import { Collapse, Empty, Input, Segmented, Tooltip } from "./ui";
+import { Button, Collapse, Empty, Input, Segmented, Tooltip } from "./ui";
 import { ProjectIcon } from "./project/ProjectIcon";
 import { WaitingIcon } from "./iconkit/WaitingIcon";
 import { usePendingInteractions } from "../store/pendingInteractions";
@@ -30,7 +30,7 @@ import {
   IconChevronDown,
   IconFolder, IconLayers, IconSortDesc, IconPencil,
   IconMoreHorizontal, IconPin, IconPlus, IconRefresh,
-  IconFolderPlus, IconArrowDown, IconCopy, IconClock, IconSortAlpha, IconArchive, IconGitBranch, IconTrash, IconSpinner,
+  IconFolderPlus, IconArrowDown, IconCopy, IconArchive, IconGitBranch, IconTrash, IconSpinner,
 } from "./icons";
 
 export type NavKey = "chat" | "scheduled" | "skills" | "mcp" | "settings";
@@ -59,6 +59,20 @@ const WORKFLOW_STATE_LABEL: Record<string, string> = {
 
 const SESSION_PAGE_STEP = 5;
 const SESSION_EXPAND_ALL_THRESHOLD = 10;
+
+/** plan-20261025-shell（需求 2）：「分组」视图按最近活动时间分组（此前只是一条不分组的「任务」长列表，
+ *  与「项目」视图的差别只在有没有项目行）。分组顺序固定，空组不渲染。 */
+const TIME_BUCKETS = ["today", "yesterday", "week", "month", "older"] as const;
+type TimeBucket = typeof TIME_BUCKETS[number];
+const DAY_MS = 86_400_000;
+
+function timeBucketOf(ms: number, todayStart: number): TimeBucket {
+  if (ms >= todayStart) return "today";
+  if (ms >= todayStart - DAY_MS) return "yesterday";
+  if (ms >= todayStart - 6 * DAY_MS) return "week";
+  if (ms >= todayStart - 29 * DAY_MS) return "month";
+  return "older";
+}
 
 /** 更新入口：主进程发现新版本时在设置按钮右侧出现（plan-405-1900）。
  * 三态共用同一个固定宽度胶囊槽位——可更新（点击下载）/ 下载中（胶囊底色即进度）/ 已就绪（点击重启），
@@ -205,9 +219,10 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const [sort, setSort] = useState<"recent" | "name">(() => {
     return localStorage.getItem("chatcoder:sidebar-sort") === "name" ? "name" : "recent";
   });
-  const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<number, boolean>>(loadCollapsedProjects);
   const [projectLimits, setProjectLimits] = useState<Record<number, number>>({});
+  /** 分组视图里各时间分组「显示更多」的条数上限（与项目下会话同一分批口径） */
+  const [bucketLimits, setBucketLimits] = useState<Record<string, number>>({});
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   /** plan-156-620：折叠了子会话的主会话 id（本地记忆；默认展开） */
   const [collapsedSubs, setCollapsedSubs] = useState<Set<number>>(() => {
@@ -235,12 +250,38 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
    *  只靠 CSS :hover 放开在快速移入后立即点击时会点空；用 React 状态提前放开，点击能稳定命中。 */
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [projectMenuFor, setProjectMenuFor] = useState<number | null>(null);
+  /** plan-20261025-popclip：项目菜单与会话菜单同样 portal 到 body——行内 absolute 菜单在列表靠下的项目上
+   *  会被侧栏滚动区裁掉（只露出上半截，要滚动才看得到）。 */
+  const [projectMenuPos, setProjectMenuPos] = useState<{ left: number; top: number } | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
   /** 新建工作树弹窗的目标项目（null = 关闭） */
   const [worktreeFor, setWorktreeFor] = useState<ProjectOut | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<SessionOut | null>(null);
   // plan-41-233：页面态 = nav 落在「拓展/定时任务/设置」等页面（会话页 chat 不算）。
   // 页面态下抑制会话行的聚焦高亮——避免 nav 项与会话行同时「双聚焦」。
   const pageMode = active != null && active !== "chat";
+
+  /** plan-20261025-sidebar-row：切换条按自身可用宽度收拢。
+   *  侧栏拖到最窄（240px，内容宽 220px）时，「分组/项目」分段控件（约 134px）+ 排序按钮（54px）
+   *  + 新建项目图标刚好溢出，排序按钮被 flex-wrap 折到第二行、孤零零靠右，看起来像排版错乱。
+   *  这里观察切换条的**内容宽度**（不含内边距），窄时在 data-fit 上写 tight，
+   *  由 CSS 收起排序按钮的文字只留图标——当前排序方式仍由悬停提示与 aria-label 承接，功能不丢。
+   *  为什么不用容器查询：项目内已有结论（见 composer/useToolbarFit.ts），container-type 会让
+   *  该元素成为层叠上下文，把内部浮层压到别的层下面；直接观察宽度没有这个副作用。 */
+  const viewbarRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = viewbarRef.current;
+    if (!el) return;
+    const apply = (width: number) => {
+      const next = width < 236 ? "tight" : "";
+      if (el.dataset.fit !== next) el.dataset.fit = next;
+    };
+    const cs = getComputedStyle(el);
+    apply(el.clientWidth - parseFloat(cs.paddingLeft || "0") - parseFloat(cs.paddingRight || "0"));
+    const ro = new ResizeObserver((entries) => apply(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // ── S1（plan-41-197）：重命名稳定性 ────────────────────────────────
   // 用户反馈“会话运行时点重命名会很快失去焦点，导致重命名失败”。三层根因：
@@ -263,13 +304,13 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     if (title && title !== originalTitle) void renameSession(id, title);
   };
 
-  // ── S1：浮窗外点关闭 + Esc 关闭（会话/项目/排序三处菜单共用） ──
-  // 此前三处菜单只能再次点击触发按钮关闭，点击空白处无反应
+  // ── S1：浮窗外点关闭 + Esc 关闭（会话 / 项目两处菜单共用；排序已改为一键切换，不再有菜单） ──
+  // 此前菜单只能再次点击触发按钮关闭，点击空白处无反应
   // （用户要求“所有浮窗，点击空白处应该自动关闭”）。触发按钮自身除外，避免“先关后开”抖动。
-  const anyMenuOpen = menuFor !== null || projectMenuFor !== null || sortMenuOpen;
+  const anyMenuOpen = menuFor !== null || projectMenuFor !== null;
   useEffect(() => {
     if (!anyMenuOpen) return;
-    const closeAll = () => { setMenuFor(null); setMenuPos(null); setProjectMenuFor(null); setSortMenuOpen(false); };
+    const closeAll = () => { setMenuFor(null); setMenuPos(null); setProjectMenuFor(null); setProjectMenuPos(null); };
     const onDown = (e: PointerEvent) => {
       const el = e.target as HTMLElement | null;
       if (el?.closest(".sb-context-menu, .sb-session-actions, .sb-project-actions, .sb-icon-btn")) return;
@@ -297,22 +338,31 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   }, [renaming]);
 
   /* plan-156-622：菜单挂到 body 后量一次实际尺寸，越出视口就夹回来——
-     行可能贴着窗口底部，按行底边展开会把菜单推到屏幕外。 */
-  useLayoutEffect(() => {
-    if (menuFor === null) return;
-    const el = sessionMenuRef.current;
+     行可能贴着窗口底部，按行底边展开会把菜单推到屏幕外。会话菜单与项目菜单共用。 */
+  const clampMenu = (
+    el: HTMLDivElement | null,
+    pos: { left: number; top: number } | null,
+    setPos: (p: { left: number; top: number }) => void,
+  ) => {
     if (!el) return;
     const r = el.getBoundingClientRect();
     const pad = 8;
-    let { left, top } = menuPos ?? { left: r.left, top: r.top };
+    let { left, top } = pos ?? { left: r.left, top: r.top };
     if (r.right > window.innerWidth - pad) left -= r.right - (window.innerWidth - pad);
     if (r.bottom > window.innerHeight - pad) top -= r.bottom - (window.innerHeight - pad);
     if (left < pad) left = pad;
     if (top < pad) top = pad;
-    if (Math.abs(left - r.left) > 0.5 || Math.abs(top - r.top) > 0.5) setMenuPos({ left, top });
-    // 只在打开与内容变化时校正；夹取后再渲染不会形成回路（位置已收敛）
+    if (Math.abs(left - r.left) > 0.5 || Math.abs(top - r.top) > 0.5) setPos({ left, top });
+  };
+  // 只在打开时校正；夹取后再渲染不会形成回路（位置已收敛）
+  useLayoutEffect(() => {
+    if (menuFor !== null) clampMenu(sessionMenuRef.current, menuPos, setMenuPos);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menuFor]);
+  useLayoutEffect(() => {
+    if (projectMenuFor !== null) clampMenu(projectMenuRef.current, projectMenuPos, setProjectMenuPos);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectMenuFor]);
 
   const navItems = useMemo(() => [
     { key: "chat", label: t("sidebar.new_task"), icon: <IxNewChat size={16} />, shortcut: "Ctrl+N" },
@@ -335,13 +385,57 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     try { localStorage.setItem("chatcoder:sidebar-sort", sort); } catch { /* ignore */ }
   }, [sort]);
 
-  /* plan-156-620：子会话桶由 store.loadSubsessionIndex 一次性重建（启动 + subsession.created），
-     不再按会话逐个请求——旧做法每次进侧栏发上百个 /subsessions，拖慢全部接口。 */
+  /* plan-156-620：子会话桶由 store.loadSubsessionIndex 一次性重建（启动 / 重连），
+     不再按会话逐个请求——旧做法每次进侧栏发上百个 /subsessions，拖慢全部接口。
+     plan-549-2281：子会话创建已下线，桶里只有历史存量。 */
 
-  /** 主项目（排除工作树——工作树作为其父项目下的独立工作区单独渲染） */
+  /** 主项目（排除工作树——工作树作为其父项目下的独立工作区单独渲染）。
+   *  plan-20261025-shell（需求 2）：排序同样作用于项目本身——此前只排项目内的会话，项目始终按创建顺序，
+   *  选「按最近」时最近在忙的项目仍可能沉在底部。最近 = 项目内会话的最近活动时间；名称 = 按显示名的拼音序。
+   *
+   *  plan-20261025-projectsort：项目排序的时间基准必须**稳定**。
+   *  `last_activity_at` 随每条流式消息推进——两个项目各有一个会话同时在跑时，两边的值交替变大，
+   *  项目顺序就会来回超车（用户反馈「顺序频繁变化」）。运行中的会话改用本轮开始时刻
+   *  `running_started_at`（执行期恒定），与项目内会话排序（byRunning）同一口径；
+   *  只有不在运行的会话才用最近活动时间，它此时已不再推进，同样不会抖动。 */
   const visibleProjects = useMemo(() => {
-    return projects.filter((p) => !p.archived && !p.is_worktree);
-  }, [projects]);
+    const list = projects.filter((p) => !p.archived && !p.is_worktree);
+    const nameOf = (p: ProjectOut) => p.name || shortPath(p.path);
+    if (sort === "name") return [...list].sort((a, b) => nameOf(a).localeCompare(nameOf(b), "zh-Hans-CN"));
+    /** 项目内是否有会话正在执行 */
+    const busyOf = (projectId: number): boolean => {
+      for (const s of sessions) {
+        if (s.project_id !== projectId || s.status === "archived") continue;
+        if (sessionBusy(s, busyIds)) return true;
+      }
+      return false;
+    };
+    /** 排序键：运行中 → 本轮开始时刻（执行期恒定）；否则 → 最近活动时刻（已停止，不再推进） */
+    const activityOf = (s: SessionOut): number => {
+      if (sessionBusy(s, busyIds)) {
+        const started = parseUtc(s.running_started_at);
+        if (started > 0) return started;
+      }
+      return parseUtc(s.last_activity_at);
+    };
+    const latest = new Map<number, number>();
+    for (const s of sessions) {
+      if (s.status === "archived" || s.project_id == null) continue;
+      const t = activityOf(s);
+      if (t > (latest.get(s.project_id) ?? 0)) latest.set(s.project_id, t);
+    }
+    /* 三个分区依次排：正在执行的项目 → 其余项目按活动键 → 没有会话的项目保持原顺序。
+     * 运行中的项目整体稳定置顶，是为了避免「刚停的那个项目带着更大的 last_activity_at 与
+     * 仍在跑的项目来回换位」——两者用的是不同基准量级，混在一起比就会抖动。 */
+    const rank = (id: number): number => (busyOf(id) ? 0 : (latest.get(id) ?? 0) > 0 ? 1 : 2);
+    return [...list].sort((a, b) => {
+      const ra = rank(a.id);
+      const rb = rank(b.id);
+      if (ra !== rb) return ra - rb;
+      if (ra === 1) return (latest.get(b.id) ?? 0) - (latest.get(a.id) ?? 0);
+      return 0; // 运行中 / 无会话：彼此保持原有顺序（sort 稳定）
+    });
+  }, [projects, sessions, sort, busyIds]);
 
   /** plan-282-1441（#5）：工作树按父项目分组（parent_project_id → 工作树列表） */
   const worktreesByParent = useMemo(() => {
@@ -408,6 +502,21 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     return { pinnedSessions: pinned, filteredSessions: rest };
     // 依赖用 busyIds（含当前会话的运行态）——此前写成 wfBusyIds，当前会话开始运行时列表不会重排
   }, [sessions, subsessionsByParent, sort, busyIds]);
+
+  /** plan-20261025-shell（需求 2）：分组视图的时间分组（沿用上面的排序：组内运行中在前、其余按最近活动）。
+   *  运行中的会话一律归入「今天」——它此刻就在动，不该因为上次落库较早被分到更早的组里。 */
+  const timeGroups = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    const todayStart = d.getTime();
+    const map = new Map<TimeBucket, SessionOut[]>();
+    for (const s of filteredSessions) {
+      const bucket: TimeBucket = sessionBusy(s, busyIds) ? "today" : timeBucketOf(parseUtc(s.last_activity_at), todayStart);
+      const arr = map.get(bucket);
+      if (arr) arr.push(s); else map.set(bucket, [s]);
+    }
+    return TIME_BUCKETS.filter((b) => map.has(b)).map((b) => [b, map.get(b)!] as const);
+  }, [filteredSessions, busyIds]);
 
   /** 置顶 / 取消置顶：先本地更新（会话立刻移入 / 移出置顶分区），再落库；失败时以服务端为准重新拉取 */
   const togglePin = (s: SessionOut) => {
@@ -513,8 +622,11 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
    *  子会话只多一级缩进；`child` 时不再向下展开子级，也不提供分支 / 工作树（它们属于主会话）。
    *  `inPinnedSection`：该行渲染在「置顶」分区里——分区标题已表达状态，行内不再常驻钉子；
    *  此时子会话也不再缩进（它已脱离父会话组，缩进会让人误以为上一条是它的父级）。 */
-  const renderSessionRow = (s: SessionOut, child: boolean, inPinnedSection = false) => {
+  const renderSessionRow = (s: SessionOut, child: boolean, inPinnedSection = false, showProject = false) => {
     const isCurrent = s.id === currentSessionId && !pageMode;
+    /** plan-20261025-shell（需求 2）：不在项目分组下的会话行（置顶分区 / 分组视图）行首显示所属项目的图标，
+     *  一眼看出它属于哪个项目；悬停时同一槽位换成置顶按钮（运行中 / 等待态仍优先显示状态） */
+    const proj = showProject ? projects.find((p) => p.id === s.project_id) : undefined;
     const editing = renaming?.id === s.id;
     // plan-156-619 S5：主会话下的子会话（不含子会话自身——子项不再向下嵌套，一层扁平）
     // plan-156-623：已置顶的子会话移到「置顶」分区，父组里不再重复显示。
@@ -545,7 +657,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             plan-156-623：已置顶的行统一在「置顶」分区，那里不再重复钉子（分区标题已表达状态）。
             plan-522-2209：三分支且等待态最高优先——等待时置顶按钮根本不渲染，
             悬停也就无从把它替换掉（用户明确要求「hover 不被置顶图标替换」）。 */}
-        <span className="sb-session-slot">
+        <span className={"sb-session-slot" + (proj ? " has-proj" : "")}>
           {waiting ? (
             <Tooltip content={s.plan_awaiting ? "计划待确认，等你看过再决定是否执行" : "有子任务在等你处理"} side="top">
               <WaitingIcon size={15} label="等待处理" />
@@ -553,6 +665,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           ) : busy ? (
             <span className="sb-session-pulse on" aria-hidden="true" />
           ) : (
+            <>
+            {proj && <ProjectIcon icon={proj.icon} color={proj.color} size={14} className="sb-slot-proj" />}
             <Tooltip content={s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")} side="top">
               {/* plan-156-622：改用 button——旧实现是 span+role，键盘不可达；
                   is-armed 由行的 pointerenter 驱动，不依赖 CSS :hover 的重算时机（快速移入后点击不会点空）。 */}
@@ -568,6 +682,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
                 <IconPin size={13} />
               </button>
             </Tooltip>
+            </>
           )}
         </span>
 
@@ -617,20 +732,22 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           </span>
           </Tooltip>
         )}
-        {/* plan-156-620：子会话开关——点击折叠 / 展开该会话下的子会话（记忆选择）。
+        {/* plan-156-620：历史子会话折叠开关（plan-549-2281 起不再产生新子会话）。
+            这些是升级前已派发的挂靠会话——只保留「看与打开」的能力，不提供新建入口；
+            文案用中性的「历史子会话」，不再暗示「并行执行」。
             plan-20261018-sidebar-toggle：由「数量 + 箭头」胶囊改为与行尾归档 / 三点同规格的
             20px 图标按钮——胶囊比图标宽 15px，且与行尾图标相隔 18px（行 gap 8 + 槽位左空 10），
             视觉上明显偏散；数量移入 Tooltip，图标只剩折叠箭头。 */}
         {children.length > 0 && !editing && (
           <Tooltip
-            content={`${children.length} 个子会话 · ${subsOpen ? "收起" : "展开"}`}
+            content={`${children.length} 个历史子会话 · ${subsOpen ? "收起" : "展开"}`}
             side="top"
           >
             <button
               type="button"
               className={"sb-sub-toggle" + (childRunning ? " is-running" : "")}
               aria-expanded={subsOpen}
-              aria-label={`${children.length} 个子会话，${subsOpen ? "收起" : "展开"}`}
+              aria-label={`${children.length} 个历史子会话，${subsOpen ? "收起" : "展开"}`}
               onClick={(e) => { e.stopPropagation(); toggleSubs(s.id); }}
             >
               <IconChevronDown size={13} />
@@ -665,7 +782,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               onClick={(e) => {
                 e.stopPropagation();
                 if (sessionBusy(s, busyIds)) return;
-                api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
+                // plan-20261025-shell（需求 8）：统一归档动作——归档的是当前会话时自动回退
+                void useChatStore.getState().archiveSession(s.id);
               }}
             >
               <IconArchive size={14} />
@@ -707,7 +825,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               onClick={() => {
                 if (sessionBusy(s, busyIds)) return;
                 closeSessionMenu();
-                api.updateSession(s.id, { status: "archived" }).then(() => loadBootstrap());
+                void useChatStore.getState().archiveSession(s.id);
               }}
             ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
             <div className="context-menu-divider" />
@@ -716,9 +834,10 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
           document.body,
         )}
       </div>
-      {/* plan-156-619 S5：父会话下缩进一级列出子会话（一层扁平，子会话不再向下嵌套）。
+      {/* plan-156-619 S5：父会话下缩进一级列出历史子会话（一层扁平，不再向下嵌套）。
           几何与普通会话行一致（同一 20px 状态槽），只多一个「子会话」细标识——
-          不加色块、不加左侧竖线（项目规则禁止装饰性竖线表达层级）。 */}
+          不加色块、不加左侧竖线（项目规则禁止装饰性竖线表达层级）。
+          plan-549-2281：子会话的创建入口已下线，这里保留展示，升级前的挂靠会话仍然可打开。 */}
       {/* plan-20261019-motion-sweep：展开 / 收起改用统一 Collapse（--dur-3 + emphasized-decel，带淡入淡出），
           此前自带的 grid 过渡只有 --dur-2 的 120ms，视觉上几乎等同瞬切。 */}
       {children.length > 0 && (
@@ -746,6 +865,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     // plan-20261017-sbwt：分支名与工作树名相同（最常见）时不再重复显示标签，避免一行里出现两遍同一串文字
     const branchTag = isWorktree && p.worktree_branch && p.worktree_branch !== displayName ? p.worktree_branch : null;
     const menuOpen = projectMenuFor === p.id;
+    /** plan-20261025-shell（需求 2）：行尾会话数（收起的项目也能看出体量；悬停时让位给操作按钮） */
+    const sessionCount = filteredSessions.reduce((n, s) => (s.project_id === p.id ? n + 1 : n), 0);
     return (
       <div
         className={`sb-project${isCurrent ? " current" : ""}${isWorktree ? " is-wt" : ""}${menuOpen ? " menu-open" : ""}`}
@@ -770,6 +891,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             </Tooltip>
           )}
         </span>
+        {sessionCount > 0 && <span className="sb-project-count" aria-label={`${sessionCount} 个任务`}>{sessionCount}</span>}
         <span className="sb-project-tools">
           {!isWorktree && (
             <Tooltip content="新建工作树" side="top">
@@ -791,12 +913,31 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               <IconPlus size={12} />
             </span>
           </Tooltip>
-          <span className="sb-project-actions" onClick={(e) => { e.stopPropagation(); setProjectMenuFor(menuOpen ? null : p.id); }}>
+          <span
+            className="sb-project-actions"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (menuOpen) { setProjectMenuFor(null); return; }
+              // 与会话菜单同一口径：贴行右缘、行下方展开，挂载后再按实际尺寸夹回视口
+              const row = (e.currentTarget as HTMLElement).closest(".sb-project") as HTMLElement | null;
+              if (!row) return;
+              const r = row.getBoundingClientRect();
+              setProjectMenuPos({ left: Math.max(8, r.right - 180), top: r.bottom + 2 });
+              setProjectMenuFor(p.id);
+            }}
+          >
             <IconMoreHorizontal size={13} />
           </span>
         </span>
-        {projectMenuFor === p.id && (
-          <div className="context-menu sb-context-menu" onClick={() => setProjectMenuFor(null)}>
+        {projectMenuFor === p.id && createPortal(
+          <div
+            ref={projectMenuRef}
+            className="context-menu sb-context-menu sb-floating-menu"
+            style={projectMenuPos ?? undefined}
+            role="menu"
+            // portal 的点击仍沿 React 树冒泡：拦在这里，避免点菜单项时连带触发项目行的展开 / 收起
+            onClick={(e) => { e.stopPropagation(); setProjectMenuFor(null); }}
+          >
             {!isWorktree && (
               <div className="context-menu-item" onClick={() => openProjectDialog({ mode: "edit", projectId: p.id })}>
                 <IconPencil size={13} /> 编辑项目
@@ -825,7 +966,8 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
                 <div className="context-menu-item danger" onClick={() => { api.updateProject(p.id, { archived: true }).then(() => loadBootstrap()); }}><IconArchive size={13} /> {t("sidebar.ctx_archive_project")}</div>
               </>
             )}
-          </div>
+          </div>,
+          document.body,
         )}
       </div>
     );
@@ -854,8 +996,9 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             <div className="sb-batch-list">{rows.map(renderSession)}</div>
           </Collapse>
         ))}
-        {emptyHint && projSessions.length === 0 && (
-          <div className="sb-worktree-empty">还没有会话，点 + 开始</div>
+        {projSessions.length === 0 && (
+          // plan-20261025-shell（需求 2）：普通项目展开后没有任务时同样给一行弱提示，不再是一段空白
+          <div className="sb-worktree-empty">{emptyHint ? "还没有会话，点 + 开始" : t("sidebar.project_empty")}</div>
         )}
         {/* 剩余 0 项时按钮随同一条曲线收拢；收起期间 Collapse 冻结最后一次的文案，不会闪成「剩余 0 项」 */}
         <Collapse open={remaining > 0} lazy className="in-gap">
@@ -889,6 +1032,32 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
     );
   };
 
+  /** 分组视图的一个时间组：先显示 10 条，其余由「展开全部」一次放出（与项目下的分批同一套 Collapse 过渡） */
+  const renderBucket = (bucket: string, list: SessionOut[]) => {
+    const limit = bucketLimits[bucket] || SESSION_PAGE_STEP * 2;
+    const shown = list.slice(0, limit);
+    const remaining = list.length - shown.length;
+    return (
+      <div className="sb-project-children">
+        {shown.map((s) => renderSessionRow(s, false, false, true))}
+        <Collapse open={remaining > 0} lazy className="in-gap">
+          {() => (
+            <div className="sb-more-wrapper">
+              <button
+                type="button"
+                className="sb-more-btn"
+                onClick={(e) => { e.stopPropagation(); setBucketLimits((prev) => ({ ...prev, [bucket]: list.length })); }}
+              >
+                <IconChevronDown size={12} />
+                <span>{t("sidebar.expand_all", { count: remaining })}</span>
+              </button>
+            </div>
+          )}
+        </Collapse>
+      </div>
+    );
+  };
+
   return (
     <nav className="sidebar sb sb-v2">
       {/* 头部占位：logo / 折叠 / 前进后退由 App 层的 WindowNavCluster 悬浮在此位置，折叠前后坐标恒定 */}
@@ -911,7 +1080,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
       {(
         <>
           {/* 分组|项目切换 + 操作图标 */}
-          <div className="sb-viewbar">
+          <div className="sb-viewbar" ref={viewbarRef}>
             {/* plan-20261009-ui U4：分组 / 项目切换改用统一胶囊分段控件（滑块随选中项平移） */}
             <Segmented
               size="sm"
@@ -924,15 +1093,22 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               ]}
             />
             <div className="sb-view-actions">
-              <Tooltip content={t("sidebar.sort_title")}><button className={"sb-icon-btn" + (sortMenuOpen ? " active" : "")} onClick={() => setSortMenuOpen(!sortMenuOpen)}><IconSortDesc size={14} /></button></Tooltip>
+              {/* plan-20261025-shell（需求 2）：排序改为一键切换——按钮上直接写着当前方式（最近 / 名称），
+                  点一下换成另一种；此前是图标 + 二级菜单，看不出当前按什么排、切换要点两次，菜单里的名称图标还画错了 */}
+              <Tooltip content={sort === "recent" ? "当前按最近活动排序，点击改为按名称" : "当前按名称排序，点击改为按最近活动"}>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  className="sb-sort-toggle"
+                  icon={<IconSortDesc size={14} />}
+                  aria-label={sort === "recent" ? "排序：按最近活动（点击切换为按名称）" : "排序：按名称（点击切换为按最近活动）"}
+                  onClick={() => setSort(sort === "recent" ? "name" : "recent")}
+                >
+                  <span key={sort} className="sb-sort-label">{sort === "recent" ? t("sidebar.sort_recent_short") : t("sidebar.sort_name_short")}</span>
+                </Button>
+              </Tooltip>
               <Tooltip content={t("sidebar.new_project")}><button className="sb-icon-btn" onClick={handleNewProject}><IconFolderPlus size={14} /></button></Tooltip>
             </div>
-            {sortMenuOpen && (
-              <div className="context-menu sb-context-menu sb-sort-menu" onClick={() => setSortMenuOpen(false)}>
-                <div className={"context-menu-item" + (sort === "recent" ? " active" : "")} onClick={() => setSort("recent")}><IconClock size={13} /> {t("sidebar.sort_recent")}</div>
-                <div className={"context-menu-item" + (sort === "name" ? " active" : "")} onClick={() => setSort("name")}><IconSortAlpha size={13} /> {t("sidebar.sort_name")}</div>
-              </div>
-            )}
           </div>
 
           {/* 列表区 */}
@@ -942,12 +1118,13 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             {pinnedSessions.length > 0 && (
               <div className="sb-pinned">
                 <div className="sb-section-label">{t("sidebar.section_pinned")}</div>
-                {pinnedSessions.map((p) => renderSessionRow(p, p.side_parent_id != null, true))}
+                {pinnedSessions.map((p) => renderSessionRow(p, p.side_parent_id != null, true, true))}
               </div>
             )}
             {/* plan-20261019-motion-sweep：分组 / 项目切换时内容整体淡入（key=view 让两种视图各自挂载一次）。
-                包一层不影响布局：内部仍是自上而下的块流，与此前直接铺在 .sb-list 里一致。 */}
-            <div key={view} className="sb-view-pane">
+                包一层不影响布局：内部仍是自上而下的块流，与此前直接铺在 .sb-list 里一致。
+                plan-20261025-shell：切换排序同样重播一次淡入，列表换序不再是一帧硬跳 */}
+            <div key={`${view}-${sort}`} className="sb-view-pane">
             {view === "project" ? (
               <>
                 <div className="sb-section-label">{t("sidebar.section_projects")}</div>
@@ -975,8 +1152,21 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
               </>
             ) : (
               <>
-                <div className="sb-section-label">{t("sidebar.section_tasks")}</div>
-                {filteredSessions.map(renderSession)}
+                {/* plan-20261025-shell（需求 2）：分组视图——按最近活动分成「今天 / 昨天 / 近 7 天 / 近 30 天 / 更早」，
+                    行首是所属项目的图标；按名称排序时时间分组没有意义，退回一条「任务」列表 */}
+                {sort === "name" ? (
+                  <>
+                    <div className="sb-section-label">{t("sidebar.section_tasks")}</div>
+                    {filteredSessions.map((s) => renderSessionRow(s, false, false, true))}
+                  </>
+                ) : (
+                  timeGroups.map(([bucket, list]) => (
+                    <div key={bucket} className="sb-time-group">
+                      <div className="sb-section-label">{t(`sidebar.bucket_${bucket}`)}</div>
+                      {renderBucket(bucket, list)}
+                    </div>
+                  ))
+                )}
                 {filteredSessions.length === 0 && pinnedSessions.length === 0 && (
                   <Empty size="sm" title={t("sidebar.empty_sessions")}
                     action={<button className="btn btn-secondary btn-sm" onClick={() => onChange("chat")}><IconPlus size={13} /> {t("sidebar.create_first_task")}</button>} />

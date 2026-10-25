@@ -9,7 +9,6 @@
 - M5-a 落库时序：spawn 的 TOOL_CALL 在工具执行前落库并排空（卡片位置正确的充要条件）。
 - M7 保活：未送达通知阻止 manager 被销毁。
 """
-import asyncio
 import inspect
 from pathlib import Path
 
@@ -120,9 +119,13 @@ def test_subagent_spawn_passes_mode_comm_and_inbox():
 
 
 def test_plan_correction_is_main_agent_only():
-    """计划文档纠偏只对主代理生效——子代理不再被反复催写 ai/chatcoder-plan-*.md。"""
+    """计划文档纠偏只对主代理生效——子代理不再被反复催写 ai/chatcoder-plan-*.md。
+
+    plan-562-2318 M1：判据由「模式名等值」改为「判定档等值」（`_mode_kind(permission_mode) == "plan"`），
+    自定义 kind=plan 模式也要命中。断言随之改为查判定档写法，语义不变。
+    """
     text = (_ORCH / "agent_loop.py").read_text(encoding="utf-8")
-    assert 'if (agent_kind == "main" and permission_mode == "plan"' in text
+    assert 'if (agent_kind == "main" and _mode_kind(permission_mode) == "plan"' in text
 
 
 # ── M5-a: spawn 调用消息落库时序 ──────────────────────────────
@@ -215,20 +218,9 @@ async def test_report_to_leader_wait_allowed_for_every_subagent():
     assert "No reply from the main agent" in out
 
 
-async def test_wait_for_reply_timeout_then_delivery():
-    mgr = SubagentManager(session_id=1)
-    _running_handle(mgr, 7)
-    # 无人答复 → 超时返回 None（调用方提示"按最佳判断继续"）
-    assert await mgr.wait_for_reply(7, 0.05) is None
-
-    async def _push_later() -> None:
-        await asyncio.sleep(0.01)
-        mgr.push_agent_input(7, "use approach B")
-
-    task = asyncio.create_task(_push_later())
-    reply = await mgr.wait_for_reply(7, 2.0)
-    await task
-    assert reply and "approach B" in reply
+# plan-549-2281 复盘清理：test_wait_for_reply_timeout_then_delivery 已随 wait_for_reply /
+# _reply_waiters 机制删除（提问等待改由 subagent_comm 承担，见 test_subagent_comm.py；
+# push_agent_input 只承担普通指令注入，不再有「唤醒等答复子代理」的语义）。
 
 
 def test_notify_leader_uses_registered_callback():
@@ -247,15 +239,32 @@ def test_notify_leader_uses_registered_callback():
 
 # ── M7: 保活判定与失败可见 ────────────────────────────────────
 
-def test_queue_leader_note_blocks_cleanup():
-    """有未送达通知 → has_unclaimed_notes 为真，engine 据此保活 manager（跨 turn 送达）。"""
+# plan-549-2281 复盘清理：test_queue_leader_note_blocks_cleanup 已随 queue_leader_note
+# 删除（进度上报改走邮箱落库，不再挂完成队列）；has_unclaimed_notes 的保活语义由
+# 子代理完成通知（_enqueue_completion）继续承担，见下方 drain_completions 用例。
+
+
+def test_completion_note_blocks_cleanup():
+    """有未送达的完成通知 → has_unclaimed_notes 为真，engine 据此保活 manager（跨 turn 送达）。"""
+    import types
+
     mgr = SubagentManager(session_id=1)
     assert mgr.has_unclaimed_notes() is False
-    mgr.queue_leader_note("【子代理进度上报 subagent#1】half done")
+    handle = types.SimpleNamespace(
+        agent_id=1, status="done", task_title="T",
+        findings="done: something", summary="", error="", resumable=False,
+        files_touched=[], risks=[],
+    )
+    mgr._enqueue_completion(handle)
     assert mgr.has_unclaimed_notes() is True
     notes = mgr.drain_completions()
-    assert notes and "half done" in notes[0]
+    assert notes and "已完成" in notes[0]
     assert mgr.has_unclaimed_notes() is False
+    # plan-549-2281：用户可见的完成行（mailbox 落库成行）与模型注入文案分开——
+    # 行文案不带工具调用话术，头部格式供前端 parseSubagentNotice 解析。
+    row = subagent_mod.format_completion_row(handle)
+    assert row.startswith("【子代理已完成 subagent#1「T」】")
+    assert "collect_results" not in row
 
 
 def test_cleanup_manager_if_idle_keeps_busy_manager():

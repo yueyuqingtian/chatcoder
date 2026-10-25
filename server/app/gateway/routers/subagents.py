@@ -141,14 +141,19 @@ limits_router = APIRouter(prefix="/runtime", tags=["runtime"])
 
 @limits_router.get("/limits")
 async def runtime_limits():
-    """单会话并发上限与当前占用（只读内存快照，供设置页与左栏展示）。"""
+    """单会话并发上限与当前占用（只读内存快照，诊断用）。
+
+    plan-549-2281：子会话的创建与控制已下线，`max_subsessions_per_parent` 配置项已删除；
+    `subsessions_running` 字段保留——存量历史子会话仍可能在跑，该计数是诊断它们占用的
+    唯一入口（前端当前未消费，左栏「运行中」用的是 SessionOut.has_running，与此无关）。
+    """
     from app.core.config import settings
     from app.orchestration.subagent import peek_subagent_manager
-    from app.services import subsession_service
+    from app.services import child_session_service
 
     sessions: list[dict] = []
     try:
-        counts = await subsession_service.list_running_counts_by_parent()
+        counts = await child_session_service.list_running_counts_by_parent()
         for root_id, subsessions_running in counts.items():
             manager = peek_subagent_manager(root_id)
             sessions.append({
@@ -161,6 +166,5 @@ async def runtime_limits():
         sessions = []
     return {
         "max_concurrent_subagents": settings.max_concurrent_subagents,
-        "max_subsessions_per_parent": settings.max_subsessions_per_parent,
         "sessions": sessions,
     }

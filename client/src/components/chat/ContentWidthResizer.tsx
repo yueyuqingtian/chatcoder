@@ -30,6 +30,10 @@ const EDGE_OUT = 12;
 const DWELL_MS = 500;
 const MIN_W = 560;
 const MAX_W = 1600;
+/** 浮在内容列之上的控件：指针落在它们上面不算「停在边缘」（plan-20261025-popclip）。
+ *  窄窗口里工具卡会盖住列的右缘，此前停在卡片右上角的收起按钮上 0.5 秒，拖拽柄就弹出来压住按钮，
+ *  点击变成了拖宽；左缘的消息刻度同理。柄的层级也压在它们之下（composer.css .cw-handle）。 */
+const OVERLAY_SELECTOR = ".tcard-shell, .jump-dots, .ui-pop";
 
 type Side = "left" | "right";
 
@@ -127,6 +131,12 @@ export function ContentWidthResizer({ hostRef }: { hostRef: RefObject<HTMLElemen
         return;
       }
       cancelAnimationFrame(frame.current);
+      // 指针在工具卡 / 消息刻度 / 浮层上：这些控件优先，不计时、已出现的柄立即收起
+      if ((e.target as Element | null)?.closest?.(OVERLAY_SELECTOR)) {
+        clearDwell();
+        if (handleVisibleRef.current) hideHandle();
+        return;
+      }
       const { clientX, clientY } = e;
       frame.current = requestAnimationFrame(() => evaluate(clientX, clientY));
     };

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     # plan-522-2209: 子会话 / 子代理的审批等待上限（秒），0 或负数 = 不超时，只等用户处理或 turn 被取消。
     # 子任务的审批请求往往发生在用户并未停留的会话里，超时自动拒绝会让用户既看不到请求、
     # 也看不到失败原因，只看到子任务莫名中断；因此这一类不设静默超时。
-    approval_timeout_sec_subsession: int = 0
+    approval_timeout_sec_child: int = 0
     # v0.3: agent loop 单任务最大步数（仅作为绝对兜底防死循环的熔断值）
     # v3.5: 不再用固定步数限制，改为边际效应递减检测 + token 预算驱动
     # 0 或负数表示不限制步数；设置页已移除该项，固定为不限制（旧配置里的值不再读取）
@@ -254,6 +254,19 @@ class Settings(BaseSettings):
     tool_output_chars_write: int = 500          # fs_write 回执
     tool_output_chars_default: int = 8000       # 兜底
 
+    # plan-548-2277：「先读后改」闸门——编辑前检查目标行是否已被本会话读到。
+    # warn（默认）：放行，但在工具输出里附警告，并在 data 里标 read_verified=False；
+    # strict：拒绝并返回 STALE_READ（错误里给可直接复制的 fs_read 调用）；
+    # off：完全不检查。
+    # 默认 warn 是有意的：机械批改、跨文件批量替换时逐段先读代价过高，
+    # 过严的闸门会逼模型绕去 terminal_exec 写文件，反而失去约束意义。
+    # plan-549-2281 备注：这两项是**内部旋钮**（仅环境变量 / .env 可改），刻意不进
+    # 设置页——默认值即推荐值，进 UI 会让「strict 一开到处拒绝」变成用户可踩的坑。
+    edit_gate_mode: str = "warn"
+    # 写盘后按文件后缀跑最小检查（compileall / node --check / 项目 tsc），
+    # 把错误摘要回灌模型；连续 2 轮仍未通过则如实报告。纯文档 / 样式默认跳过。
+    post_edit_check_enabled: bool = True
+
     # v1.1: 增强搜索（ripgrep）；关闭或无 rg 时 fs_grep 回退纯 Python 逐行匹配
     enhanced_search: bool = True
 
@@ -274,16 +287,19 @@ class Settings(BaseSettings):
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理开关（类型级开关已从 UI 移除，由它统一控制）
     subagent_enabled: bool = True
-    # plan-20261020-subsession-switch：子会话开关从「子代理与子会话」合并开关中拆出。
-    # 两者是彼此独立的并发资源，用户需要能只关其中一种（例如保留只读子代理、关闭可改文件的子会话）。
-    subsession_enabled: bool = True
+    # plan-549-2281：subsession_enabled 已删除——子会话创建能力下线，无工具可门控。
     # plan-20261018-operator-boost：GUI 操作（电脑操控 / 内置浏览器的多步操作）交给「操控子会话」执行。
     # 操作本身不需要深度推理，却是延迟大户（每步一次模型往返）；交给低思考档的子会话，
     # 主会话保留高思考深度处理设计、编码与结论。只在下发子会话工具的模式下生效。
-    operator_subsession_enabled: bool = True
-    # 操控子会话的思考深度："lowest" = 当前模型支持的最低非关闭档（默认）；
-    # "follow" = 跟随子会话默认设置；其余为具体档位（none / minimal / low / medium / high …）。
-    operator_reasoning_effort: str = "lowest"
+    # plan-549-2281：operator_subsession_enabled 已删除——GUI 操作改由子代理承担，
+    # 能力可用性由 desktop_enabled / browser_enabled 直接决定。
+    # plan-549-2281：「操控子代理」独立开关（原 operator_subsession_enabled 的等价物）：
+    # 关掉后不再向主代理注入「界面操作交给操控子代理」的提示，界面操作回退到自己做。
+    operator_subagent_enabled: bool = True
+    # 操控子代理的思考深度（plan-549-2281 由 operator_reasoning_effort 改名）：
+    # "lowest" = 当前模型支持的最低非关闭档（默认）；"follow" = 跟随子代理默认设置；
+    # 其余为具体档位（none / minimal / low / medium / high …）。
+    operator_subagent_effort: str = "lowest"
     # plan-156-619 S7：综合工具卡各栏目的全局默认展开策略（true = 默认全展开）
     tool_card_sections_expanded: bool = True
     # plan-20261019-toolcard-v2：工具卡默认形态（capsule = 右上角悬浮胶囊 / expanded = 展开卡片）
@@ -331,7 +347,8 @@ class Settings(BaseSettings):
     max_concurrent_subagents: int = 4
     # plan-474-2105：单会话子会话并发上限：单个主会话下同时运行的子会话数；
     # 达到后创建直接拒绝。设置中心可改（1~30）。
-    max_subsessions_per_parent: int = 4
+    # plan-549-2281：max_subsessions_per_parent 已删除——子会话创建能力下线，
+    # 不再存在需要封顶的并发资源（存量历史子会话仍可在左栏打开并运行，但不再计限）。
     # ── 工作流运行时（设计 §8）：并发上限与默认返工次数；0 = 不限（仅并发上限支持）──
     workflow_enabled: bool = True
     # 下一步建议卡（设置 → 常规）：默认关闭；开启后才向主会话的智能体 / 工作流模式注入
@@ -371,13 +388,30 @@ class Settings(BaseSettings):
     # spawn 时下发为 run_agent_loop 的 token_budget，超限即熔断并按结构化汇报“预算耗尽”，
     # 避免子代理无人看管地无限消耗（此前 spawn 路径从不传预算）。
     subagent_token_budget: int = 0
-    # v43: 主代理收工等待后台子代理的上限（秒）。
+    # v43: 主代理「等子代理跑完」的上限（秒）——**只作用于等任务完成，不作用于等人答复**。
     # 语义：后台子代理运行时主代理可继续并行工作；主代理做完自己的事（本步无工具调用）
     # 而子代理仍在跑时，turn 不结束——保持会话运行并阻塞等待（前端显「等待子代理结束…」、
     # 左侧转圈、输入框停止按钮），子代理结束后把完成报告注入同一 turn 继续。
     # 超过该上限仍未结束则不再等待，把已有报告注入并结束 turn（剩余结果走完成唤醒兜底）。
     # 0/负数 = 不限制（一直等到用户停止或子代理全部结束）。
+    #
+    # plan-565-2323 G16：范围收窄，别再按「子代理等待」笼统理解——三处消费点都与「等人」无关：
+    #   · `agent_loop._await_background_subagents`：主代理收工后等子代理结束；
+    #   · `agent_loop._run_subagent_tool` 的 collect_results(wait=true)：同上，等子代理跑完；
+    #   · `subagent._keepalive_total_timeout`：瞬时故障保活的累计时长上限。
+    # 子代理「提问后等主代理/用户答复」**不读这个值**，也没有任何时间上限（用户口径：主代理可能
+    # 正在问用户，用户可能很久才回答，应当继续等）。那条等待靠取消传播与会话存活判定兜底，
+    # 见 `subagent_comm.wait_reply`。此前两边阈值同为 600s，看门狗必然先杀掉子代理，
+    # 是本缺陷的直接成因。
     subagent_wait_timeout_s: float = 1800.0
+    # plan-565-2323 G10: 普通子代理的停滞看门狗阈值（秒）——与工作流节点子代理同源同口径
+    # （orchestration/workflow/executor_subagent.py 的 STALL_TIMEOUT_SEC = 600）。
+    # 子代理超过该时长没有任何步骤/模型调用活动即判失败并停止，避免上游卡住时
+    # 子代理永远停在「运行中」（事故：重试耗尽后仍在跑，面板无终止入口）。
+    #
+    # plan-565-2323 G16：`handle.waiting` 为真的期间不判停滞（只续心跳）——覆盖瞬时故障保活与
+    # 「提问后等答复」两种正常等待。等答复既然没有时间上限，这里就绝不能因为「等太久」而杀掉它。
+    subagent_stall_timeout_s: float = 600.0
     # v13: 任务规划与拆分
     task_split_confirm: bool = True
     # v2.2 (对齐 zcode 3.9): todo 提醒间隔——模型维护的执行清单连续 N 步未更新时
@@ -524,7 +558,20 @@ def format_retry_intervals(values: list[float]) -> str:
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # plan-549-2281 复盘修复：旧环境变量 APPROVAL_TIMEOUT_SEC_SUBSESSION 随改名被
+    # extra="ignore" 静默丢弃——配置文件路径有显式迁移（settings.py），env 路径在这里
+    # 兜底：新变量未显式设置时读旧变量，改过 env 的部署升级后行为不回退。
+    import os
+
+    if "APPROVAL_TIMEOUT_SEC_CHILD" not in os.environ:
+        legacy = os.environ.get("APPROVAL_TIMEOUT_SEC_SUBSESSION")
+        if legacy:
+            try:
+                s.approval_timeout_sec_child = int(legacy)
+            except (TypeError, ValueError):
+                pass
+    return s
 
 
 settings = get_settings()

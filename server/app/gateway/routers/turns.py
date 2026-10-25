@@ -625,6 +625,16 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             spawn_ids[int(tid)] = int(first_id)
             message_counts[int(tid)] = int(count)
     spawn_ids = {tid: mid for tid, mid in spawn_ids.items() if tid in node_thread_set}
+    # plan-565-2323 G11：附带所属轮次状态。turn 已终态时，其下残留的 task.status 不可信
+    # （历史上终态路径漏写子任务终态，重启后重启修复也扫不到）——前端据此不再计入「运行中」，
+    # 避免一条残留行把整个会话锁成 busy（本次事故的直接表现）。
+    turn_ids = {agent.turn_id for agent, _task in rows if agent.turn_id}
+    turn_status_map: dict[int, str] = {}
+    if turn_ids:
+        from app.persistence.models.turn import Turn as _Turn
+
+        trows = await db.execute(select(_Turn.id, _Turn.status).where(_Turn.id.in_(turn_ids)))
+        turn_status_map = {int(i): str(s or "") for i, s in trows.all()}
     out: list[dict] = []
     for agent, task in rows:
         _h = _mgr.get(agent.id) if _mgr is not None else None
@@ -634,6 +644,7 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
             "turn_id": agent.turn_id,
+            "turn_status": turn_status_map.get(int(agent.turn_id)) if agent.turn_id else None,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
             "status": (task.status if task else None) or ({"running": "running", "done": "done", "failed": "failed", "terminated": "terminated"}.get(agent.status, agent.status or "terminated")),
@@ -652,6 +663,63 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "message_count": message_counts.get(agent.id, 0),
         })
     return out
+
+
+# 子代理 / 子任务「仍在进行中」的状态集合：收尾时只动这些，已终态的行不重复写。
+_SUBAGENT_OPEN_TASK = ("proposed", "pending", "running", "in_progress")
+_SUBAGENT_DONE_AGENT = ("done", "failed", "terminated", "cancelled", "paused")
+
+
+async def _settle_stale_subagent(session_id: int, agent_id: int) -> bool:
+    """plan-565-2323 G8：把「内存里已无、库里仍非终态」的子代理收尾。
+
+    为什么要这一步而不是只调内存 cancel：本次事故里应用重启后内存管理器已不存在，
+    但 tasks.status 仍是 in_progress，前端据此一直显示「执行中」、输入框永远停在停止态，
+    会话彻底不可用。取消入口必须能自愈这种残留，否则用户没有任何手段把会话救回来。
+    """
+    from app.persistence.models.agent import Agent
+    from app.persistence.models.task import Task
+    from app.persistence.database import run_write_locked
+
+    def _patch(s):
+        agent = s.get(Agent, agent_id)
+        if agent is None or int(agent.session_id or 0) != session_id:
+            return False
+        changed = False
+        if (agent.status or "") not in _SUBAGENT_DONE_AGENT:
+            agent.status = "terminated"
+            changed = True
+        rows = s.execute(select(Task).where(Task.agent_id == agent_id)).scalars().all()
+        for task in rows:
+            if (task.status or "") in _SUBAGENT_OPEN_TASK:
+                task.status = "cancelled"
+                task.note = task.note or "已手动终止子代理"
+                changed = True
+        if changed:
+            s.commit()
+        return changed
+
+    return bool(await run_write_locked(_patch, label=f"subagent.cancel_stale.{agent_id}"))
+
+
+@router.post("/sessions/{session_id}/subagents/{agent_id}/cancel")
+async def cancel_session_subagent(session_id: int, agent_id: int):
+    """plan-565-2323 G8：取消单个子代理（右面板终止按钮的入口，与模型侧 cancel_subagent 同源）。
+
+    返回 result = cancelled / not_running / not_found，均为正常业务结果（前端不弹错误）。
+    内存里已无该子代理（应用重启 / 会话已收尾）时，额外把库里残留的非终态行收尾——
+    healed=true 表示这次点击确实救回了一条卡住的记录。
+    """
+    from app.orchestration.subagent import peek_subagent_manager
+
+    mgr = peek_subagent_manager(session_id)
+    result = "not_found"
+    if mgr is not None and agent_id in mgr.agent_ids():
+        result = await mgr.cancel(agent_id)
+    if result == "cancelled":
+        return {"result": "cancelled", "healed": False}
+    healed = await _settle_stale_subagent(session_id, agent_id)
+    return {"result": result, "healed": healed}
 
 
 @router.get("/sessions/{session_id}/usage")

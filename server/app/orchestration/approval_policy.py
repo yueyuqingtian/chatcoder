@@ -111,6 +111,11 @@ def normalize_execution_mode(mode: str | None) -> str:
     return _MODE_ALIASES.get(m, m)
 
 
+# 模式归一入口的进程内缓存（plan-560-2311 C1）：首次裁决时从服务层取一次函数对象，
+# 之后直接调用，避免每次工具裁决都走一次 import 机制。None = 尚未解析。
+_RESOLVE_MODE_KIND = None
+
+
 # ══════════════════════════════════════════════════════════
 # 权限模式（要不要问）
 # ══════════════════════════════════════════════════════════
@@ -188,6 +193,10 @@ _READ_TOOLS = frozenset({
     "memory_search", "compaction_index", "compaction_view",
     "skill_view", "todo_write", "ask_user_question", "goal_complete",
     "terminal_bg_status",
+    # plan-549-2281：功能地图查询只读 ai/ 计划文档、项目记忆与符号索引，
+    # 只往应用自身的 .chatcoder 缓存落文件（与 codebase_search 的索引缓存同口径），
+    # 不触碰用户文件；符号索引的开启同样只是建应用侧索引。
+    "feature_lookup", "symbol_index_enable",
 })
 
 # 记忆写工具（plan-537-2256）：memory_write 会往记忆库落新行，属改变状态，
@@ -542,10 +551,42 @@ def classify(tool_name: str, args: dict, ctx, *, risk_level: str = "low") -> Act
 # ══════════════════════════════════════════════════════════
 # 执行模式边界（唯一保留的硬拒绝来源）
 # ══════════════════════════════════════════════════════════
+def _mode_kind(execution_mode: str) -> str:
+    """模式名 → 判定档（plan-560-2311 C1）。
+
+    事实源在 `permission_profile_service.resolve_mode_kind`——本模块不能反向 import
+    `subagent_capabilities`（后者已 import 本模块，会成环），所以归一下沉到服务层。
+    这里延迟 import + 缓存，既避免模块加载期的依赖顺序问题，也不让每次裁决都走 import 机制。
+
+    兜底：服务层不可用（配置读取异常等）时退回原名——此时行为与改造前完全一致，
+    不会因归一失败而放大拒绝面。
+    """
+    global _RESOLVE_MODE_KIND
+    if _RESOLVE_MODE_KIND is None:
+        try:
+            from app.services.permission_profile_service import (
+                resolve_mode_kind as _impl,
+            )
+
+            _RESOLVE_MODE_KIND = _impl
+        except Exception:  # noqa: BLE001 — 服务层不可用时按原名判定（旧行为）
+            logger.warning("[approval] 模式归一事实源不可用(按原名判定)", exc_info=True)
+            return execution_mode
+    try:
+        return _RESOLVE_MODE_KIND(execution_mode)
+    except Exception:  # noqa: BLE001 — 单个模式名解析失败不阻断裁决
+        logger.warning("[approval] 模式归一失败 mode=%s(按原名判定)", execution_mode, exc_info=True)
+        return execution_mode
+
+
 def _mode_boundary(
     info: ActionInfo, execution_mode: str, tool_name: str, args: dict, ctx,
 ) -> str | None:
-    """返回拒绝原因；None 表示未越界。"""
+    """返回拒绝原因；None 表示未越界。
+
+    `execution_mode` 必须是**判定档**（`_mode_kind` 的返回值，即 readonly/plan/agent/workflow），
+    不是原始模式名——自定义 kind=readonly/plan 模式只有归一后才命中下面的等值分支。
+    """
     if execution_mode == MODE_READONLY:
         if info.action in (ACTION_WRITE, ACTION_WRITE_OUTSIDE):
             return "只读模式不允许写文件"
@@ -621,7 +662,12 @@ def decide(
     info = classify(tool_name, args, ctx, risk_level=risk_level)
 
     # 1. 执行模式硬边界
-    boundary = _mode_boundary(info, execution_mode, tool_name, args or {}, ctx)
+    # plan-560-2311 C1：边界判定改用按 kind 归一的判定档。此前直接拿模式名做等值比较，
+    # 自定义 kind=readonly/plan 模式与内置字面量都不相等 → 硬边界整体被跳过（可写可执行）。
+    # 只在判定处归一，不改写会话里存着的模式名（自定义模式名必须原样保留）。
+    boundary = _mode_boundary(
+        info, _mode_kind(execution_mode), tool_name, args or {}, ctx,
+    )
     if boundary:
         return Decision(
             VERDICT_DENY, info.action, label=info.label,

@@ -27,6 +27,58 @@ from app.orchestration.tools.shell_env import shell_hint
 
 logger = logging.getLogger(__name__)
 
+
+# ── plan-565-2323 G16：历史行归属判定（纯函数，便于回归测试）──────────────────
+
+#: 文本历史行的四种归属
+HISTORY_ROLE_USER_INPUT = "user_input"      # 真正的用户输入（带附件处理）
+HISTORY_ROLE_SYSTEM_INPUT = "system_input"  # 系统注入，按 user 侧回放
+HISTORY_ROLE_DISPLAY_ONLY = "display_only"  # 纯展示行，不进模型上下文
+HISTORY_ROLE_AGENT_TEXT = "agent_text"      # agent 自己的话（可被 tool_call 合并）
+
+
+def resolved_history_role(*, sender_type: str, content: dict, replay_kind: str) -> str:
+    """判定一条 TEXT 历史行在装配时应归到哪一类（plan-565-2323 G16）。
+
+    这个判定必须在写 `_pending_agent_text` **之前**完成——那条路径是覆盖写，
+    走错分支就会把主代理刚说的一段话整段吞掉（缺陷原貌：子代理完成通知 / 后台命令
+    完成行落进 agent_text 分支，模型以为自己说过「子代理已结束」）。
+
+    `replay_kind` 来自 `mailbox.classify_persisted`（display_only / system_event / input / 空）。
+    """
+    if sender_type == "system":
+        if replay_kind == "display_only":
+            return HISTORY_ROLE_DISPLAY_ONLY
+        if replay_kind in ("system_event", "input"):
+            return HISTORY_ROLE_SYSTEM_INPUT
+        if (content or {}).get(_SUBSESSION_REPORT_FLAG) is True:
+            # plan-156-620：子会话汇报（历史遗留标记）同样按 user 侧回放
+            return HISTORY_ROLE_SYSTEM_INPUT
+        # 其余 system 文本（模型切换分隔线、目标耗尽提示等）不是主代理的话，
+        # 保持改前行为（落到 agent_text 分支）——本改动的范围只收敛缺陷涉及的三类事件。
+        return HISTORY_ROLE_AGENT_TEXT
+    if sender_type == "user":
+        return HISTORY_ROLE_USER_INPUT
+    return HISTORY_ROLE_AGENT_TEXT
+
+
+def _resolve_mode_kind(mode: str | None) -> str:
+    """模式名 → 判定档（plan-560-2311 C5）。
+
+    事实源在 `permission_profile_service.resolve_mode_kind`（与审批层、能力矩阵、
+    agent_loop 护栏同一份口径）。延迟 import，避免本模块加载期就拉起服务层配置读取。
+    配置层异常时退回内置字面量匹配——行为与改造前一致。
+    """
+    raw = str(mode or "").strip()
+    try:
+        from app.services.permission_profile_service import resolve_mode_kind
+
+        return resolve_mode_kind(raw)
+    except Exception:  # noqa: BLE001 — 配置层异常时按原名判定（旧行为）
+        logger.warning("[context] 模式归一失败 mode=%s(按原名判定)", raw, exc_info=True)
+        return raw
+
+
 # v14: 附件类型中文标签（前端上传返回的 type 字段）
 _ATT_TYPE_LABEL = {
     "image": "图片",
@@ -458,15 +510,34 @@ async def _load_refs_context(db: AsyncSession, turn) -> str:
     return "\n\n".join(parts)
 
 
-async def _load_memories(db: AsyncSession, session_id: int, project_id: int | None = None) -> str:
+def _task_keywords(user_message: str) -> list[str]:
+    """本轮用户消息的关键词，用于注入侧相关性排序（plan-548-2276 阶段 2）。
+
+    取 `tokenize` 结果的前 12 个：再多会把「碰巧有同名片段」的噪声放大，
+    过少则排序退化成纯 usage_count（老记忆长期霸榜）。
+    """
+    try:
+        from app.services.memory_synonyms import tokenize
+
+        return tokenize(user_message or "")[:12]
+    except Exception:  # noqa: BLE001
+        logger.debug("[context] 任务关键词派生失败(非阻塞)", exc_info=True)
+        return []
+
+
+async def _load_memories(db: AsyncSession, session_id: int, project_id: int | None = None,
+                         task_keywords: list[str] | None = None) -> str:
     """注入记忆条目（D8；plan-230-1144 M4.1 三层化渲染）。
 
     读取顺序 session → project → global；渲染时按作用域加前缀标签，
     让模型知道"这是本会话事实 / 本项目约定 / 全局规范"，据此调整遵循优先级。
+    plan-548-2276：`task_keywords` 传本轮用户消息关键词，让注入优先给相关记忆；
+    为空时排序与改造前完全一致。
     """
     try:
         from app.services.memory_service import load_memories
-        entries = await load_memories(db, session_id, project_id=project_id)
+        entries = await load_memories(db, session_id, project_id=project_id,
+                                      task_keywords=task_keywords)
         if entries:
             _tag = {"global": "[全局]", "project": "[项目]"}
             return "\n".join(
@@ -974,11 +1045,16 @@ async def build_main_context(
     # plan-75-332: 两条正交控制轴——执行模式（能做什么）与权限模式（要不要问）。
     # 旧值（default / accept_edits）在此归一化，存量会话不会让模式解析落空。
     _execution_mode = normalize_execution_mode(getattr(session, "permission_mode", None))
+    # plan-560-2311 C5：另取一份**判定档**——自定义 kind=readonly/plan 模式的名字不在内置
+    # 字面量里，下面三处等值比较（_is_plan_mode / workflow_mode / ta3 附加提示词）全都不命中，
+    # 于是自定义计划模式拿不到规划工作流段、自定义只读模式拿到的是可写版规范。
+    # 只用于判定，`_execution_mode` 本身仍按原样向下传递（模式名不得被改写）。
+    _mode_kind = _resolve_mode_kind(getattr(session, "permission_mode", None))
     _approval_mode = normalize_approval_mode(getattr(session, "approval_mode", None))
     # v23: ta3 供应商模型 → 还原式系统提示词（远端主体 + ta3 纪律 + 当前项目规范）
     ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
     # v7: 非 plan 模式下裁剪系统提示词的规划工作流，避免模型自发写计划文档索要确认
-    _is_plan_mode = _execution_mode == "plan"
+    _is_plan_mode = _mode_kind == "plan"
     # plan-19-82: 回复语言由「本轮最新用户消息」决定（与界面语言设置无关）。
     # 空消息/纯附件场景回退检索最近一条含文本的 user 消息，避免误判。
     _lang_src = user_message if language_text is None else language_text
@@ -1009,7 +1085,7 @@ async def build_main_context(
                                                  # plan-537-2256：记忆开启时才注入记忆使用规范
                                                  memory_enabled=bool(getattr(settings, "auto_memory_enabled", True)),
                                                  suggestion_enabled=suggestion_enabled,
-                                                 workflow_mode=(_execution_mode == "workflow"),
+                                                 workflow_mode=(_mode_kind == "workflow"),
                                                  execution_mode=_execution_mode,
                                                  available_tools=available_tools)
     bundle = ContextBundle(
@@ -1038,37 +1114,34 @@ async def build_main_context(
     # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
     from app.orchestration.prompts.language import build_language_pin_line
     bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
-    # 1.15 并行分派子会话（plan-156-621；plan-156-623 补计划阶段）：
-    # 设置开启时——执行模式注入「派发要求」，计划模式注入「把并行分组写进文档」的要求。
-    # 计划模式不下发 create_subsession，旧实现因此整段跳过，计划文档里没有任何并行拆分信息。
-    from app.orchestration.prompts.parallel_subsession import (
-        parallel_subsession_hint, plan_parallel_subsession_hint,
+    # 1.15 派发子代理（plan-549-2281）：子会话下线后，spawn_subagent 是唯一的并行执行通道。
+    # 注入前先判身份——**子代理自己不再注入派发提示**（它不能再派下级，注入只会诱导
+    # 它调用不存在的工具，这正是旧提示词在同一份上下文里自相矛盾的根因之一）；
+    # 历史挂靠子会话（side_kind=sub）同样不注入——它没有派发工具（engine 侧已剥离），
+    # 由下面的 LEGACY_CHILD_SESSION_HINT 单独约束，避免「引导派发」与「不能派发」并存。
+    from app.orchestration.prompts.subagent_dispatch import (
+        subagent_dispatch_hint,
+        operator_subagent_hint,
+        legacy_child_session_hint,
     )
-    _parallel_hint = (
-        parallel_subsession_hint(_execution_mode)
-        or plan_parallel_subsession_hint(_execution_mode)
-    )
-    if _parallel_hint:
-        bundle.developer_parts.append(_parallel_hint)
-    # 1.16 GUI 操作交给操控子会话（plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
-    # 且当前模式下发子会话工具时才注入；子会话自身不注入（它没有 create_subsession）。
-    from app.orchestration.prompts.parallel_subsession import (
-        operator_subsession_hint,
-        subsession_self_hint,
-    )
+    _is_legacy_child = bool(session is not None and getattr(session, "side_kind", None) == "sub")
+    _dispatch_hint = subagent_dispatch_hint(_execution_mode, is_legacy_child=_is_legacy_child)
+    if _dispatch_hint:
+        bundle.developer_parts.append(_dispatch_hint)
+    # 1.16 GUI 操作交给操控子代理（原 plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
+    # 且当前模式下发子代理工具时才注入；子代理自身不注入（它不能再派发）。
     from app.orchestration.tools.browser import browser_tools_enabled as _browser_tools_enabled
     _gui_tools = bool(getattr(settings, "desktop_enabled", False)) or _browser_tools_enabled()
-    _is_subsession = bool(session is not None and getattr(session, "side_kind", None) == "sub")
-    _operator_hint = operator_subsession_hint(
-        _execution_mode, gui_tools=_gui_tools, is_subsession=_is_subsession,
+    _operator_hint = operator_subagent_hint(
+        _execution_mode, gui_tools=_gui_tools, is_legacy_child=_is_legacy_child,
     )
     if _operator_hint:
         bundle.developer_parts.append(_operator_hint)
-    # plan-474-2105：子会话是执行体，不是用户接口——明确「只能经 message_main 提问、
-    # 不能直接问用户、不能派生下级」，否则模型会反复尝试已被剥离的工具。
-    _self_hint = subsession_self_hint(is_subsession=_is_subsession)
-    if _self_hint:
-        bundle.developer_parts.append(_self_hint)
+    # plan-549-2281：历史子会话（side_kind=sub）仍可打开并继续对话，但它没有子会话工具、
+    # 也没有派发工具——给一条轻量约束，避免模型去找已不存在的入口。
+    _legacy_hint = legacy_child_session_hint(_is_legacy_child)
+    if _legacy_hint:
+        bundle.developer_parts.append(_legacy_hint)
     # 1.3 Paused Subagents（plan-91-394）：上一轮中断、已保存进度的子代理。紧贴本轮用户消息之后，
     # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
     if paused_subagents and enable_subagents:
@@ -1179,7 +1252,12 @@ async def build_main_context(
     # plan-537-2256：记忆关闭时必须同时停住「写」与「读」。此前开关只在自动提取一处生效，
     # 关闭后旧记忆仍会每轮注入；这里补上读取侧门禁。
     if getattr(settings, "auto_memory_enabled", True):
-        memories = await _load_memories(db, session.id, project_id=getattr(project, "id", None))
+        memories = await _load_memories(
+            db, session.id,
+            project_id=getattr(project, "id", None),
+            # plan-548-2276：带上本轮用户消息关键词，注入优先给「与这次任务相关」的记忆
+            task_keywords=_task_keywords(user_message),
+        )
         if memories:
             bundle.developer_parts.append(
                 "## Your Memory (from previous tasks)\n"
@@ -1398,6 +1476,27 @@ async def build_main_context(
         # （thinking 模式网关要求，缺失会 400）
         _pending_thinking = ""
 
+        # plan-565-2323 G16：系统消息的回放类别由 `mailbox.classify_persisted` 统一判定，
+        # 归属类别由 `resolved_history_role` 统一解释——两处都有单测钉住，不再散落字面量。
+        # import 提到循环外：历史可达上千条，逐行 import 是不必要的开销。
+        try:
+            from app.orchestration import mailbox as _mailbox
+        except Exception:  # noqa: BLE001 — 判定层不可用时降级为原有分支行为
+            _mailbox = None
+
+        def _classify_history_row(_content: dict, _sender: str) -> str:
+            """单行归属判定；任何异常都降级为 agent_text（保持改前行为）。"""
+            if _mailbox is None:
+                return HISTORY_ROLE_AGENT_TEXT
+            try:
+                return resolved_history_role(
+                    sender_type=_sender, content=_content or {},
+                    replay_kind=_mailbox.classify_persisted(_content),
+                )
+            except Exception:  # noqa: BLE001 — 判定失败不能让整段历史注入失败
+                logger.debug("[context] 历史行归属判定失败", exc_info=True)
+                return HISTORY_ROLE_AGENT_TEXT
+
         def _flush_agent_text() -> None:
             """把暂存的 agent 文本（及其思考内容）落为 assistant 消息并清空暂存。"""
             nonlocal _pending_agent_text, _pending_thinking
@@ -1419,6 +1518,9 @@ async def build_main_context(
                 continue
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""
+                # plan-565-2323 G16：归属判定必须在写 `_pending_agent_text` 之前完成——
+                # 那条路径是覆盖写，走错分支就会把主代理刚说的一段话整段吞掉。
+                _role = _classify_history_row(m.content or {}, m.sender_type)
                 atts = m.content.get("attachments") or []
                 att_note = ""
                 if atts and isinstance(atts, list):
@@ -1435,13 +1537,23 @@ async def build_main_context(
                             else "如需内容请调用 read_attachment 读取 path"
                         )
                         att_note = "（该消息附带附件：\n" + att_note + f"\n{_read_hint}）"
-                if m.sender_type == "system" and m.content.get(_SUBSESSION_REPORT_FLAG) is True and text:
-                    # plan-156-620：主代理空闲时落库的子会话汇报——作为一条独立输入交给主代理。
-                    # 此前与其它非用户文本一样进 _pending_agent_text，被当成主代理自己的话，
-                    # 且会被后面一段正文覆盖，汇报内容整段丢失。
+                if _role == HISTORY_ROLE_SYSTEM_INPUT:
+                    # plan-565-2323 G16：系统注入的消息（子会话汇报、后台命令完成 / 被停止、
+                    # 子代理提问与进度上报）一律按 **user 侧注入**回放：模型必须知道这些外部
+                    # 事件，但它们都不是主代理说过的话，绝不能复用 `_pending_agent_text`（覆盖写）。
+                    # 旧实现里只有带 SUBSESSION_REPORT_FLAG 的一类走这里，其余（后台命令完成、
+                    # 子代理完成通知）落进 agent_text 分支，把主代理刚说的一段话整段吞掉。
+                    # 先 flush 暂存的 agent 文本，避免它与紧随其后的 tool_call 错位合并。
                     _flush_agent_text()
-                    bundle.history.append(_CM(role="user", content=text))
-                elif m.sender_type == "user":
+                    if text:
+                        bundle.history.append(_CM(role="user", content=text))
+                    continue
+                if _role == HISTORY_ROLE_DISPLAY_ONLY:
+                    # plan-565-2323 G16：纯展示行（子代理完成通知）不进模型上下文。
+                    # 若落进 agent_text 分支（覆盖写），模型会以为自己说过「子代理已结束」。
+                    # 模型侧的完成信息由 `subagent._completion_queue` 承担（plan-560-2311 B2）。
+                    continue
+                if m.sender_type == "user":
                     # v14: 历史用户消息若带附件（文件地址），把路径一并注入，
                     # AI 可随时通过 read_attachment 回读附件内容；仅附件无文字的消息也注入
                     if not text and not att_note:
@@ -1748,7 +1860,10 @@ async def build_subagent_context(
     # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）。
     # v36 (plan-321-1600 M1): 契约统一为六节——新增 Verification（验证动作与结果）与
     # Acceptance（逐条对照验收标准），补上此前“缺验收闭环/缺验证证据”的缺口；
-    # 原文案不得再出现不存在的 report_to_leader 工具（子代理工具集里没有它）。
+    # 原文案不得再引用子代理工具集里不存在的工具（plan-562-2318 L7：这里原先点名的
+    # `report_to_leader` 恰恰是**存在**的——见 subagent_tools.SUBAGENT_OWN_TOOLS，
+    # 留着这条过期说明会让后来者误删真实工具；改为不点名的通用约束）。
+    # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）。
     bundle.developer_parts.append(
         "## Report Back (required)\n"
         "When you finish, reply with a STRUCTURED report so the main agent can integrate precisely. "
