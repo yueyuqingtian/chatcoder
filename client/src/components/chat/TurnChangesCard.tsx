@@ -28,8 +28,9 @@ import {
 import { Button, Collapse, Dialog, Menu, Tooltip, type MenuEntry } from "../ui";
 import { FileBadge, splitFilePath } from "./FileBadge";
 
-/** 模块级 in-flight 去重：同一轮可能在消息流与折叠区同时挂载，只允许发一次请求 */
-const inflight = new Set<number>();
+/** 模块级 in-flight 去重：同一轮可能在消息流与折叠区同时挂载，只允许发一次请求。
+ *  键为 `${turnId}:${整组签名}`——续跑轮并入后签名变化属于另一次请求，不能被旧请求挡住。 */
+const inflight = new Set<string>();
 
 /** 已经出现过的轮次卡片：入场动画只在「第一次出现」时播放。
  *  消息流是虚拟列表，卡片滚出视口再滚回会重新挂载——不记下来的话每次滚动都会重播一遍。 */
@@ -73,6 +74,16 @@ function parentDirPath(abs: string): string {
   return /^[A-Za-z]:$/.test(dir) ? `${dir}/` : dir;
 }
 
+/** plan-20261026-round-changes：整组轮次归一化——只保留正整数、去重升序。
+ *  首项必须等于基底轮 turnId（缓存就写在它上面），且组内不得出现比它更小的轮次，
+ *  否则退回单轮：宁可少聚合也不能把另一张卡的数据读到自己头上。 */
+function normalizeRoundIds(turnId: number, turnIds?: readonly number[]): number[] {
+  const valid = (turnIds ?? []).filter((id) => Number.isInteger(id) && id > 0);
+  const uniq = Array.from(new Set(valid)).sort((a, b) => a - b);
+  if (uniq.length === 0 || uniq[0] !== turnId) return [turnId];
+  return uniq;
+}
+
 function targetIcon(target: OpenTarget, size = 15) {
   switch (target) {
     case "idea": return <IconBrandIdea size={size} />;
@@ -82,7 +93,13 @@ function targetIcon(target: OpenTarget, size = 15) {
   }
 }
 
-export function TurnChangesCard({ turnId }: { turnId: number }) {
+export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?: readonly number[] }) {
+  /** 整组轮次（基底轮 + 本轮结束后后台事件唤醒的续跑轮）——整轮只展示、只撤销一张卡。
+   *  只接受正整数、去重升序，且首项必须是基底轮 turnId：口径不对时退回单轮，
+   *  宁可少聚合也不能读错缓存键（清单缓存恒写在基底轮键上）。 */
+  const roundIds = normalizeRoundIds(turnId, turnIds);
+  const roundSig = roundIds.join(",");
+
   const files = useChatStore((s) => s.turnChanges[turnId]);
   const loadTurnChanges = useChatStore((s) => s.loadTurnChanges);
   const latestChangeTurnId = useChatStore((s) => s.latestChangeTurnId);
@@ -120,13 +137,17 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
     if (files && files.length > 0) enteredTurns.add(turnId);
   }, [files, turnId]);
 
-  // 未加载时补拉：effect 内直接读最新 store，不依赖 files——否则「加载完成」会再触发一次拉取
+  // 未加载、或缓存还是单轮口径时补拉：effect 内直接读最新 store，不依赖 files——
+  // 否则「加载完成」会再触发一次拉取。
   useEffect(() => {
-    if (useChatStore.getState().turnChanges[turnId] !== undefined) return;
-    if (inflight.has(turnId)) return;
-    inflight.add(turnId);
-    void loadTurnChanges(turnId).finally(() => inflight.delete(turnId));
-  }, [turnId, loadTurnChanges]);
+    const st = useChatStore.getState();
+    if (st.turnChanges[turnId] !== undefined && st.turnChangesSig[turnId] === roundSig) return;
+    const key = `${turnId}:${roundSig}`;
+    if (inflight.has(key)) return;
+    inflight.add(key);
+    // roundSig 去掉基底轮就是额外的续跑轮：后端只接受额外轮，基底轮走 URL
+    void loadTurnChanges(turnId, roundSig.split(",").map(Number).slice(1)).finally(() => inflight.delete(key));
+  }, [turnId, roundSig, loadTurnChanges]);
 
   // 复制反馈自动回退
   useEffect(() => {
@@ -155,7 +176,7 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
   // 撤销顺序锁：只有最新有文件改动的轮次可撤销，更早的轮次要先撤销后面的。
   // 锁未拉到（切会话瞬间 / 请求失败）时按钮也禁用，但提示文案必须说实话——
   // 此前一律显示「请先撤销更新轮次的改动」，把加载态误报成「你可能还有更晚的改动」。
-  const canRevert = latestChangeTurnId === turnId;
+  const canRevert = latestChangeTurnId != null && roundIds.includes(latestChangeTurnId);
   const revertHint = canRevert
     ? ""
     : revertLockLoaded
@@ -170,8 +191,8 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
     openPanel();
     openTab("files");
     try {
-      // 不传 callKey = 整轮累积口径，正是「该轮该文件」
-      const d = await api.getFileDiff(turnId, path);
+      // 不传 callKey = 整轮累积口径，正是「该轮该文件」；续跑轮按整组传入得累积 diff
+      const d = await api.getFileDiff(turnId, path, undefined, roundIds.slice(1));
       openDiffPreview(d.path || path, {
         path: d.path, before: d.before, after: d.after, truncated: d.truncated,
         deleted: d.action === "deleted",
@@ -253,7 +274,7 @@ export function TurnChangesCard({ turnId }: { turnId: number }) {
   async function confirmRevert() {
     setReverting(true);
     try {
-      const res = await revertTurnFiles(turnId, false);
+      const res = await revertTurnFiles(turnId, false, roundIds.slice(1));
       // 严格拒绝：弹窗切到「已取消」视图，逐文件说明原因（未动任何文件）；
       // 其余失败已由 store 写进消息流错误卡，这里只解除忙碌态、允许关闭弹窗
       if (res.ok) setConfirmOpen(false);

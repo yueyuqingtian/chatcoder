@@ -423,6 +423,8 @@ class RevertFilesResult(BaseModel):
     """
     ok: bool
     turn_id: int | None = None
+    # plan-20261026-round-changes：整轮撤销实际覆盖的轮次（基底轮 + 并入的续跑轮）
+    turn_ids: list[int] = []
     restored: int = 0
     deleted: int = 0
     skipped: int = 0

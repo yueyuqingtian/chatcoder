@@ -7,7 +7,7 @@
  * - 最终回答（Markdown/产物/摘要）与计划卡始终展示
 
  */
-import { useCallback, memo, useEffect, useState, useMemo, Fragment, type KeyboardEvent } from "react";
+import { useCallback, memo, useEffect, useRef, useState, useMemo, Fragment, type KeyboardEvent, type ReactNode } from "react";
 import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
@@ -19,6 +19,7 @@ import { MarkdownContent } from "../MarkdownContent";
 import { DismissibleErrorCard } from "./ErrorCard";
 import { IconRotateCcw, IconArrowToggle } from "../icons";
 import { Tooltip } from "../ui";
+import { motionDisabled } from "../ui/usePresence";
 import type { FlowSegment, TimelineEntry, TurnItem } from "./timeline";
 import {
   msgText,
@@ -29,11 +30,16 @@ import {
   splitFlowSegments,
 } from "./timeline";
 import { useChatStore } from "../../store/chat";
+import { dropFlowExpand, turnCollapseKey, useTurnCollapse } from "../../store/flowExpand";
 import { TurnChangesCard } from "./TurnChangesCard";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
 import { UserBubble } from "./UserBubble";
 import { recordComponentRender } from "../../perf/metrics";
+
+/** plan-586-2374：无最终汇报时前两段不参与渲染，用同一个空数组占位。
+ *  共用常量而不是 `[]` 字面量：字面量每次新建会让下游依赖引用比较失效，也白分配。 */
+const EMPTY_SEGMENTS: FlowSegment[] = [];
 
 /** plan-20261020-bgtask：系统唤醒一轮时的分隔线文案（按唤醒原因）。缺省 = 子代理完成唤醒（历史口径）。 */
 const WAKEUP_DIVIDER_TEXT: Record<string, string> = {
@@ -194,6 +200,71 @@ function WorkTimer({
   );
 }
 
+/** 过程段的折叠容器（plan-586-2374）：折叠态不再保留内部 DOM。
+ *
+ *  为什么不用 ui/Collapse 直接替换 `.turn-process-container`：`.ui-collapse` 的样式在
+ *  components.css 里、`.turn-process-container` 在 global.css 里，两者都是单类选择器且
+ *  components.css 晚加载——类名叠在一起时 transition / grid-template-rows / 折叠态的
+ *  margin 负值补偿（global.css:4897）会互相覆盖，无法保证视觉零差异。
+ *  因此这里保留现有外壳与 `.turn-process-inner`（同一套 grid 0fr↔1fr 过渡），只补上
+ *  ui/Collapse 的 lazy 挂载语义：展开时同一次渲染就挂上内容（过渡从 0fr 起步），
+ *  收起时先播完过渡再卸载（绝不 0 动画瞬跳）。安全性前提：折叠态容器高度恒为 0
+ *  （global.css:1102-1108），卸载内部 DOM 不改变虚拟列表测到的高度，不会引发总高跳变。
+ *  children 传函数：已卸载时不会被调用，不为不可见内容白白构造 React 元素。 */
+function ProcessCollapse({ collapsed, children }: { collapsed: boolean; children: () => ReactNode }) {
+  /** 内容是否挂载：展开即挂载，收起过渡结束才卸载 */
+  const [mounted, setMounted] = useState(!collapsed);
+  /** 收起过渡期间的内容快照（与 ui/Collapse 的 frozen 同语义）：
+   *  收起那一刻起内容冻结为最后一次展开态，避免 200ms 动画途中数据更新让文字变样。 */
+  const frozen = useRef<ReactNode>(null);
+
+  // 派生状态：展开时同一次渲染里就挂上内容，高度过渡从 0 开始而不是先空转再突然撑开
+  if (!collapsed && !mounted) setMounted(true);
+
+  // 兜底卸载：transitionend 在「动画效果：关闭」档或元素被隐藏时可能不触发
+  useEffect(() => {
+    if (!collapsed || !mounted) return;
+    const finish = () => {
+      frozen.current = null; // 卸载后不留快照，避免长期持有已废弃的元素树
+      setMounted(false);
+    };
+    if (motionDisabled()) {
+      finish();
+      return;
+    }
+    // 减弱档（×0.6）时过渡同比缩短；读不到系数时按完整时长
+    const scale = Number(getComputedStyle(document.documentElement).getPropertyValue("--motion-scale"));
+    const wait = 200 * (Number.isFinite(scale) && scale > 0 ? scale : 1) + 160;
+    const timer = window.setTimeout(finish, wait);
+    return () => window.clearTimeout(timer);
+  }, [collapsed, mounted]);
+
+  // 展开期每次都取最新内容并更新快照；收起过渡期沿用快照
+  let body: ReactNode = null;
+  if (!collapsed) {
+    body = children();
+    frozen.current = body;
+  } else if (mounted) {
+    body = frozen.current;
+  }
+
+  return (
+    <div
+      className={`turn-process-container${collapsed ? " collapsed" : ""}`}
+      onTransitionEnd={(e) => {
+        // 只认本容器自己的高度过渡（段内折叠块会冒泡上来）
+        if (collapsed && e.target === e.currentTarget && e.propertyName === "grid-template-rows") {
+          frozen.current = null;
+          setMounted(false);
+        }
+      }}
+    >
+      {/* plan-353-1738 M4a：内层承载 flex + gap 布局，外层（grid）只负责 0fr↔1fr 的真实高度过渡 */}
+      <div className="turn-process-inner">{body}</div>
+    </div>
+  );
+}
+
 export const TurnGroup = memo(function TurnGroup({
   entry,
   isRunning,
@@ -266,13 +337,13 @@ export const TurnGroup = memo(function TurnGroup({
   );
 
   // 找到最后一个 text 项作为 AI 的最终总结汇报
-  let finalReportOriginalIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    if (items[k].kind === "text") {
-      finalReportOriginalIdx = k;
-      break;
+  // plan-586-2374：这处倒序全量扫描随 items 缓存，避免每次渲染重跑
+  const finalReportOriginalIdx = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      if (items[k].kind === "text") return k;
     }
-  }
+    return -1;
+  }, [items]);
 
   // plan-865: 规划段/执行段统一为「执行过程」折叠（见 processItems）——不再按锚点切分，
   // 计划卡由时间线 PLAN 消息（case "plan"）或旧会话 plansByTurn 兜底渲染。
@@ -355,7 +426,6 @@ export const TurnGroup = memo(function TurnGroup({
   // 确保计划卡预览在规划阶段完成后始终展现在最底部；用户手动点击计时条折叠时才尊重手动状态。
   // 子代理面板的 turn 行状态取自主会话 turns——计划等待语义不适用，否则面板会被一直保持展开
   const isAwaitingConfirmation = flow !== "subagent" && turnRowStatus === "awaiting_confirmation";
-  const [userToggledCollapsed, setUserToggledCollapsed] = useState<boolean | null>(null);
   /** plan-41-198: turn 内是否存在运行期注入的用户消息（非首条）。
    *  它属于用户输入而非 AI 执行过程，被默认折叠（max-height:0 + opacity:0）后
    *  用户会以为消息没发出去；故含注入消息的 turn 完成后默认展开，仍可由计时条手动收起。 */
@@ -369,48 +439,74 @@ export const TurnGroup = memo(function TurnGroup({
    *  工作流后台运行期间计时停住、箭头出现、过程已折叠，唤醒轮结束时用时又一下跳到含工作流的总时长。
    *  思考块的「进行中」仍只认主代理真实在跑（isRunning）。 */
   const roundActive = isRunning || awaitingBackground;
+  /** 默认折叠态（用户未手动切换过时生效）：有过程且非异常、非等待确认、无注入用户消息时折叠。
+   *  v0.3.1 (plan-190-898)：方案等待确认阶段必须保持展开，确保计划卡预览始终在最底部。 */
+  const defaultProcessCollapsed = hasProcess && !isAwaitingConfirmation && !hasInjectedUser;
+  /** plan-586-2374：手动折叠态从本地 useState 迁到 flowExpand store。
+   *
+   *  消息流按 turn 虚拟化，TurnGroup 滚出可视区即被卸载，本地 state 会让用户刚做的展开 / 折叠
+   *  在滚回时丢失。key 的稳定身份见 turnCollapseKey：用 turn_id（全局自增主键，跨会话唯一）。
+   *
+   *  `turnId == null`（还没有 turn 行的独立用户消息）**不落 store**：
+   *  这类条目只有一条用户消息，没有可折叠的工作过程；更关键的是它的兜底身份只能取消息 id，
+   *  而乐观消息落库后 id 会变（临时 id → 真实 id），key 随之漂移，旧 key 会永久残留在
+   *  store 的 open 表里（该表没有按会话回收机制）。用一个「不写入」的 key 反而更干净——
+   *  key 仍必须是稳定字符串（hook 依赖它），但永远不会被 set。 */
+  const persistCollapse = turnId != null;
+  const collapseKey = useMemo(
+    () => (persistCollapse ? turnCollapseKey(turnId) : "turn-collapse:transient"),
+    [persistCollapse, turnId],
+  );
+  const [storedCollapsed, setStoredCollapsed] = useTurnCollapse(collapseKey, defaultProcessCollapsed);
   /** plan-20261014-fix4（用户反馈「运行中也可以折叠」）：运行中强制展开、不可折叠；
    *  每次进入运行都清掉手动折叠记录——本轮（含并入的续跑轮）完成后按默认规则自动折叠，之后才可手动切换。 */
   useEffect(() => {
-    if (roundActive) setUserToggledCollapsed(null);
-  }, [roundActive]);
-  const processCollapsed = roundActive
-    ? false
-    : userToggledCollapsed !== null
-      ? userToggledCollapsed
-      : (hasProcess && !isAwaitingConfirmation && !hasInjectedUser);
+    if (roundActive) dropFlowExpand(collapseKey);
+  }, [roundActive, collapseKey]);
+  const processCollapsed = roundActive ? false : (persistCollapse ? storedCollapsed : defaultProcessCollapsed);
+  const setUserToggledCollapsed = useCallback(
+    (collapsed: boolean) => { if (persistCollapse) setStoredCollapsed(collapsed); },
+    [persistCollapse, setStoredCollapsed],
+  );
 
-  let lastThinkingIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    if (items[k].kind === "thinking") {
-      lastThinkingIdx = k;
-      break;
+  // plan-586-2374：最后一个思考项（进行中的思考块据此判断 active），随 items 缓存
+  const lastThinkingIdx = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      if (items[k].kind === "thinking") return k;
     }
-  }
+    return -1;
+  }, [items]);
 
   // plan-865: 时间线 PLAN 消息（预览/确认）——最后一条位置渲染计划卡；
   // hasPlanMsg=true 时不再走 plansByTurn 兜底渲染位，避免重复卡片
-  let lastPlanItemIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    if (items[k].kind === "plan") { lastPlanItemIdx = k; break; }
-  }
+  const lastPlanItemIdx = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      if (items[k].kind === "plan") return k;
+    }
+    return -1;
+  }, [items]);
   const hasPlanMsg = lastPlanItemIdx >= 0;
 
   /** plan-282-1416（问题3 根治）：最后一个 AI 内容项的 index（可含 tools 等无 msg 的项）。
    *  AI 操作行必须紧跟 AI 内容块末尾插入，而不是挂在 .turn-flow 底部——
    *  否则运行中注入的用户消息（时间序在其后）会被这条操作行「包」进来，
    *  表现为「AI 和用户被当成一个整体共用一条复制/点赞行」。 */
-  let lastAiItemIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    if (items[k].kind !== "user") { lastAiItemIdx = k; break; }
-  }
+  // plan-586-2374：两处尾部锚点扫描随 items 缓存（原先每次渲染各跑一遍全量倒序）
+  const lastAiItemIdx = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      if (items[k].kind !== "user") return k;
+    }
+    return -1;
+  }, [items]);
   /** 操作行锚点：最后一个非用户、且不是系统续跑的 AI 项。仅含续跑（唤醒通知尚无回复）的轮次没有锚点，不渲染操作行，
    *  避免通知下方出现一排与回复无关的复制 / 重新生成按钮。 */
-  let actionAnchorIdx = -1;
-  for (let k = items.length - 1; k >= 0; k--) {
-    const kind = items[k].kind;
-    if (kind !== "user" && !SYSTEM_CONTINUATION_KINDS.has(kind)) { actionAnchorIdx = k; break; }
-  }
+  const actionAnchorIdx = useMemo(() => {
+    for (let k = items.length - 1; k >= 0; k--) {
+      const kind = items[k].kind;
+      if (kind !== "user" && !SYSTEM_CONTINUATION_KINDS.has(kind)) return k;
+    }
+    return -1;
+  }, [items]);
 
   /** 安全取项的消息 id（tools / plan 分组项无 msg，回落到 -1 仅供 key 使用） */
   const itemMsgId = (item: TurnItem): number =>
@@ -425,37 +521,78 @@ export const TurnGroup = memo(function TurnGroup({
   }, [turnId, requestRollbackPreview]);
   const onRollback = turnId != null && !rolledBack ? rollbackFn : undefined;
 
-  const renderedSubagentNames = new Set<string>();
-  /** plan-568-2333：resume_subagent 的调用参数只有 agent_id（没有 task_title），
+  /** plan-586-2374：子代理的身份集合随 items 缓存——此前每次渲染都把整个 turn 的条目重扫一遍。
+   *  plan-568-2333：resume_subagent 的调用参数只有 agent_id（没有 task_title），
    *  按名称认领不到它自己派出的子代理（同一子代理再续跑一次时更明显）。这里按 agent_id
    *  记录已落位，否则它会在时间线位置渲染一次、又在轮次末尾的兜底槽位再渲染一次。 */
-  const renderedSubagentIds = new Set<number>();
-  for (const it of items) {
-    if (it.kind === "subagent") {
+  const { renderedSubagentNames, renderedSubagentIds } = useMemo(() => {
+    const names = new Set<string>();
+    const ids = new Set<number>();
+    for (const it of items) {
+      if (it.kind !== "subagent") continue;
       const c = it.msg.content as Record<string, unknown> | undefined;
       const args = (c?.args && typeof c.args === "object" ? c.args : undefined) as
         Record<string, unknown> | undefined;
       const title = String(args?.task_title ?? "");
-      if (title) renderedSubagentNames.add(title);
+      if (title) names.add(title);
       const rid = Number(args?.agent_id);
-      if (Number.isFinite(rid) && rid > 0) renderedSubagentIds.add(rid);
+      if (Number.isFinite(rid) && rid > 0) ids.add(rid);
     }
-  }
+    return { renderedSubagentNames: names, renderedSubagentIds: ids };
+  }, [items]);
 
-  const unplacedSubagents = (subagents || [])
-    .filter(
-      (sa) =>
-        !renderedSubagentIds.has(sa.agentId) &&
-        !renderedSubagentNames.has(sa.name) &&
-        !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
-    )
-    // plan-330-1648 M5-b: 按 agentId 升序（= 派发创建序）稳定排序，刷新前后顺序一致
-    .sort((a, b) => a.agentId - b.agentId);
+  const unplacedSubagents = useMemo(
+    () => (subagents || [])
+      .filter(
+        (sa) =>
+          !renderedSubagentIds.has(sa.agentId) &&
+          !renderedSubagentNames.has(sa.name) &&
+          !renderedSubagentNames.has(sa.name.replace(/^探索[·:：\s]*/, ""))
+      )
+      // plan-330-1648 M5-b: 按 agentId 升序（= 派发创建序）稳定排序，刷新前后顺序一致
+      .sort((a, b) => a.agentId - b.agentId),
+    [subagents, renderedSubagentIds, renderedSubagentNames],
+  );
 
   /** plan-20261013-wf-order：工作流节点子代理按派发时刻挂到其创建位置对应的条目之后（无派发时刻时挂到所属工作流卡之后）；
-   *  挂靠不到的仍走兜底槽位。挂靠的条目之后由挂靠段渲染这些卡片（见 splitFlowSegments）。 */
-  const { attached: nodeCardsByItem, unplaced: legacyUnplaced } = placeWorkflowNodeCards(items, unplacedSubagents);
-  const attachedIdx: ReadonlySet<number> = new Set(nodeCardsByItem.keys());
+   *  挂靠不到的仍走兜底槽位。挂靠的条目之后由挂靠段渲染这些卡片（见 splitFlowSegments）。
+   *  plan-586-2374：placeWorkflowNodeCards 是 O(cards × items) 的双重扫描，是本组件最贵的派生计算——
+   *  连同 attachedIdx 一起缓存，只在 items 或未落位子代理集合变化时重算。 */
+  const { attached: nodeCardsByItem, unplaced: legacyUnplaced } = useMemo(
+    () => placeWorkflowNodeCards(items, unplacedSubagents),
+    [items, unplacedSubagents],
+  );
+  const attachedIdx = useMemo<ReadonlySet<number>>(() => new Set(nodeCardsByItem.keys()), [nodeCardsByItem]);
+
+  /** plan-586-2374：三次切段原先在渲染时直接调用，每次渲染都完整扫一遍 items。
+   *  三者的范围互不相同，各自缓存（共用 memo 反而会因任一参数变化一起重算）。
+   *
+   *  **必须钳位起始下标**：`finalReportOriginalIdx` 在没有最终汇报时是 -1，
+   *  而 `splitFlowSegments` 的循环是 `for (index = from; index < to; index++)`，
+   *  负的 from 会去读 `items[-1]` → `isOutsideProcess(undefined)` 抛
+   *  「Cannot read properties of undefined (reading 'kind')」。
+   *  改造前这三段是**在渲染分支里**惰性求值的（只有 hasProcess 时才切前两段），
+   *  提到 useMemo 后变成无条件求值，因此这里显式把负起点折成 0：
+   *  没有最终汇报时 `[0, 0)` 与 `[len, len)` 都是空段，语义与「直显全部」一致
+   *  （此时渲染走的是 allSegments 分支，前两段本就不会被使用）。 */
+  const processFrom = Math.max(0, finalReportOriginalIdx);
+  /* 三段仍然各自 memo，但按改造前的**惰性语义**短路：`hasProcess` 为假时渲染只走 allSegments，
+     前两段根本不会被使用。若照旧无条件求值，`finalReportOriginalIdx === -1` 会让
+     reportSegments 退化成 [0, len) 与 allSegments 完全同区间，同一轮白切两遍 O(n)。
+     hasProcess 已在上方算出（见「折叠口径」注释处），此处直接复用，无引用顺序问题。 */
+  const segmentsNeeded = hasProcess;
+  const processSegments = useMemo(
+    () => (segmentsNeeded ? splitFlowSegments(items, 0, processFrom, firstUserIdx, attachedIdx) : EMPTY_SEGMENTS),
+    [segmentsNeeded, items, processFrom, firstUserIdx, attachedIdx],
+  );
+  const reportSegments = useMemo(
+    () => (segmentsNeeded ? splitFlowSegments(items, processFrom, items.length, firstUserIdx, attachedIdx) : EMPTY_SEGMENTS),
+    [segmentsNeeded, items, processFrom, firstUserIdx, attachedIdx],
+  );
+  const allSegments = useMemo(
+    () => splitFlowSegments(items, 0, items.length, firstUserIdx, attachedIdx),
+    [items, firstUserIdx, attachedIdx],
+  );
 
   const subagentNode =
     legacyUnplaced.length > 0 ? (
@@ -468,11 +605,18 @@ export const TurnGroup = memo(function TurnGroup({
 
   /** plan-330-1648 M5-b: 未落位卡片优先挂在**最后一个 AI 内容项之后**（与工具行同序）；
    *  仅当该 turn 没有任何 AI 内容项（纯用户消息等）时，才回落到过程容器位置，保证卡片不丢。 */
-  const subagentFallbackInContainer = items.every((it) => it.kind === "user");
+  const subagentFallbackInContainer = useMemo(
+    () => items.every((it) => it.kind === "user"),
+    [items],
+  );
 
   // v0.3.1: 外层容器渲染守卫——只要存在任何非首条用户消息的项、计划卡或子代理，必须完整渲染 AI 回复区
-  const hasAnyAiContent =
-    items.some((_, index) => index !== firstUserIdx) || hasPlan || subagentNode != null;
+  // plan-586-2374：随 items 缓存；subagentNode 的非空判定等价于 legacyUnplaced 非空（见上），
+  // 这里用后者作依赖，避免把新建的 JSX 元素放进依赖数组、每次渲染都失效。
+  const hasAnyAiContent = useMemo(
+    () => items.some((_, index) => index !== firstUserIdx) || hasPlan || legacyUnplaced.length > 0,
+    [items, firstUserIdx, hasPlan, legacyUnplaced],
+  );
 
   /** v36 修复：折叠入口可用性。主消息流维持原口径（有最终汇报才折叠）；
    *  子代理面板放宽为「存在 AI 内容即可折叠」——终态但无结构化汇报（失败/取消/纯工具）
@@ -723,18 +867,20 @@ export const TurnGroup = memo(function TurnGroup({
       if (seg.kind === "attached") return renderAttachedSegment(seg.index);
       if (!opts.wrap) return seg.indices.map((index) => renderSegmentItem(index));
       const isLast = n === lastProcess;
+      // plan-586-2374：折叠态过程段不保留内部 DOM（见 ProcessCollapse），长会话里这是 DOM 量级最大的一块
       return (
-        <div
+        <ProcessCollapse
           key={`proc-${seg.indices.length > 0 ? seg.indices[0] : "tail"}`}
-          className={`turn-process-container${opts.collapsed ? " collapsed" : ""}`}
+          collapsed={opts.collapsed}
         >
-          {/* plan-353-1738 M4a：内层承载 flex + gap 布局，外层（grid）只负责 0fr↔1fr 的真实高度过渡 */}
-          <div className="turn-process-inner">
-            {seg.indices.map((index) => renderSegmentItem(index))}
-            {isLast && hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
-            {isLast && subagentFallbackInContainer ? subagentNode : null}
-          </div>
-        </div>
+          {() => (
+            <>
+              {seg.indices.map((index) => renderSegmentItem(index))}
+              {isLast && hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
+              {isLast && subagentFallbackInContainer ? subagentNode : null}
+            </>
+          )}
+        </ProcessCollapse>
       );
     });
   };
@@ -800,18 +946,15 @@ export const TurnGroup = memo(function TurnGroup({
               无最终汇报（运行中 / 异常 / 纯工具调用）全部直显，子代理面板例外——允许折叠（v36 修复：此前没有折叠入口）。 */}
           {hasProcess ? (
             <>
-              {renderFlowSegments(splitFlowSegments(items, 0, finalReportOriginalIdx, firstUserIdx, attachedIdx), {
+              {renderFlowSegments(processSegments, {
                 collapsed: processCollapsed,
                 wrap: true,
               })}
               {/* 3. 最终汇报（最终 text）与其后的确认/分割线等：有过程时直显在折叠条下方（不进入折叠容器） */}
-              {renderFlowSegments(
-                splitFlowSegments(items, finalReportOriginalIdx, items.length, firstUserIdx, attachedIdx),
-                { collapsed: false, wrap: false },
-              )}
+              {renderFlowSegments(reportSegments, { collapsed: false, wrap: false })}
             </>
           ) : (
-            renderFlowSegments(splitFlowSegments(items, 0, items.length, firstUserIdx, attachedIdx), {
+            renderFlowSegments(allSegments, {
               collapsed: flow === "subagent" && processCollapsed,
               wrap: true,
             })
@@ -824,12 +967,13 @@ export const TurnGroup = memo(function TurnGroup({
       )}
 
       {/* plan-20261018-turn-changes：本轮文件变更卡片。
-          只在本轮进入终态后展示（运行中不闪），且只读该轮自己的写盘记录——
+          只在本轮进入终态后展示（运行中不闪），且只读本轮自己的写盘记录——
           上一轮的卡片内容随轮次固定，不会因为新轮次完成而被覆盖。
-          合并续跑轮（roundIds 多个）时逐轮各出一张卡，撤销仍是按轮粒度的批次。 */}
+          plan-20261026-round-changes：基底轮与其续跑轮（后台事件唤醒）合并成**整轮一张卡**，
+          清单 / 审查 / 撤销都走 roundIds 整组口径，不再每轮各出一张。 */}
       {turnFinished && flow === "main" && !rolledBack && roundIds.length > 0 && (
         <div className="turn-changes-stack">
-          {roundIds.map((id) => <TurnChangesCard key={id} turnId={id} />)}
+          <TurnChangesCard key={roundIds[0]} turnId={roundIds[0]} turnIds={roundIds} />
         </div>
       )}
 

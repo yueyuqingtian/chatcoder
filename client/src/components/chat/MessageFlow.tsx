@@ -6,12 +6,12 @@
  * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
-import { elementScroll, useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
+import { elementScroll, measureElement as defaultMeasureElement, useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
-import { recordComponentRender } from "../../perf/metrics";
+import { recordComponentRender, recordDerivation } from "../../perf/metrics";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { DebugCard } from "./DebugCard";
@@ -85,6 +85,32 @@ function compensateItemAboveViewport(
 ): boolean {
   const offset = instance.scrollOffset ?? 0;
   return instance.itemSizeCache.has(item.key) ? item.end <= offset : item.start < offset;
+}
+
+/* plan-586-2374 §2.1：这一刻要不要跳过该项的测量。
+ *
+ * 条件 = 「几何运动期」+「项在视口 ± 1 屏之外」，两个同时成立才跳过。
+ *   · 运动期是前提：静止期一律真测，行为与改造前完全一致（门控只在 width 逐帧变化时生效）；
+ *   · ± 1 屏安全边距（§2.3）：overscan 项离视口可能很近，其内容随宽度增长会挤到视口边缘。
+ * 下面几道保守放行都是为了守住「视口内项永远真测」这条视觉不变量：
+ * 解析不出下标、从未真测过（估算位置不可信）、拿不到几何——一律走真实测量。 */
+function shouldSkipMeasurement(
+  index: number,
+  instance: Virtualizer<HTMLDivElement, Element>,
+  visible: Set<number>,
+): boolean {
+  if (index < 0) return false;
+  if (visible.has(index)) return false; // 集合命中：明确落在视口 ± 1 屏内
+  const key = instance.options.getItemKey(index);
+  // 首次挂载项还没有真实高度，估算位置不足以判断远近，必须真测
+  if (!instance.itemSizeCache.has(key)) return false;
+  const rect = instance.scrollRect;
+  const offset = instance.scrollOffset;
+  if (!rect || offset == null) return false;
+  const item = instance.measurementsCache[index];
+  if (!item) return false;
+  const margin = rect.height; // 一屏安全边距
+  return !(item.start < offset + rect.height + margin && item.end > offset - margin);
 }
 
 /* plan-20261020-pts：贴底跟随改由 StickyBottom 内核负责（见 ./stickyBottom.ts）。
@@ -363,6 +389,35 @@ function MessageFlowCore({
   const [overscan, setOverscan] = useState(6);
   useEffect(() => subscribe((busy) => setOverscan(busy ? 2 : 6)), []);
 
+  /* plan-586-2374 §2.1：运动期只测视口内，视口外沿用缓存尺寸。
+   *
+   * 为什么必须用 ref：这个集合会随滚动 / 布局变化刷新，若走 useState，每次刷新都会
+   * 重渲染整棵可见消息树（含 markdown 与工具树），这正是 `MessageFlow.tsx` 中
+   * directDomUpdates 注释记载的卡顿主因；measureElement 也只需要读到最新值。
+   * 刷新时机见下方 refreshVisibleIndexes 的调用点说明。 */
+  const visibleIndexSetRef = useRef<Set<number>>(new Set());
+  /** 本轮运动期是否真的发生过跳过：收敛序列据此决定要不要补测（没跳过就完全零动作）。 */
+  const skippedDuringMotionRef = useRef(false);
+
+  /** plan-586-2374 §2.1：自定义测量口径（覆盖 VirtualizerOptions.measureElement）。
+   *  静止期与改造前**完全一致**（一律 defaultMeasureElement 真测）；只有「运动期 + 视口外」
+   *  才返回缓存/估算值，从而既不读 DOM、也不推进 itemSizeCacheVersion → 不触发
+   *  getMeasurements 的后缀重算。视口内的项永远真测，这是视觉不变量。 */
+  const measureElementCb = useCallback(
+    (el: Element, entry: ResizeObserverEntry | undefined, instance: Virtualizer<HTMLDivElement, Element>): number => {
+      const index = instance.indexFromElement(el);
+      if (isBusy() && shouldSkipMeasurement(index, instance, visibleIndexSetRef.current)) {
+        skippedDuringMotionRef.current = true;
+        recordDerivation("virtualMeasureSkipped");
+        const key = instance.options.getItemKey(index);
+        return instance.itemSizeCache.get(key) ?? instance.options.estimateSize(index);
+      }
+      recordDerivation("virtualMeasure");
+      return defaultMeasureElement(el, entry, instance);
+    },
+    [],
+  );
+
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => parentRef.current,
@@ -371,6 +426,9 @@ function MessageFlowCore({
     initialOffset: () =>
       totalCount > 0 ? Math.max(0, (totalCount - 1) * heightEstRef.current[estBucketOf(totalCount - 1)]) : 0,
     overscan,
+    /* plan-586-2374 §2.1：测量门控。注意渲染处的 ref 仍用实例方法
+       `virtualizer.measureElement`（挂载/卸载登记 + 首次测量），它内部会调用本选项。 */
+    measureElement: measureElementCb,
     /* plan-282-1444：位置改由虚拟列表**直接写 DOM**。
      *
      *  根因：每一项都是 `position:absolute`，位置来自虚拟列表的尺寸缓存。新挂载
@@ -498,6 +556,70 @@ function MessageFlowCore({
     sticky.setContent(node);
   }, [virtualizer, sticky]);
 
+  /* plan-586-2374 §2.1：刷新「视口 ± 1 屏」内的 index 集合（测量门控的白名单）。
+   *
+   * 为什么限定在低频时机刷新、且不进 measureElement 内部反查：
+   *   · getVirtualItems() 本身要取测量缓存 + 计算可见范围，逐次测量里再调一次等于把
+   *     门控变成新的开销源，而且测量发生在虚拟器内部、重入语义不清；
+   *   · 集合是「提前算好、多帧复用」的语义，它只需要覆盖运动期那 260ms 的判定。
+   * 调用点（均由下面的代码标注）：滚动路径的 rAF 合并、条目数/定位收敛变化、
+   * 以及运动开始事件（此时布局尚未改写，读到的几何最干净）。
+   * 复用同一个 Set 对象：measureElement 持有它的引用，换对象会让门控读到空集合。
+   *
+   * 白名单必须按**不含 overscan** 的可见范围建立（用 `virtualizer.range`，不是
+   * `getVirtualItems()`）：运动期 overscan 会从 6 降到 2，而降低是异步 state 更新、
+   * 晚于 drag-start。若按 `getVirtualItems()`（此刻仍是 range ± 6）建表，随后实际渲染的
+   * range ± 2 是它的子集、必然全部命中白名单 → 门控 100% 放行、等于没生效
+   * （此坑由 plan-586-2374 的静态审查发现）。改用 `range` 后两侧都以「可见范围」为基准，
+   * 只有真正离视口一屏以上的项才会被跳过。 */
+  const refreshVisibleIndexes = useCallback(() => {
+    const el = parentRef.current;
+    const set = visibleIndexSetRef.current;
+    set.clear();
+    if (!el) return;
+    const offset = el.scrollTop;
+    const height = el.clientHeight;
+    if (height <= 0) return;
+    const margin = height; // 视口 ± 1 屏安全边距（§2.3）
+    /* plan-586-2374：以「不含 overscan 的可见范围」为基准（`virtualizer.range`）。
+       运动期 overscan 从 6 降到 2 是异步 state 更新、晚于 drag-start：
+       若这里用 getVirtualItems()（此刻含 ±6），随后实际渲染的 ±2 是它的子集，
+       必然全部命中白名单 → 门控 100% 放行、等于没生效。
+       逐 index 取 measurementsCache 而不是 getVirtualItems()：前者不构造 VirtualItem 对象，
+       且 range 的边界已由虚拟器算好，这里只做「按一屏余量外扩」。 */
+    const range = virtualizer.range;
+    const count = virtualizer.options.count;
+    if (!range) {
+      // 首帧（range 尚未算出）：退化为按 getVirtualItems 建表，宁可多测不可漏测
+      for (const it of virtualizer.getVirtualItems()) {
+        if (it.start < offset + height + margin && it.end > offset - margin) set.add(it.index);
+      }
+      return;
+    }
+    const last = Math.min(range.endIndex, count - 1);
+    for (let i = Math.max(0, range.startIndex); i <= last; i++) {
+      const m = virtualizer.measurementsCache[i];
+      if (!m) continue;
+      if (m.start < offset + height + margin && m.end > offset - margin) set.add(i);
+    }
+  }, [virtualizer]);
+
+  /** 滚动路径：rAF 合并刷新（同一帧多次 scroll 只算一次）。
+   *  运动期不执行——与 scheduleSpy 同口径（P1-4：运动期读 scrollTop/clientHeight 会升级成
+   *  强制同步布局，与逐帧折行叠加）。集合在运动开始那一刻已刷过，且 measureElement 里还有
+   *  不读 DOM 的几何兜底（shouldSkipMeasurement 只查虚拟器缓存），滞后不会误跳过视口内项。 */
+  const visRafRef = useRef(0);
+  // 卸载时必须取消尚未执行的帧：否则回调会去读已卸载的容器几何
+  useEffect(() => () => { if (visRafRef.current) cancelAnimationFrame(visRafRef.current); }, []);
+  const scheduleVisibleRefresh = useCallback(() => {
+    if (isBusy()) return;
+    if (visRafRef.current) return;
+    visRafRef.current = requestAnimationFrame(() => {
+      visRafRef.current = 0;
+      refreshVisibleIndexes();
+    });
+  }, [refreshVisibleIndexes]);
+
   /* RFL-1（plan-329-1647 S4）：原本这里还有一个「冻结消息列内容宽度」的 effect
      （拖拽/窗口运动期间把 innerRef 的宽度钉成当前像素值，松手再解冻）。
      它确实降低了拖拽期的重排量，但代价是**排版不实时**：面板变宽后内容右侧留白、
@@ -559,7 +681,8 @@ function MessageFlowCore({
       parentRef.current?.classList.remove("is-scrolling");
     }, 700);
     scheduleSpy();
-  }, [scheduleSpy]);
+    scheduleVisibleRefresh();
+  }, [scheduleSpy, scheduleVisibleRefresh]);
 
   // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
   useEffect(() => () => {
@@ -764,15 +887,58 @@ function MessageFlowCore({
       if (!missedDuringMotion) return;
       scheduleRestore();
     };
+    /* plan-586-2374 §2.2：运动结束补测——把运动期被跳过的屏外项一次性写回真实高度。
+     *
+     * 为什么不用 virtualizer.measure()：直接全量清缓存会与 directDomUpdates 下的 RO 重测
+     * 竞争、导致项重叠（见 reconcile.ts 中 RECONCILE_ORDER.virtualizerMeasure 的沿革注释）。
+     * 这里逐项 resizeItem 是幂等写——视口内项的缓存本来已是最新，delta 为 0，不产生任何动作。
+     * 先读齐再写：避免 getBoundingClientRect 与 resizeItem 的 scrollTop 补偿交替，把一次
+     * 布局读变成 N 次强制同步布局。 */
+    const remeasureSkippedItems = () => {
+      if (!skippedDuringMotionRef.current) return;
+      skippedDuringMotionRef.current = false;
+      const pending: Array<{ index: number; height: number }> = [];
+      virtualizer.elementsCache.forEach((el) => {
+        if (!el.isConnected) return;
+        const index = virtualizer.indexFromElement(el);
+        if (index < 0) return;
+        const height = Math.round(el.getBoundingClientRect().height);
+        if (!Number.isFinite(height) || height <= 0) return;
+        pending.push({ index, height });
+      });
+      if (pending.length === 0) return;
+      for (const p of pending) virtualizer.resizeItem(p.index, p.height);
+      // 高度已变 → 可见范围与贴底同步跟上，避免收敛后露出半帧偏差
+      refreshVisibleIndexes();
+      sticky.pin();
+    };
     // plan-31-151 S4：锚点收尾路径去重——删除 pointerup 捕获监听与 panel-drag-end 事件，
     //   只保留 reconcile order 30 一条路径；窗口 resize 路径仍走 chatcoder:window-motion。
     const offRect = registerReconcileTask(`mf-virtualizer-rect:${instanceId}`, RECONCILE_ORDER.virtualizerRect,
       "提交虚拟器视口尺寸", () => settleRectRef.current?.());
     const offAnchor = registerReconcileTask(`mf-scroll-anchor:${instanceId}`, RECONCILE_ORDER.scrollAnchor,
       "还原滚动锚点", () => settleAfterMotion());
+    /* plan-586-2374 §2.2：运动期跳过的项在收敛序列里补测（order 40 在 rect / 锚点之后，
+       此时宽度已落定，量到的是终态高度）。没发生过跳过时整个任务是一次布尔判断。 */
+    const offRemeasure = registerReconcileTask(`mf-virtualizer-remeasure:${instanceId}`,
+      RECONCILE_ORDER.virtualizerMeasure, "补测运动期跳过的项", () => remeasureSkippedItems());
     const onMotionEnd = (e: Event) => {
       const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
-      if (active === false) settleAfterMotion();
+      if (active === false) {
+        // 窗口缩放路径不经过 runReconcile（App.tsx 只广播事件），此处补上同一份补测。
+        remeasureSkippedItems();
+        settleAfterMotion();
+        return;
+      }
+      // plan-586-2374：窗口缩放（IPC window:motion active=true）不派发 panel-drag-start /
+      // pane-change-start，白名单需要在这里单独重建。主进程在改窗口几何**之前**同步发来该事件，
+      // 此时读到的 scrollTop / clientHeight 还是运动前的干净几何。
+      //
+      // 注意**不要**在这里清 `skippedDuringMotionRef`：标记归属「单次运动」，而本事件是
+      // 窗口几何运动源的开始信号。若用户正拖分隔条（panel-drag 已置 true）期间窗口又收到
+      // resize/move，无条件清零会让拖拽收尾的补测变成 no-op，屏外项停在旧高度。
+      // 各运动源在**自己的开始处**归零（onDragStart / onPaneChangeStart / 本分支的前一次收尾）。
+      refreshVisibleIndexes();
     };
     window.addEventListener("chatcoder:window-motion", onMotionEnd);
     // plan-31-151 S4：拖拽开始前捕获锚点（ResizeHandle mousedown 派发，此时布局尚未变）。
@@ -781,6 +947,10 @@ function MessageFlowCore({
       lastWidthRef.current = el.clientWidth;
       capture();
       missedDuringMotion = true;
+      // plan-586-2374：运动开始 = 布局尚未改写，此刻刷新的「视口 ± 1 屏」最干净；
+      // 运动期不再刷新（避免读布局），整个 260ms 门控都用这份集合。
+      refreshVisibleIndexes();
+      skippedDuringMotionRef.current = false;
     };
     window.addEventListener("chatcoder:panel-drag-start", onDragStart);
     // plan-387-1825 B1：折叠/展开按钮的几何变更。applyPaneUpdate 在 acquire("panel-anim")
@@ -791,6 +961,8 @@ function MessageFlowCore({
       lastWidthRef.current = el.clientWidth;
       capture();
       missedDuringMotion = true;
+      refreshVisibleIndexes();
+      skippedDuringMotionRef.current = false;
     };
     window.addEventListener("chatcoder:pane-change-start", onPaneChangeStart);
     const ro = new ResizeObserver(() => {
@@ -817,14 +989,14 @@ function MessageFlowCore({
     });
     ro.observe(el);
     return () => {
-      offRect(); offAnchor();
+      offRect(); offAnchor(); offRemeasure();
       if (pendingRestore) cancelAnimationFrame(pendingRestore);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
       window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
       window.removeEventListener("chatcoder:pane-change-start", onPaneChangeStart);
       ro.disconnect();
     };
-  }, [virtualizer, instanceId, sticky]);
+  }, [virtualizer, instanceId, sticky, refreshVisibleIndexes]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);
@@ -937,11 +1109,16 @@ function MessageFlowCore({
     const el = parentRef.current;
     if (el) updateActiveEntry(el);
     sampleHeights();
-  }, [entries.length, updateActiveEntry, sampleHeights]);
+    // plan-586-2374：条目集合变了，门控白名单随之失效，就地重建一次（低频）。
+    refreshVisibleIndexes();
+  }, [entries.length, updateActiveEntry, sampleHeights, refreshVisibleIndexes]);
 
   useEffect(() => {
-    if (positioned) sampleHeights();
-  }, [positioned, sampleHeights]);
+    if (!positioned) return;
+    sampleHeights();
+    // plan-586-2374：首屏定位收敛后可见范围已稳定，重建门控白名单。
+    refreshVisibleIndexes();
+  }, [positioned, sampleHeights, refreshVisibleIndexes]);
 
   const matchedIndices = useMemo(() => {
     const kw = searchKeyword.trim().toLowerCase();
@@ -1382,17 +1559,30 @@ function MainMessageFlow({
   }, [subagentMeta]);
 
   /** 一轮（含并入的续跑轮）内的子代理。续跑轮派发的子代理归属续跑轮的 turn，合并轮须并集各轮，
-   *  否则这些子代理卡不会出现在任何位置（plan-20261013-wf-order）。单轮保持原数组引用，不影响 memo。 */
+   *  否则这些子代理卡不会出现在任何位置（plan-20261013-wf-order）。单轮保持原数组引用，不影响 memo。
+   *
+   *  plan-586-2374：合并轮的并集结果按「轮 id 组合」缓存。原先每次调用都 `flatMap` 出新数组，
+   *  而它作为 `subagents` prop 传给 TurnGroup → `unplacedSubagents` / `placeWorkflowNodeCards`
+   *  / 三次切段的依赖全被推翻、每渲染重算，正好抵消本轮把 placeWorkflowNodeCards 变为
+   *  O(cards × items) 缓存的收益（合并轮在续跑会话里很常见）。 */
+  const mergedRoundCache = useRef(new Map<string, NonNullable<ReturnType<typeof subagentsByTurn.get>>>());
   const subagentsOfRound = useCallback(
     (entry: Extract<TimelineEntry, { kind: "turn" }>) => {
       const ids = entry.turnIds ?? (entry.turnId != null ? [entry.turnId] : []);
       if (ids.length === 0) return undefined;
       if (ids.length === 1) return subagentsByTurn.get(ids[0]);
+      const cacheKey = ids.join(",");
+      const cache = mergedRoundCache.current;
+      const hit = cache.get(cacheKey);
+      if (hit) return hit.length > 0 ? hit : undefined;
       const merged = ids.flatMap((id) => subagentsByTurn.get(id) ?? []);
+      cache.set(cacheKey, merged);
       return merged.length > 0 ? merged : undefined;
     },
     [subagentsByTurn],
   );
+  // 子代理状态变化 → 合并轮缓存失效（否则卡片状态会停在旧快照）
+  useEffect(() => { mergedRoundCache.current.clear(); }, [subagentsByTurn]);
 
   // plan-41-227: 时间线直接用落库消息本体（按 id 序），位置只由 id 决定。
   //

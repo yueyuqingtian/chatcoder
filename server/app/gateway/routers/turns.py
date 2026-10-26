@@ -425,16 +425,21 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{turn_id}/revert_files", response_model=RevertFilesResult)
-async def revert_files(turn_id: int, allow_partial: bool = False, db: AsyncSession = Depends(get_db)):
-    """仅撤销该 turn 的文件改动（plan-20261018-turn-changes）。
+async def revert_files(turn_id: int, allow_partial: bool = False,
+                       turn_ids: str | None = Query(None),
+                       db: AsyncSession = Depends(get_db)):
+    """仅撤销该轮（含并入的续跑轮）的文件改动（plan-20261018-turn-changes）。
 
     与 /rollback 的区别：不删消息、不改 turn.status、不回填输入框，只把该轮写盘改动
     反向应用。撤销顺序严格从新到旧，仍有更晚轮次写盘记录时返回 409 order_violation；
     存在手动改动冲突时默认整体拒绝（409 conflict），allow_partial=true 时跳过冲突文件。
+    plan-20261026-round-changes: 传 turn_ids 时按整轮一次撤销（续跑轮与基底轮共用一张卡）。
     """
     try:
+        session_id, _ = await rollback_service.resolve_turn_workspace(db, turn_id)
+        extra = await _round_extra_turn_ids(db, turn_id, session_id, turn_ids) if session_id else []
         result = await rollback_service.revert_turn_files(
-            db, turn_id=turn_id, allow_partial=allow_partial,
+            db, turn_id=turn_id, allow_partial=allow_partial, extra_turn_ids=extra,
         )
     except Exception as e:
         logger.exception("[revert] 撤销文件改动失败 turn=%s", turn_id)
@@ -458,18 +463,72 @@ async def revert_files(turn_id: int, allow_partial: bool = False, db: AsyncSessi
 
 # ── 变更审核（v11）──
 
+async def _round_extra_turn_ids(db: AsyncSession, turn_id: int, session_id: int,
+                                raw: str | None) -> list[int]:
+    """解析整轮 id（并入基底轮的续跑轮，plan-20261026-round-changes）。
+
+    只接受**本会话、比基底轮更晚、且由系统续跑触发**的轮次——整轮聚合的语义仅限
+    「这一轮 + 这一轮结束后台事件唤醒的续跑轮」，不能把用户另起的新轮或更早轮并进来。
+    续跑轮的用户消息带 subagent_wakeup / workflow_wakeup / goal_continuation 标记
+    （见前端 timeline 的 SYSTEM_CONTINUATION_KINDS），据此判定。
+    """
+    if not raw:
+        return []
+    from app.persistence.models.message import Message
+    from app.persistence.models.turn import Turn
+
+    wanted: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            continue
+        tid = int(part)
+        if tid > turn_id and tid not in wanted:
+            wanted.append(tid)
+    if not wanted:
+        return []
+    res = await db.execute(
+        select(Turn.id, Turn.user_message_id).where(
+            Turn.id.in_(wanted), Turn.session_id == session_id,
+        )
+    )
+    msg_of = {row[0]: row[1] for row in res.all()}
+    if not msg_of:
+        return []
+    msg_ids = [m for m in msg_of.values() if m is not None]
+    contents: dict[int, dict] = {}
+    if msg_ids:
+        mres = await db.execute(
+            select(Message.id, Message.content).where(Message.id.in_(msg_ids))
+        )
+        for row in mres.all():
+            contents[row[0]] = row[1] or {}
+    out: list[int] = []
+    for tid in wanted:
+        if tid not in msg_of:
+            continue
+        content = contents.get(msg_of[tid]) or {}
+        if (content.get("subagent_wakeup") is True or content.get("workflow_wakeup") is True
+                or content.get("goal_continuation") is True):
+            out.append(tid)
+    return out
+
+
 @router.get("/{turn_id}/changes", response_model=list[FileChangeOut])
-async def list_turn_changes(turn_id: int, db: AsyncSession = Depends(get_db)):
-    """变更审核清单：聚合该 turn 的写盘记录（含审核状态），不含文件全文。"""
+async def list_turn_changes(turn_id: int, turn_ids: str | None = Query(None),
+                            db: AsyncSession = Depends(get_db)):
+    """变更审核清单：聚合该轮（含并入的续跑轮）的写盘记录（含审核状态），不含文件全文。"""
     try:
         session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         if session_id is None or not workspace:
             logger.info("[review] changes 跳过(无快照/工作区): turn=%s", turn_id)
             return []
+        extra = await _round_extra_turn_ids(db, turn_id, session_id, turn_ids)
         changes = await rollback_service.list_turn_changes(
             db, session_id=session_id, turn_id=turn_id, workspace=workspace,
+            extra_turn_ids=extra,
         )
-        logger.info("[review] changes: turn=%s files=%s", turn_id, len(changes))
+        logger.info("[review] changes: turn=%s extra=%s files=%s", turn_id, extra, len(changes))
         return changes
     except HTTPException:
         raise
@@ -480,19 +539,22 @@ async def list_turn_changes(turn_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{turn_id}/changes/diff", response_model=FileDiffOut)
 async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
+                          turn_ids: str | None = Query(None),
                           db: AsyncSession = Depends(get_db)):
     """单文件变更 diff：按需拉取 before/after（大文件截断），供右侧面板 DiffEditor。
 
     plan-89-387: 传 call_key 时只返回「这一次写盘」的变更（同轮同文件多次编辑各自独立），
     不传则回退整轮累积口径（兼容老数据）。
+    plan-20261026-round-changes: 传 turn_ids 时按整轮累积口径（基底轮 + 续跑轮）。
     """
     try:
         session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         if session_id is None or not workspace:
             raise HTTPException(404, "该 turn 无快照")
+        extra = await _round_extra_turn_ids(db, turn_id, session_id, turn_ids)
         diff = await rollback_service.get_file_diff(
             db, session_id=session_id, turn_id=turn_id, workspace=workspace, path=path,
-            call_key=call_key,
+            call_key=call_key, extra_turn_ids=extra,
         )
         if diff is None:
             # v36: 区分三种成因——该 turn 完全无写盘记录 / 有记录但路径不匹配。

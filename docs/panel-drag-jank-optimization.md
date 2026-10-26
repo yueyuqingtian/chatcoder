@@ -294,12 +294,17 @@ const scheduleSpy = useCallback(() => {
 
 ### P2-2　不推荐的项：给虚拟项加 `content-visibility: auto`
 
-调研中该属性确实能跳过离屏渲染（web.dev 实测首屏 7x），**但与本项目的虚拟列表冲突**：
+调研中该属性确实能跳过离屏渲染（web.dev 实测首屏 7x），**但不推荐作为本项目虚拟列表的主方案**。
 
-- `content-visibility: auto` 的离屏元素会进入 size containment，高度由 `contain-intrinsic-size` 提供 → **TanStack Virtual 的 `measureElement` 会测到估算值而非真实高度**，导致总高反复跳变；
-- 官方明确警告：对被跳过的子树调用会强制渲染的 DOM API（`getBoundingClientRect` 等）会抵消收益，而虚拟列表**必然**要测量。
+plan-586-2374 复查规范后，理由按下面修正（原结论方向不变，但原表述不准确）：
 
-**替代**：真要减少 overscan 项的折行成本，正确做法是在拖拽期**下调 `overscan`**（`MessageFlow.tsx:252`，当前为 6），或对超出视口一定距离的项临时加 `.panel-dragging .mf-entry.is-far { visibility: hidden; }`。此项收益需要先测量 overscan 项的实际折行占比再决定。
+- **冲突是有条件的，不是无条件的**。规范规定 `content-visibility: auto` 只在元素 **not relevant to the user** 时才 skip 内容并附加 size containment（`drafts.csswg.org/css-contain-2/#skips-its-contents`）；而 `relevant to the user` 包含「元素在视口内，或落在 UA 定义的视口外余量（建议 50% 视口）」、获得焦点、被选中、进入 top layer（`css-contain-2/#relevant-to-the-user`）。TanStack Virtual 挂载的可见项与 overscan 项基本都落在该范围内，因此并不会「无条件测到估算值」。
+- **真正的问题在 remembered size 的适用范围**。`contain-intrinsic-size: auto <length>` 记住的是「最后一次正常布局时的实际尺寸」，且记录时机是 **ResizeObserver 事件确定并投递时**（`drafts.csswg.org/css-sizing-4/#last-remembered`）。宽度逐帧变化时，只要该元素仍被渲染，remembered 就跟着逐帧刷新；它保护的是**虚拟器根本不渲染的项**，而不是「虚拟器渲染但在屏外」的项。也就是说，它解决不了本方案要解决的那个问题（屏外项在宽度变化时保持旧高度）。
+- **收益会被强制测量抵消**。web.dev 明确警告：浏览器只有在你不调用任何会强制渲染的 DOM API 时才能跳过渲染工作；而虚拟列表必然测量。对 `auto` 的实际后果是「强制该子树渲染」——是**性能收益被抵消**，而非「读到错值」。
+
+**替代**：真要减少 overscan 项的折行成本，正确做法是在拖拽期**下调 `overscan`**（`MessageFlow.tsx:363-364`，静止 6 / 运动期 2），或对超出视口一定距离的项临时加 `.panel-dragging .mf-entry.is-far { visibility: hidden; }`。此项收益需要先测量 overscan 项的实际折行占比再决定。
+
+> plan-586-2374 的落点不是 `content-visibility`，而是「运动期让屏外项跳过测量、运动结束用 `resizeItem` 逐项补测」，即把计算量收敛到视口内，同时不改变任何视觉表现（正文仍逐帧实时折行）。若仍要实验 `content-visibility`，只对「视口 ± 3 屏以外」的项加，并用 `contentvisibilityautostatechange` 的 `event.skipped` 做校验信号（Electron 44 = Chromium 152 已支持）。
 
 ---
 

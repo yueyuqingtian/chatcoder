@@ -128,7 +128,14 @@ export type FlowSegment =
  *
  *  段的先后即时间线先后：常显项各自成段，过程段只夹在它们之间。折叠 / 展开过程段
  *  只改变段内高度，不改变任何项相对于其它段的位置——这是工作流卡不随最终汇报落库而漂移的前提。
- *  挂靠了节点子代理卡的项之后紧跟一个挂靠段，使这些卡片同样原位留在段间。 */
+ *  挂靠了节点子代理卡的项之后紧跟一个挂靠段，使这些卡片同样原位留在段间。
+ *
+ *  plan-586-2374：`from` 必须先钳到 `[0, items.length]`。调用方常用「最终汇报下标」当起点，
+ *  而该值在没有最终汇报时是 -1（典型场景：刚发送一条新消息、本轮还没有 text 项）；
+ *  改造前切段写在渲染分支里、只在有最终汇报时才求值，所以没暴露；改成 useMemo 无条件求值后
+ *  就会读到 `items[-1]`，`isOutsideProcess(undefined)` 抛
+ *  「Cannot read properties of undefined (reading 'kind')」把整个应用打白屏。
+ *  钳位后负起点等价于从 0 开始、越界终点等价于到末尾，调用方传什么都不会崩。 */
 export function splitFlowSegments(
   items: readonly TurnItem[],
   from: number,
@@ -137,7 +144,9 @@ export function splitFlowSegments(
   attached?: ReadonlySet<number>,
 ): FlowSegment[] {
   const segments: FlowSegment[] = [];
-  for (let index = from; index < to; index++) {
+  const start = Math.max(0, from); // 负起点钳到 0：items[-1] 不存在
+  const end = Math.min(to, items.length); // 超界终点钳到末尾：不多读一次空槽
+  for (let index = start; index < end; index++) {
     if (index === skipIndex) continue;
     if (isOutsideProcess(items[index])) {
       segments.push({ kind: "sticky", index });

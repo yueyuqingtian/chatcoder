@@ -223,6 +223,9 @@ export interface SessionSlice {
   reviewedFiles: Record<string, boolean>;
   rollbackPending: { turnId: number; files: RollbackPreviewFile[]; conflicts: RollbackConflict[]; affected: RollbackAffected } | null;
   turnChanges: Record<number, FileChangeOut[]>;
+  /** plan-20261026-round-changes：该键加载时对应的整组签名（`[基底轮, ...续跑轮].join(",")`）。
+   *  续跑轮并入后签名变化，卡片据此判定「缓存是按单轮拉的」并重新拉取整组。 */
+  turnChangesSig: Record<number, string>;
   todos: TodoItem[] | null;
   /** plan-20261023-ownerfix：清单归属会话 id——切换瞬间的迟到事件不得被新会话当作自己的进度。 */
   todosSessionId: number | null;
@@ -291,6 +294,7 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     reviewedFiles: s.reviewedFiles,
     rollbackPending: s.rollbackPending,
     turnChanges: s.turnChanges,
+    turnChangesSig: s.turnChangesSig,
     todos: s.todos,
     todosSessionId: s.todosSessionId,
     todosTurnId: s.todosTurnId,
@@ -325,7 +329,11 @@ function _restorePendingDeltas(slice: SessionSlice) {
 function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
   if (!slice) return {};
   // plan-20261023-ownerfix：旧缓存可能没有清单归属字段，补 null（否则 todos 会被判为不属于任何会话）
-  return { ...slice, todosSessionId: slice.todosSessionId ?? null };
+  return {
+    ...slice,
+    todosSessionId: slice.todosSessionId ?? null,
+    turnChangesSig: slice.turnChangesSig ?? {},
+  };
 }
 
 /** 按会话 id 读取会话切片（侧边会话统一的基础设施，plan 20261017-side-session P1）。
@@ -424,6 +432,9 @@ interface ChatState {
   rollbackPending: { turnId: number; files: RollbackPreviewFile[]; conflicts: RollbackConflict[]; affected: RollbackAffected } | null;
   /** v11: turn 完成后的变更审核清单缓存（turnId -> FileChangeOut[]）。 */
   turnChanges: Record<number, FileChangeOut[]>;
+  /** plan-20261026-round-changes：变更清单缓存对应的整组签名（基底轮键 -> `[基底轮, ...续跑轮]`）。
+   *  与 turnChanges 同生命周期：缓存失效时必须一并清掉，否则卡片会误判「已加载最新」。 */
+  turnChangesSig: Record<number, string>;
   /** plan-20261018-turn-changes: 撤销顺序锁——本会话当前唯一允许撤销文件改动的 turn。
    *  后端按 rollback_writes 实际残留计算；非该值的轮次卡片撤销按钮禁用。 */
   latestChangeTurnId: number | null;
@@ -577,14 +588,16 @@ resumeTurn: () => Promise<void>;
   startNewTask: () => void;
   /** 调试面板「清空观测命中」：只清前端流水，不影响 Arthas 侧的观测作业。 */
   clearArthasEntries: () => void;
-  /** v11: 拉取指定 turn 的变更审核清单。 */
-  loadTurnChanges: (turnId: number) => Promise<void>;
+  /** v11: 拉取指定 turn 的变更审核清单。
+   *  plan-20261026-round-changes: extraTurnIds 传整组续跑轮，结果仍写在基底轮键上。 */
+  loadTurnChanges: (turnId: number, extraTurnIds?: readonly number[]) => Promise<void>;
   /** v11: 批量审核（乐观更新 + PUT 持久化，失败回滚并 toast）。 */
   reviewFiles: (turnId: number, paths: string[], reviewed: boolean) => Promise<void>;
   /** plan-20261018-turn-changes: 拉取撤销顺序锁（切会话 / 撤销后 / WS 撤销事件）。 */
   loadRevertLock: (sessionId: number) => Promise<void>;
-  /** plan-20261018-turn-changes: 仅撤销该轮文件改动（不动消息）。返回是否成功。 */
-  revertTurnFiles: (turnId: number, allowPartial?: boolean) => Promise<RevertFilesOutcome>;
+  /** plan-20261018-turn-changes: 仅撤销该轮文件改动（不动消息）。返回是否成功。
+   *  plan-20261026-round-changes: extraTurnIds 传整组续跑轮，一次撤销整组。 */
+  revertTurnFiles: (turnId: number, allowPartial?: boolean, extraTurnIds?: readonly number[]) => Promise<RevertFilesOutcome>;
   refreshMessages: () => Promise<void>;
   refreshTurns: () => Promise<void>;
   refreshTasks: () => Promise<void>;
@@ -1360,6 +1373,7 @@ function _resetSessionState(): Partial<ChatState> {
     reviewedFiles: {},
     rollbackPending: null,
     turnChanges: {},
+    turnChangesSig: {},
     latestChangeTurnId: null,
     revertLockLoaded: false,
     todos: null,
@@ -1424,6 +1438,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reviewedFiles: {},
   rollbackPending: null,
   turnChanges: {},
+  turnChangesSig: {},
   latestChangeTurnId: null,
   revertLockLoaded: false,
   todos: null,
@@ -2444,11 +2459,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // plan-20261018-turn-changes: 仅撤销该轮文件改动（不删消息、不改 turn 状态）。
   // 成功后清掉该轮变更缓存并重拉锁，让上一轮卡片解锁；失败把原因写进消息流错误卡。
-  revertTurnFiles: async (turnId, allowPartial = false) => {
+  // plan-20261026-round-changes: 传 extraTurnIds 时按整组撤销——组内每一轮的缓存与签名一起清，
+  // 否则续跑轮键上的残留会让卡片重挂载后仍读出旧清单（用户会以为撤销没生效）。
+  revertTurnFiles: async (turnId, allowPartial = false, extraTurnIds) => {
     const sid = get().currentSessionId;
     if (sid == null) return { ok: false };
     try {
-      await api.revertTurnFiles(turnId, allowPartial);
+      await api.revertTurnFiles(turnId, allowPartial, extraTurnIds);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       // plan-20261019-toolcard-v2：文件在本轮之后被改动 → 严格拒绝。逐文件原因由变更卡片的撤销弹窗展示，
@@ -2466,29 +2483,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { ok: false, message: msg };
     }
     if (get().currentSessionId === sid) {
+      const roundIds = [turnId, ...(extraTurnIds ?? [])];
       set((s) => {
         const next = { ...s.turnChanges };
-        delete next[turnId];
-        return { turnChanges: next };
+        const nextSig = { ...s.turnChangesSig };
+        for (const id of roundIds) {
+          delete next[id];
+          delete nextSig[id];
+        }
+        return { turnChanges: next, turnChangesSig: nextSig };
       });
       void get().loadRevertLock(sid);
-      // 后端已删除该轮写盘记录 → 重拉返回空，卡片随之消失（双保险）
-      void get().loadTurnChanges(turnId);
+      // 后端已删除该组写盘记录 → 重拉返回空，卡片随之消失（双保险）
+      void get().loadTurnChanges(turnId, extraTurnIds);
     }
     return { ok: true };
   },
 
   // v11: 拉取该 turn 的变更审核清单（含后端持久化审核状态）。失败静默，下次完成/切会话时重试。
-  loadTurnChanges: async (turnId) => {
+  // plan-20261026-round-changes: extraTurnIds 传整组续跑轮，清单是跨轮聚合结果，仍写在基底轮键上。
+  loadTurnChanges: async (turnId, extraTurnIds) => {
     /* 【串会话修复】会话归属校验：请求由旧会话的事件/写盘广播发起后，响应可能
      * 等到用户已切走才返回——旧实现无条件 set，会把旧会话的变更写进新会话的
      * turnChanges（胶囊里凭空冒出「变更 #N」，按不到当轮用户消息时还回退成兜底标签）。
      * 切走时的结果归位到该会话的缓存切片：切回随视图恢复，既不串也不丢。 */
     const sid = get().currentSessionId;
+    // 整组签名：与卡片里的 roundIds.join(",") 同口径，用于判定「续跑轮加入后要重拉」
+    const sig = [turnId, ...(extraTurnIds ?? [])].join(",");
     try {
-      const changes = await api.getTurnChanges(turnId);
+      const changes = await api.getTurnChanges(turnId, extraTurnIds);
       if (get().currentSessionId === sid) {
-        set((s) => ({ turnChanges: { ...s.turnChanges, [turnId]: changes } }));
+        set((s) => ({
+          turnChanges: { ...s.turnChanges, [turnId]: changes },
+          turnChangesSig: { ...s.turnChangesSig, [turnId]: sig },
+        }));
       } else if (sid != null) {
         set((s) => {
           const slice = s.sessionState[sid];
@@ -2496,7 +2524,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             sessionState: {
               ...s.sessionState,
-              [sid]: { ...slice, turnChanges: { ...slice.turnChanges, [turnId]: changes } },
+              [sid]: {
+                ...slice,
+                turnChanges: { ...slice.turnChanges, [turnId]: changes },
+                turnChangesSig: { ...(slice.turnChangesSig ?? {}), [turnId]: sig },
+              },
             },
           };
         });
@@ -2671,8 +2703,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-1094: 回滚成功后立即清掉该 turn 及其之后的待审缓存——后端已物理删除
       // RollbackWrite(turn_id >= turn_id)，前端缓存残留会让贴条持续显示「N 待审」
       const nextChanges = { ...get().turnChanges };
+      // plan-20261026-round-changes: 签名与清单缓存同生命周期
+      const nextSig = { ...get().turnChangesSig };
       for (const k of Object.keys(nextChanges)) {
-        if (Number(k) >= turnId) delete nextChanges[Number(k)];
+        if (Number(k) >= turnId) {
+          delete nextChanges[Number(k)];
+          delete nextSig[Number(k)];
+        }
       }
       // S16（plan-41-197）：撤回回填恢复引用 chips——发送时 refs 被拼装成
       // 「引用文件：/ 使用技能：/ 使用连接器：/ 使用插件：」可读行追加在正文后；
@@ -2682,6 +2719,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         messages, turns, tasks,
         turnChanges: nextChanges,
+        turnChangesSig: nextSig,
         isRunning: false, runningTurnId: null,
         // 回填原文与附件到「本会话」输入框，供用户修改后重发（v40: 按 key 隔离，不串扰首页/其它会话）
         ...(restoreToComposer && (restoredText || restoredAttachments.length > 0 || restoredRefs.length > 0)
@@ -3405,10 +3443,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => {
           if (!rollbackTurnId) return {};
           const next = { ...s.turnChanges };
+          // plan-20261026-round-changes: 签名与清单缓存同生命周期，删除键时一并清
+          const nextSig = { ...s.turnChangesSig };
           let changed = false;
           for (const k of Object.keys(next)) {
             if (Number(k) >= rollbackTurnId) {
               delete next[Number(k)];
+              delete nextSig[Number(k)];
               changed = true;
             }
           }
@@ -3416,7 +3457,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
            * 这类「尾部删除」无法由 _mergeRefreshed 的 max-id 判据识别，故在此就地裁剪；
            * 随后的 refreshMessages 再按 DB 真值补齐（无 turn_id 的独立消息不参与）。 */
           return {
-            ...(changed ? { turnChanges: next } : {}),
+            ...(changed ? { turnChanges: next, turnChangesSig: nextSig } : {}),
             messages: s.messages.filter((m) => m.turn_id == null || m.turn_id < rollbackTurnId),
           };
         });
@@ -3433,15 +3474,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case "turn.files_reverted": {
         // plan-20261018-turn-changes: 单轮文件撤销——该轮变更缓存失效、顺序锁前移。
+        // plan-20261026-round-changes: 整组撤销时 payload 带 turn_ids（组内全部轮，基底轮+续跑轮），
+        // 必须把组内每一轮的缓存与签名都清掉；否则切走再切回时，续跑轮键上的残留会让卡片重现。
         // 【串会话修复】同 turn.rolled_back：只处理本会话事件，避免别的会话撤销误清当前缓存。
         const revSid = Number((payload as { session_id?: unknown }).session_id ?? 0);
         if (revSid && revSid !== get().currentSessionId) break;
         const revTurnId = Number((payload as { turn_id?: unknown }).turn_id ?? 0);
-        if (revTurnId) {
+        const revRawIds = (payload as { turn_ids?: unknown }).turn_ids;
+        const revTurnIds = Array.isArray(revRawIds)
+          ? revRawIds
+              .map((v) => Number(v))
+              .filter((v) => Number.isInteger(v) && v > 0)
+          : [];
+        // 无 turn_ids（旧后端 / 旧事件）时退回现有单 turn_id 行为
+        const revKeys = revTurnIds.length > 0 ? revTurnIds : revTurnId ? [revTurnId] : [];
+        if (revKeys.length > 0) {
           set((s) => {
             const next = { ...s.turnChanges };
-            delete next[revTurnId];
-            return { turnChanges: next };
+            const nextSig = { ...s.turnChangesSig };
+            for (const id of revKeys) {
+              delete next[id];
+              delete nextSig[id];
+            }
+            return { turnChanges: next, turnChangesSig: nextSig };
           });
         }
         const revCur = get().currentSessionId;

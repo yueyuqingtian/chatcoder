@@ -737,6 +737,14 @@ function gitBody(projectId: number, scope: GitScope = {}): Record<string, unknow
   return { project_id: projectId, repo: scope.repo || null, session_id: scope.sessionId ?? null };
 }
 
+/** plan-20261026-round-changes：整组续跑轮的查询参数。
+ *  只传**额外轮**（本轮结束后由后台事件唤醒的续跑轮），基底轮走 URL 里的 turn_id；
+ *  后端会校验「同会话 + 比基底轮更晚 + 触发消息带续跑标记」，不合规的轮次直接丢弃。 */
+function turnIdsQs(extraTurnIds?: readonly number[]): string {
+  const ids = (extraTurnIds ?? []).filter((id) => Number.isInteger(id) && id > 0);
+  return ids.length > 0 ? `turn_ids=${ids.join(",")}` : "";
+}
+
 export const api = {
   // ── 项目 ──
   listProjects: (params?: { include_archived?: boolean }) =>
@@ -1065,16 +1073,32 @@ export const api = {
   getTurnSnapshot: (turnId: number) => get<TurnSnapshotOut>(`/turns/${turnId}/snapshot`),
 
   // ── 变更审核（v11）──
-  getTurnChanges: (turnId: number) => get<FileChangeOut[]>(`/turns/${turnId}/changes`),
-  /** plan-89-387: 传 callKey 取「这一次编辑」的变更（同轮多次编辑各自独立）；不传为整轮累积 */
-  getFileDiff: (turnId: number, path: string, callKey?: string) =>
-    get<FileDiffOut>(`/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}`),
+  /** plan-20261026-round-changes: extraTurnIds 只传额外轮（续跑轮），不传即单轮口径。
+   *  整轮清单在同一文件上取「组内首条写前 / 末条写后」，卡片据此只展示一张。 */
+  getTurnChanges: (turnId: number, extraTurnIds?: readonly number[]) => {
+    const qs = turnIdsQs(extraTurnIds);
+    return get<FileChangeOut[]>(`/turns/${turnId}/changes${qs ? `?${qs}` : ""}`);
+  },
+  /** plan-89-387: 传 callKey 取「这一次编辑」的变更（同轮多次编辑各自独立）；不传为整轮累积。
+   *  plan-20261026-round-changes: extraTurnIds 传整组续跑轮，取整组累积 diff。 */
+  getFileDiff: (turnId: number, path: string, callKey?: string, extraTurnIds?: readonly number[]) => {
+    const qs = turnIdsQs(extraTurnIds);
+    return get<FileDiffOut>(
+      `/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}`
+      + `${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}${qs ? `&${qs}` : ""}`,
+    );
+  },
   reviewFiles: (turnId: number, paths: string[], reviewed: boolean) =>
     put<{ ok: boolean; updated: number }>(`/turns/${turnId}/reviews`, { paths, reviewed }),
   /** plan-20261018-turn-changes: 仅撤销该轮的文件改动（不删消息、不改 turn 状态）。
-   *  后端会强校验「更新的轮次必须先撤销」，乱序请求返回 409 order_violation。 */
-  revertTurnFiles: (turnId: number, allowPartial = false) =>
-    post<RevertFilesResult>(`/turns/${turnId}/revert_files?allow_partial=${allowPartial ? "true" : "false"}`),
+   *  后端会强校验「更新的轮次必须先撤销」，乱序请求返回 409 order_violation。
+   *  plan-20261026-round-changes: extraTurnIds 传整组续跑轮，后端一次把整组恢复到组首写前内容。 */
+  revertTurnFiles: (turnId: number, allowPartial = false, extraTurnIds?: readonly number[]) => {
+    const qs = turnIdsQs(extraTurnIds);
+    return post<RevertFilesResult>(
+      `/turns/${turnId}/revert_files?allow_partial=${allowPartial ? "true" : "false"}${qs ? `&${qs}` : ""}`,
+    );
+  },
   /** plan-20261018-turn-changes: 撤销顺序锁——该会话当前唯一可撤销的轮次。 */
   getRevertLock: (sessionId: number) =>
     get<RevertLockOut>(`/turns/sessions/${sessionId}/revert_lock`),

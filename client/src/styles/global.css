@@ -4188,6 +4188,17 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
    保留同一口径（后定义生效），宽度切换由末尾的主面板定宽段承担。 */
 .mf-list { display: flex; flex-direction: column; max-width: var(--content-max-w); margin: 0 auto; padding: 0 32px; }
 .mf-entry { width: 100%; }
+/* plan-586-2374 阶段3：虚拟项的布局失效边界。
+   中间列宽度逐帧变化时（右面板展开 260ms），每个已挂载项的文本都要重新折行；没有失效边界时，
+   这次重排的影响范围会向上、向兄弟项扩散。contain: layout 让该项成为独立的格式化上下文，
+   折行与位置只在项内重算，同时保持「内容决定高度」——这是 measureElement 的前提。
+   **只用 layout，不加 paint、绝不用 size**：
+     · paint 会把盒子裁剪到 padding edge，并改变 absolute 后代的包含块，工具卡/悬停浮层/
+       代码块复制按钮都可能被裁或位移（同类约束见 .app-main 那段注释）；
+     · size 会剥夺「内容决定高度」，与虚拟器的测量机制直接冲突。
+   项本身已是 position:absolute + width:100%（见 MessageFlow 渲染处），
+   layout containment 不改变这一点，directDomUpdates 写入的 top 仍然生效。 */
+.message-flow-virtual-item { contain: layout; }
 .turn-group { margin-bottom: 4px; padding: 0; width: 100%; }
 /* 注（plan-387-1825 C4）：此处 `padding: 0` 是刻意保留的「消息流内各项内边距统一归零」——
    同一批次下方还有 .turn-item-text / .turn-agent-text，.turn-item-summary 等子类的

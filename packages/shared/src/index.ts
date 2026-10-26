@@ -760,6 +760,8 @@ export interface FileDiffOut {
 export interface RevertFilesResult {
   ok: boolean;
   turn_id?: number | null;
+  /** plan-20261026-round-changes：整组撤销实际覆盖的轮次（基底轮 + 并入的续跑轮） */
+  turn_ids?: number[];
   restored: number;
   deleted: number;
   skipped: number;

@@ -85,6 +85,26 @@ export function useLiveThinkingExpand(threadId?: number): [boolean, (open: boole
   return [open, setOpen];
 }
 
+/** turn 级「工作过程折叠态」的键（plan-586-2374）。
+ *
+ *  消息流按 turn 虚拟化，TurnGroup 滚出可视区就被卸载，本地 state 会丢掉用户手动
+ *  展开 / 折叠的选择。key 用 turn_id——它是全局自增主键（跨会话唯一），
+ *  切换会话、滚出再滚回都不会串。 */
+export function turnCollapseKey(turnId: number): string {
+  return `turn-collapse:t${turnId}`;
+}
+
+/** turn 级工作过程的折叠态（plan-586-2374）。
+ *
+ *  沿用上面 open 表（true = 展开），与工具行 / 思考块的展开态共用同一份存储：
+ *  collapse 语义在调用侧是反的，故这里做一次取反，默认态由调用方按轮次状态算出。
+ *  只记用户手动操作过的 turn——未记录时始终跟随默认态（进行中展开、完成后折叠）。 */
+export function useTurnCollapse(key: string, fallbackCollapsed: boolean): [boolean, (collapsed: boolean) => void] {
+  const [open, setOpen] = useFlowExpand(key, !fallbackCollapsed);
+  const setCollapsed = useCallback((collapsed: boolean) => setOpen(!collapsed), [setOpen]);
+  return [!open, setCollapsed];
+}
+
 /** 聚合行（工具簇 / 同文件连写）的展开状态：内含已展开的单行时默认展开。
  *  这一默认会被记下，之后收起其中某一行不会连带把聚合行收起。 */
 export function useFlowGroupExpand(key: string, memberKeys: string[]): [boolean, (open: boolean) => void] {

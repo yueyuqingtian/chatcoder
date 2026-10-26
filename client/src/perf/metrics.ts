@@ -50,6 +50,10 @@ export interface PerfSnapshot {
     filePreviewRequest: number;
     terminalFit: number;
     browserResize: number;
+    /** plan-586-2374：虚拟列表真实测量（读 DOM）次数 */
+    virtualMeasure: number;
+    /** plan-586-2374：运动期 + 视口外被跳过的测量次数 */
+    virtualMeasureSkipped: number;
   };
 }
 
@@ -81,6 +85,8 @@ let derivationCounts = {
   filePreviewRequest: 0,
   terminalFit: 0,
   browserResize: 0,
+  virtualMeasure: 0,
+  virtualMeasureSkipped: 0,
 };
 
 /** 四舍五入到 0.1ms（报告里不必给更高精度）。 */
@@ -143,7 +149,10 @@ export function reset(): void {
   startedAt = performance.now();
   lastFrameTs = 0;
   componentCounts = { messageFlowCore: 0, turnGroup: 0, streamingTail: 0, taskSummary: 0, filePanel: 0 };
-  derivationCounts = { timelineBuild: 0, filePreviewRequest: 0, terminalFit: 0, browserResize: 0 };
+  derivationCounts = {
+    timelineBuild: 0, filePreviewRequest: 0, terminalFit: 0, browserResize: 0,
+    virtualMeasure: 0, virtualMeasureSkipped: 0,
+  };
 }
 
 /** 由收敛序列调用：记录一次收敛耗时（未采集时近似零开销）。 */
