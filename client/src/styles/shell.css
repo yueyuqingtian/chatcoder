@@ -153,7 +153,15 @@
   border-bottom-color: var(--border-light, var(--border));
   -webkit-app-region: drag;
 }
-.app-pane-right .rp-head :is(.rp-tab, .rp-hbtn, .rp-anchor, .ui-pop, [role="menu"]) { -webkit-app-region: no-drag; }
+/* plan-20261027-panel-tab：标签条整条退出窗口拖拽区。
+   此前只给 .rp-tab / .rp-hbtn 声明 no-drag（且没有 !important），而 .rp-head 本身是 drag 区，
+   标签内部的图标 / 文字 / 关闭按钮（svg、span 仍是 drag）落点会被系统拖拽 hit-test 接走——
+   表现为「hover 有反应、点击不生效」。global.css:137-139 已记录过同一个坑：仅靠父级
+   no-drag 的继承链在部分环境会被系统吞掉点击，必须逐元素强声明。拖窗口仍可用头部两侧留白。 */
+.app-pane-right .rp-tabs { -webkit-app-region: no-drag !important; }
+.app-pane-right .rp-head :is(.rp-tab, .rp-tab *, .rp-hbtn, .rp-hbtn *, .rp-anchor, .ui-pop, .ui-pop *, [role="menu"], [role="menuitem"]) {
+  -webkit-app-region: no-drag !important;
+}
 .app-pane-right.fullscreen .rp-head { padding-left: calc(var(--nav-cluster-w) - var(--shell-gap) + 4px); }
 
 /* ── 分隔条：只保留拖拽命中区与悬停提示线，不再画常驻接缝线（卡片之间以留白分隔） ── */

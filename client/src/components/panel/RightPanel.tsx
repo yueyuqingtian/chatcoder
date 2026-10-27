@@ -9,7 +9,7 @@ import { IxTasks, IxBrowser, IxTerminal, IxFiles, IxBot, IxBug, IxWorkflow } fro
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { isBusy, subscribe } from "../../perf/bus";
-import { usePanelStore, bucketSessionId } from "../../store/panel";
+import { usePanelStore, bucketSessionId, panelTabKey } from "../../store/panel";
 import { sessionKey, useBrowserStore } from "../../store/browser";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
@@ -135,7 +135,10 @@ export function RightPanel() {
       git: "Git",
     };
     if (tTab.id === "subagent" && tTab.meta?.agentName) return tTab.meta.agentName.slice(0, 10);
-    return tTab.instance > 1 ? `${base[tTab.id]} ${tTab.instance}` : base[tTab.id];
+    // 序号按「当前标签条里的同类型顺序」实时算：标签关闭后不会留下「终端 3」这类空编号
+    const sameKind = tabs.filter((t) => t.id === tTab.id).indexOf(tTab);
+    const ordinal = sameKind >= 0 ? sameKind + 1 : tTab.instance;
+    return ordinal > 1 ? `${base[tTab.id]} ${ordinal}` : base[tTab.id];
   };
 
   // 标签条溢出检测（scrollWidth > clientWidth 时展示「全部标签」入口）。
@@ -203,7 +206,7 @@ export function RightPanel() {
         <div className={"rp-tabs" + (tabsOverflow ? " is-overflow" : "")} ref={tabsRef} onWheel={onTabsWheel} role="tablist">
           {ind && <span className="rp-tab-ind" aria-hidden style={{ transform: `translateX(${ind.x}px)`, width: ind.w }} />}
           {tabs.map((tTab) => {
-            const key = `${tTab.id}-${tTab.instance}`;
+            const key = panelTabKey(tTab);
             const label = tabLabel(tTab);
             const active = activeKey === key;
             return (
@@ -247,7 +250,7 @@ export function RightPanel() {
               </Tooltip>
               <Popover open={showTabsMenu} onClose={() => setShowTabsMenu(false)} placement="bottom-end" className="rp-menu" ignoreRefs={[tabsBtnRef]} role="menu" aria-label={t("rp.all_tabs")}>
                 {tabs.map((tTab) => {
-                  const key = `${tTab.id}-${tTab.instance}`;
+                  const key = panelTabKey(tTab);
                   const active = activeKey === key;
                   return (
                     <button key={key} type="button" role="menuitem" className={"pop-item" + (active ? " is-selected" : "")} onClick={() => { setActiveTab(key); setShowTabsMenu(false); }}>
@@ -288,7 +291,7 @@ export function RightPanel() {
                   <div className="pop-sep" />
                   <div className="pop-label">{t("rp.recent_closed")}</div>
                   {closedStack.slice(0, 5).map((tTab, i) => (
-                    <button key={`${tTab.id}-${tTab.instance}`} type="button" role="menuitem" className="pop-item" onClick={() => { reopenClosedTab(i); setShowAddMenu(false); }}>
+                    <button key={panelTabKey(tTab)} type="button" role="menuitem" className="pop-item" onClick={() => { reopenClosedTab(i); setShowAddMenu(false); }}>
                       <span className="pop-item-icon"><IconRotateCcw size={14} /></span>
                       <span className="pop-item-title">{tabLabel(tTab)}</span>
                     </button>
@@ -308,7 +311,7 @@ export function RightPanel() {
             plan-282-1421（第3项）：激活 tab 播放统一过渡（类名 "" → "ui-tab-enter" 触发动画）。 */}
         {Object.entries(buckets).flatMap(([bKey, bucket]) =>
           bucket.tabs.map((tTab) => {
-            const key = `${tTab.id}-${tTab.instance}`;
+            const key = panelTabKey(tTab);
             const isActive = bKey === activeBucket && key === activeKey;
             // plan-20261015-browser-agent：浏览器标签不能 display:none（网页视口会变 0×0，AI 无法在后台操作），
             // 改为不可见但保留布局；其中的 webview 由 BrowserPanel 停泊在视口内继续渲染

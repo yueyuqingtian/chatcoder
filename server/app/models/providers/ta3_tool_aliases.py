@@ -250,7 +250,8 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     # plan-248-1258 M3.3: 文件骨架键名适配（参考项目原生用 filepath）
     "outline": {"path": "filepath"},
     # v43: 子代理管理工具出站键名适配（ta3 侧查询/取消按 taskId 定位）
-    # wait 无对应键（ta3 TaskQuery 为即时查询语义），出站丢弃该键
+    # wait 出站丢弃：ta3 网关是否接受该参数尚未确认，回放历史消息时多带它可能被 400 拒绝；
+    # 入站不受影响——模型在 TaskQuery 里显式传的 wait 由 ARGS_FROM_TA3 还原后照常生效
     # plan-156-620：结论分段读取的起点（TaskQuery 侧键名 reportOffset）
     "collect_results": {"agent_id": "taskId", "wait": None, "report_offset": "reportOffset"},
     "cancel_subagent": {"agent_id": "taskId"},
@@ -284,7 +285,9 @@ ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
         "description": "task_title",
         "subagent_type": None,
     },
-    "TaskQuery": {"taskId": "agent_id", "reportOffset": "report_offset"},
+    # wait 显式声明透传给内部 collect_results（缺省由内部按 false 处理）——
+    # 这张表是「哪些参数允许入站」的唯一说明，靠 restore_args 的兜底原样保留不算保障
+    "TaskQuery": {"taskId": "agent_id", "wait": "wait", "reportOffset": "report_offset"},
     "TaskCancel": {"taskId": "agent_id"},
     # plan-153-705: 后台进程工具入站适配（BashStatus/BashKill）
     "BashStatus": {"shellId": "shell_id"},

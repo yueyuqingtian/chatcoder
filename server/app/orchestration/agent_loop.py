@@ -4401,6 +4401,31 @@ def _subagent_concurrency_rejection(running: int, max_conc: int, running_note: s
     )
 
 
+def _as_bool(value: object) -> bool:
+    """宽松解析布尔参数（缺失、None 一律按假）。
+
+    跨供应商的布尔形态不一致：ta3 等网关会把 true/false 写成字符串，`bool("false")`
+    得到的是 True——旧判据直接 bool() 会让「明确说了不等待」的调用误阻塞到总时长上限。
+    这里只认明确的真值，其余（含无法识别的写错值）都按假处理，宁可立即返回也不卡住。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("", "false", "0", "no", "off", "none", "null"):
+        return False
+    try:
+        # 数字字符串（"2" / "1.0"）按非 0 为真；识别不了的一律按假
+        return float(text) != 0
+    except ValueError:
+        return False
+
+
 async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent, workspace,
                              subagent_context, agent_model_id: int | None = None,
                              parent_agent_id: int | None = None) -> str:
@@ -4425,9 +4450,25 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             _report_offset = max(0, int(args.get("report_offset") or 0))
         except (TypeError, ValueError):
             _report_offset = 0
-        # plan-248-1258 M6: wait=true 时阻塞等待全部子代理完成（替代反复轮询空转）
+        # plan-248-1258 M6: wait=true 时阻塞等待子代理完成（替代反复轮询空转）。
+        # plan-20261027-panel-tab 同批修正：等待对象必须与返回对象一致——
+        # 旧判据一律看全局 pending_count()，带 agent_id 时若该 agent 仍在跑而全局 pending 为 0
+        # （其它 handle 已收尾/被清理），就不会进入阻塞分支，紧接着 :4525 又返回「still running」，
+        # 表现正是用户反馈的「说要阻塞等待、却立刻返回」。带 agent_id 时按该 agent 判断，
+        # 无 agent_id 时保持「等全部」的旧语义。
+
+        def _still_pending() -> bool:
+            if _only is not None:
+                target = manager.get(_only)
+                # 与 pending_count 同口径：状态停在 running 但 task 已经结束（收尾异常）不算在跑，
+                # 否则会为一个没有人在推进的 handle 空等到总时长上限。
+                return target is not None and target.status == "running" and (
+                    target.task is None or not target.task.done()
+                )
+            return manager.pending_count() > 0
+
         _wait_note = ""
-        if bool(args.get("wait", False)) and manager.pending_count() > 0:
+        if _as_bool(args.get("wait")) and _still_pending():
             # 分段等待而不是 wait_all 一等到底：期间有新消息（子代理提问 / 用户追加 / 子会话汇报）就让出，
             # 否则正在等答复的后台子代理与这里互相等，直到各自超时。
             #
@@ -4459,7 +4500,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 # 0/负数 = 不限制，与配置注释保持一致。
                 _wait_deadline = float(getattr(settings, "subagent_wait_timeout_s", 0.0) or 0.0)
                 _wait_started = time.monotonic()
-                while manager.pending_count() > 0:
+                while _still_pending():
                     # 用户点了停止：立即结束等待（子代理已由 cancel_turn / cancel_all 取消）
                     if _wait_cancel is not None and _wait_cancel.is_set():
                         _wait_note = (
@@ -4471,20 +4512,20 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                         _wait_event.clear()
                         _wait_note = (
                             "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
-                            "需要时再次调用 collect_results(wait=true)。\n\n"
+                            "需要时再调用本工具并带上 wait=true。\n\n"
                         )
                         break
                     if _has_injected_inputs(turn_id, urgent_only=True):
                         _wait_note = (
                             "[已让出等待] 等待期间收到新的消息，先处理它；仍在运行的子代理不受影响，"
-                            "需要时再次调用 collect_results(wait=true)。\n\n"
+                            "需要时再调用本工具并带上 wait=true。\n\n"
                         )
                         break
                     if _wait_deadline > 0 and (time.monotonic() - _wait_started) >= _wait_deadline:
                         # 到上限不是失败：已在跑的继续跑，完成时走唤醒通道送达
                         _wait_note = (
                             f"[已停止等待] 已等待 {int(_wait_deadline)} 秒仍未结束，"
-                            "剩余子代理完成时会自动通知你；需要时可再次调用 collect_results。\n\n"
+                            "剩余子代理完成时会自动通知你；需要时可再调用本工具。\n\n"
                         )
                         break
                     await manager.wait_one(timeout=0.5)
@@ -4543,7 +4584,16 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             blocks.append("\n".join(body_lines))
         tail = ""
         if manager.pending_count():
-            tail = f"\n\n({manager.pending_count()} subagents still running — call collect_results(wait=true) to block until they finish)"
+            # 提示里的工具名与参数键必须跟随当前供应商：ta3 会话里这个工具叫 TaskQuery、按 taskId 定位，
+            # 写死 collect_results(agent_id=…) 会让模型去调一个它从未见过的名字。
+            from app.orchestration.output_paging import tool_ref as _tool_ref
+
+            _query_name = _tool_ref("collect_results").split("(", 1)[0]
+            _id_key = "taskId" if _query_name == "TaskQuery" else "agent_id"
+            tail = (
+                f"\n\n({manager.pending_count()} subagents still running — "
+                f"call {_query_name}({_id_key}=N, wait=true) to block until they finish)"
+            )
         return _wait_note + "Subagent results:\n\n" + "\n\n".join(blocks) + tail
 
     if tool_name == "subagent_inspect":

@@ -16,9 +16,19 @@ import { applyPaneUpdate } from "../perf/paneTransition";
 export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow" | "side" | "git";
 export interface PanelTab {
   id: PanelTabId;
+  /** 同类型标签的展示序号（只用于文案「文件 2」，不再承担唯一标识） */
   instance: number;
+  /** 标签的唯一标识（plan-20261027-panel-tab：此前的 key 是 `id-instance`，关闭后重新打开会复用同一个
+   *  instance，于是在同一会话里出现两个 key 完全相同的标签——React 会复用同一个 DOM 节点、
+   *  事件处理器绑到错误的元素上，表现为「点关闭没反应 / 点标签切不过去、但 hover 正常」。 */
+  uid?: string;
   /** v2.2 (对齐 zcode 3.13): 子代理详情 tab 参数（threadId=agent_id） */
   meta?: { threadId?: number; agentName?: string };
+}
+
+/** 标签唯一 key（渲染、比较、关闭都走它）。历史标签没有 uid 时回退到旧口径，保证老状态不崩。 */
+export function panelTabKey(t: PanelTab): string {
+  return t.uid ?? `${t.id}-${t.instance}`;
 }
 
 /** v11: 变更审核 diff 预览（右面板「文件」标签页的 Monaco DiffEditor 数据源）。 */
@@ -79,7 +89,38 @@ function projectionOf(b: PanelBucket) {
     planCollapsePending: b.planCollapsePending,
   };
 }
-function tabKey(t: PanelTab) { return `${t.id}-${t.instance}`; }
+
+/** 标签 uid 的单调序号（plan-20261027-panel-tab）：跨桶全局唯一，避免同类型标签反复开关后 key 撞车。 */
+let uidSeq = 0;
+function nextUid(id: PanelTabId): string {
+  uidSeq += 1;
+  return `${id}#${uidSeq}`;
+}
+/** 同类型标签的展示序号：取现有最大值 +1，关闭前面的标签也不会与仍在的标签重名。 */
+function nextInstance(tabs: PanelTab[], id: PanelTabId): number {
+  const used = tabs.filter((t) => t.id === id).map((t) => t.instance);
+  return used.length ? Math.max(...used) + 1 : 1;
+}
+
+/** 桶内容归一化（plan-20261027-panel-tab）：
+ *  ① 去掉重复 key 的标签（历史上关闭后重开复用 instance 会撞 key，重复 key 会让 React 复用同一个
+ *      DOM 节点、点击落到错误的元素上——用户看到的「点了没反应、hover 正常」）；
+ *  ② activeKey 悬空（指向已关闭的标签）时回落到第一个标签，避免「标签条高亮一个不存在的标签、
+ *     点别的标签也切不过去」的死状态。 */
+function normalizeBucket(b: PanelBucket): PanelBucket {
+  const seen = new Set<string>();
+  const tabs: PanelTab[] = [];
+  for (const t of b.tabs) {
+    const k = panelTabKey(t);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    tabs.push(t);
+  }
+  let activeKey = b.activeKey;
+  if (activeKey != null && !seen.has(activeKey)) activeKey = tabs.length ? panelTabKey(tabs[0]) : null;
+  if (tabs.length === b.tabs.length && activeKey === b.activeKey) return b;
+  return { ...b, tabs, activeKey };
+}
 
 function loadState(): { width: number } {
   if (typeof window === "undefined") return { width: DEFAULT_WIDTH };
@@ -161,9 +202,13 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   setActiveSession: (sessionId) => {
     const key = bucketKeyOf(sessionId);
     set((s) => {
-      if (s.activeBucket === key) return {};
-      const b = s.buckets[key] ?? emptyBucket();
-      return { activeBucket: key, ...projectionOf(b) };
+      // plan-20261027-panel-tab：即使 activeBucket 没变也重算一次投影并归一化桶内容。
+      // 早退会让「投影与桶脱节」的坏状态永久卡住（标签条显示 A 桶的标签、写入却落到 B 桶，
+      // 表现就是关闭 / 切换点击全部无效）；这里每次切换都做一次校正，成本可忽略。
+      const raw = s.buckets[key] ?? emptyBucket();
+      const b = normalizeBucket(raw);
+      const buckets = b === raw ? s.buckets : { ...s.buckets, [key]: b };
+      return { buckets, activeBucket: key, ...projectionOf(b) };
     });
   },
 
@@ -205,9 +250,9 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const key = get().activeBucket;
     const b = get().buckets[key] ?? emptyBucket();
     const existing = b.tabs.find((t) => t.id === id);
-    if (existing) { writeBucket(key, (cur) => ({ ...cur, activeKey: tabKey(existing) })); return; }
-    const tab: PanelTab = { id, instance: b.tabs.filter((t) => t.id === id).length + 1 };
-    writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: tabKey(tab) }));
+    if (existing) { writeBucket(key, (cur) => ({ ...cur, activeKey: panelTabKey(existing) })); return; }
+    const tab: PanelTab = { id, instance: nextInstance(b.tabs, id), uid: nextUid(id) };
+    writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
   },
 
   ensureTabIn: (sessionId, id) => {
@@ -218,11 +263,11 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     // 用户此刻正看着这个会话的面板：只补标签不切换（不打断用户）；否则设为当前标签
     const userWatching = s.onScreen && s.activeBucket === key && b.activeKey != null;
     if (existing) {
-      if (!userWatching && b.activeKey !== tabKey(existing)) writeBucket(key, (cur) => ({ ...cur, activeKey: tabKey(existing) }));
+      if (!userWatching && b.activeKey !== panelTabKey(existing)) writeBucket(key, (cur) => ({ ...cur, activeKey: panelTabKey(existing) }));
       return;
     }
-    const tab: PanelTab = { id, instance: b.tabs.filter((t) => t.id === id).length + 1 };
-    writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: userWatching ? cur.activeKey : tabKey(tab) }));
+    const tab: PanelTab = { id, instance: nextInstance(b.tabs, id), uid: nextUid(id) };
+    writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: userWatching ? cur.activeKey : panelTabKey(tab) }));
   },
 
   setOnScreen: (on) => { if (get().onScreen !== on) set({ onScreen: on }); },
@@ -230,8 +275,8 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   openNewTab: (id) => {
     const key = get().activeBucket;
     const b = get().buckets[key] ?? emptyBucket();
-    const tab: PanelTab = { id, instance: b.tabs.filter((t) => t.id === id).length + 1 };
-    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: tabKey(tab) }));
+    const tab: PanelTab = { id, instance: nextInstance(b.tabs, id), uid: nextUid(id) };
+    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
     if (!get().expanded) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
     apply();
   },
@@ -251,34 +296,56 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const existing = b.tabs.find((t) => t.id === "subagent" && t.meta?.threadId === threadId);
     const needExpand = !get().expanded;
     if (existing) {
-      const activate = () => writeBucket(key, (cur) => ({ ...cur, activeKey: tabKey(existing) }));
+      const activate = () => writeBucket(key, (cur) => ({ ...cur, activeKey: panelTabKey(existing) }));
       if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); activate(); }); return; }
       activate();
       return;
     }
     const tab: PanelTab = {
       id: "subagent",
-      instance: b.tabs.filter((t) => t.id === "subagent").length + 1,
+      instance: nextInstance(b.tabs, "subagent"),
+      uid: nextUid("subagent"),
       meta: { threadId, agentName },
     };
-    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: tabKey(tab) }));
+    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
     if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
     apply();
   },
 
   closeTab: (key) => {
-    writeBucket(get().activeBucket, (b) => {
-      const closed = b.tabs.find((t) => tabKey(t) === key);
-      const next = b.tabs.filter((t) => tabKey(t) !== key);
+    const bucket = get().activeBucket;
+    const inBucket = (get().buckets[bucket]?.tabs ?? []).some((t) => panelTabKey(t) === key);
+    if (!inBucket) {
+      // plan-20261027-panel-tab 自愈：当前桶里找不到这个标签，说明渲染用的标签条与 activeBucket 已经打偏
+      // （历史坏状态，或切换会话与写入并发）。画面上它明明还在，直接不处理就成了「叉不掉」；
+      // 这里从所有桶里摘掉同名标签，让已经卡住的标签也能被关掉，不靠重启。
+      set((s) => {
+        const buckets = { ...s.buckets };
+        let changed = false;
+        for (const [k, b] of Object.entries(s.buckets)) {
+          const next = b.tabs.filter((t) => panelTabKey(t) !== key);
+          if (next.length === b.tabs.length) continue;
+          changed = true;
+          buckets[k] = normalizeBucket({ ...b, tabs: next });
+        }
+        if (!changed) return {};
+        const active = buckets[s.activeBucket] ?? emptyBucket();
+        return { buckets, ...projectionOf(active) };
+      });
+      return;
+    }
+    writeBucket(bucket, (b) => {
+      const closed = b.tabs.find((t) => panelTabKey(t) === key);
+      const next = b.tabs.filter((t) => panelTabKey(t) !== key);
       let nextActive = b.activeKey;
       if (b.activeKey === key) {
-        const closedIdx = b.tabs.findIndex((t) => tabKey(t) === key);
-        const fallback = next[Math.min(closedIdx, next.length - 1)];
-        nextActive = fallback ? tabKey(fallback) : null;
+        const closedIdx = b.tabs.findIndex((t) => panelTabKey(t) === key);
+        const fallback = next[Math.min(closedIdx, next.length - 1)] ?? next[0];
+        nextActive = fallback ? panelTabKey(fallback) : null;
       }
       // v2.2: 最近关闭入栈（上限 10）
       const stack = closed
-        ? [closed, ...b.closedStack.filter((t) => tabKey(t) !== key)].slice(0, 10)
+        ? [closed, ...b.closedStack.filter((t) => panelTabKey(t) !== key)].slice(0, 10)
         : b.closedStack;
       return { ...b, tabs: next, activeKey: nextActive, closedStack: stack };
     });
@@ -290,14 +357,23 @@ export const usePanelStore = create<PanelState>((set, get) => ({
       if (!closed) return b;
       const stack = b.closedStack.filter((_, i) => i !== index);
       // 同 key 已存在则只激活；否则把标签加回（原实现只出栈未回填，恢复后标签不出现）
-      if (b.tabs.some((t) => tabKey(t) === tabKey(closed))) {
-        return { ...b, closedStack: stack, activeKey: tabKey(closed) };
-      }
-      return { ...b, tabs: [...b.tabs, closed], closedStack: stack, activeKey: tabKey(closed) };
+      const existing = b.tabs.find((t) => panelTabKey(t) === panelTabKey(closed));
+      if (existing) return { ...b, closedStack: stack, activeKey: panelTabKey(existing) };
+      // 恢复的标签重新分配 uid / instance：旧 key 可能已被后来新开的同类型标签占用，
+      // 直接放回会造成重复 key（点击串到别的标签上）。
+      const revived: PanelTab = { ...closed, instance: nextInstance(b.tabs, closed.id), uid: nextUid(closed.id) };
+      return { ...b, tabs: [...b.tabs, revived], closedStack: stack, activeKey: panelTabKey(revived) };
     });
   },
 
-  setActiveTab: (key) => writeBucket(get().activeBucket, (b) => ({ ...b, activeKey: key })),
+  // plan-20261027-panel-tab：只接受「确实存在于当前桶」的 key。否则 activeKey 会悬空指向一个
+  // 已关闭的标签，标签条高亮与内容区同时错位，点其他标签也无法恢复。
+  setActiveTab: (key) => {
+    const bucket = get().activeBucket;
+    const exists = (get().buckets[bucket]?.tabs ?? []).some((t) => panelTabKey(t) === key);
+    if (!exists) return;
+    writeBucket(bucket, (b) => ({ ...b, activeKey: key }));
+  },
   // v11: 切换预览文件时清空 diff（diff 视图仅由变更审核卡片进入时提供）
   // v2.2: 支持行号定位（grep path:line 跳转）
   setPreviewPath: (path, line = null) => writeBucket(get().activeBucket,
@@ -317,7 +393,9 @@ export const usePanelStore = create<PanelState>((set, get) => ({
  *  所有内容写入都经这里落库，保证「buckets 是唯一数据源、顶层字段是镜像」。 */
 function writeBucket(key: string, fn: (b: PanelBucket) => PanelBucket) {
   usePanelStore.setState((s) => {
-    const next = fn(s.buckets[key] ?? emptyBucket());
+    // 所有写入都过一遍归一化：重复 key 与悬空 activeKey 在落库前就被修正，
+    // 不给渲染层留「点不动」的机会（plan-20261027-panel-tab）。
+    const next = normalizeBucket(fn(s.buckets[key] ?? emptyBucket()));
     const buckets = { ...s.buckets, [key]: next };
     return key === s.activeBucket ? { buckets, ...projectionOf(next) } : { buckets };
   });

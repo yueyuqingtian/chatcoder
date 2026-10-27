@@ -177,10 +177,18 @@ _TASK: list[dict] = [
                "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
            },
        }),
-    _f("TaskQuery", "按 taskId 查询异步子代理任务的状态与结果（仅在需要立即获取时使用；任务完成时会自动推送，无需轮询）。", {
+    _f("TaskQuery",
+       "按 taskId 查询异步子代理任务的状态与结果，两种用法："
+       "wait=true 时阻塞等待子代理结束再返回（仍在运行的全部子代理都结束后才返回，"
+       "下一步强依赖它的结论时用这种）；"
+       "wait 缺省或 false 时立即返回当前状态，任务完成时结果同样会自动推送回来，无需反复轮询。", {
         "type": "object", "required": ["taskId"],
         "properties": {
             "taskId": {"type": "string", "description": "SubAgentAsync 返回的 taskId。"},
+            # wait 此前只存在于内部 collect_results，ta3 会话里模型看不到它——提示词教它「阻塞等待」，
+            # 工具却没有该参数，只能拿到「仍在运行」就返回；这里补齐为模型可见参数。
+            "wait": {"type": "boolean",
+                     "description": "true = 阻塞等待子代理结束再返回；默认 false 立即查询当前状态。"},
             # plan-156-620：长结论分段读取（结果末尾提示未读完时按给出的值续读）
             "reportOffset": {"type": "integer", "description": "分段读取结论的起始字符位置；结果提示尚未读完时按提示的值再次查询，直到读完。"},
         },
