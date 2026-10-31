@@ -1546,11 +1546,14 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         }
         if selected_model is not None and getattr(selected_model, "api_format", "") == "ta3":
             from app.models.providers.ta3_mcp import is_mcp_tool
-            from app.models.providers.ta3_tool_aliases import TO_TA3
+            from app.models.providers.ta3_tool_aliases import TO_TA3, TO_TA3_EXTENSION
             # MCP 工具名（mcp_<server>_<tool>）动态生成、不在静态映射表内，单独放行——
             # 它们经 ta3_mcp 改名为 ta3 风格伪装名后照常下发给模型。
+            # plan-601：口径必须与下方「最终下发点」的过滤一致（内置 + 拓展 + 真 MCP），
+            # 此前漏掉拓展通道，提示词会把实际可用的浏览器/附件等工具当成不可用而降级。
             _available_tools = {
-                n for n in _available_tools if n in TO_TA3 or is_mcp_tool(n)
+                n for n in _available_tools
+                if n in TO_TA3 or n in TO_TA3_EXTENSION or is_mcp_tool(n)
             }
         _type_states = await load_subagent_type_states(db)
         # plan-156-624：设置中心总开关此前只存在配置里、engine 从未读取，关掉也不生效。
@@ -1733,6 +1736,20 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 工作流工具仅在工作流执行模式下发（设置开关之外的第二道门）；只读 / 计划 / 智能体模式不暴露
         if _mode == "workflow":
             tool_schemas = append_workflow_tools(tool_schemas, readonly_only=False)
+        # plan-598-2482：ta3 会话的工具面收敛到「官方内置 27 项 + MCP 外部工具通道」。
+        # 此前的过滤（见上方 _available_tools 处）只作用于提示词口径，实际下发的
+        # tool_schemas 来自 all_schemas，完全绕过过滤——于是 ta3 上行 60~74 个工具，
+        # 与官方（27 + MCP）差异明显。这里在**最终下发点**再收敛一次，保证口径一致。
+        if selected_model is not None and getattr(selected_model, "api_format", "") == "ta3":
+            from app.models.providers.ta3_mcp import is_mcp_tool
+            from app.models.providers.ta3_tool_aliases import TO_TA3, TO_TA3_EXTENSION
+
+            tool_schemas = [
+                s for s in tool_schemas
+                if (s.get("function", {}).get("name") or "") in TO_TA3
+                or (s.get("function", {}).get("name") or "") in TO_TA3_EXTENSION
+                or is_mcp_tool(s.get("function", {}).get("name") or "")
+            ]
         # 3. 运行主代理
         # v10/v13: 会话级模型覆盖；同一模型也用于规划评估与拆分。
         from app.orchestration.subagent import get_subagent_manager
@@ -2740,12 +2757,21 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 上下文形态切换最剧烈的一刻——规划阶段的对话被整篇方案文档替换，叠加 16000
         # 字符方案文档与全英文系统提示，模型最容易在此处沿用英文惯性。因此在边界处
         # 显式声明"已退出规划、进入执行"并重申语言，而非仅依赖构建时的一次性锚。
-        bundle.developer_parts.append(
-            build_plan_exit_reminder(
-                bundle.reply_language,
-                source=bundle.reply_language_source,
-            )
+        _exit_reminder = build_plan_exit_reminder(
+            bundle.reply_language,
+            source=bundle.reply_language_source,
         )
+        if bundle.merge_developer_into_system:
+            # plan-601-2495：ta3 下官方只有开头一条 system，中途提醒一律以
+            # <system-reminder> 放进当轮 user 消息；并入 rules_anchor 后随下方
+            # instruction 重写一起前置，避免落进 system 尾部偏离官方结构。
+            if _exit_reminder:
+                _wrapped = f"<system-reminder>\n{_exit_reminder}\n</system-reminder>"
+                bundle.rules_anchor = (
+                    f"{bundle.rules_anchor}\n\n{_wrapped}" if bundle.rules_anchor else _wrapped
+                )
+        else:
+            bundle.developer_parts.append(_exit_reminder)
         # plan-549-2281：确认执行阶段也注入派发要求——方案文档里的「可并行」分组
         # 只有在这里被读到，执行指令若仍写死「串行推进」等于让计划白拆。
         # 复盘修复：注入前必须过「子代理开关 + 会话身份」两道门——开关关闭时工具已

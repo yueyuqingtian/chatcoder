@@ -151,9 +151,9 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
   // plan-511-2182：有正文且无思考时槽位整体折叠为 0（样式侧同时抵消它在 flex gap 中的一份间距），
   // 否则正文上方会多留一行空白。
   const slotEmpty = !hasThinking && hasBody;
-  // plan-511-2182：尾部状态行位置语义不变——有正文时固定在正文下方；无正文时只有瞬时提示
-  // （重试 / 压缩等 statusLabel）才与思考行并存，默认「等待响应…」交给槽位状态层，避免两行重复。
-  const tailStateShown = hasBody || (hasThinking && Boolean(statusLabel));
+  // plan-20261112-loading-home-sidebar：思考或工具准备期间同样保留底部三点，
+  // 否则正文落库后仅剩思考行时，运行提示会再次消失；空缓冲由槽位状态层承接。
+  const tailStateShown = hasBody || hasThinking;
   // plan-20261016-ux（问题 5）：正文里以 DSML 标签写出的工具调用（DeepSeek / 智谱）在流式期间改写成
   // 「正在准备 …」+ 代码块——正在输出的代码直接进代码框，而不是夹着标签的普通文本（见 dsmlStream）
   const displayBody = useMemo(() => rewriteDsmlForStream(smoothBody), [smoothBody]);
@@ -201,9 +201,8 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           （典型：AI 边思考边写方案文档/正文）时，正文尾部既无三点光标、又无状态行，
           消息流底部完全静默，用户看不到"还在进行"。
 
-          plan-511-2182：门控收敛为 tailStateShown——有正文时本条固定在正文下方；
-          无正文时只有 statusLabel 才与思考行并存，默认「等待响应…」已移交槽位状态层，
-          语义与改动前一致，且不再需要与思考行互相抑制。 */}
+          plan-20261112-loading-home-sidebar：有正文或思考时固定保留尾部状态行；
+          两者均为空时交给槽位状态层，工具调用和正文落库的间隙仍有三点反馈。 */}
       {tailStateShown && <StateLine label={statusLabel ?? processingLabel} />}
     </div>
   );

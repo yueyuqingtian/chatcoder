@@ -773,6 +773,23 @@ async def auto_compact(
     result = ensure_tool_pairing(result)
     result = pre_boundary + result
 
+    # plan-598-2517：压缩后必须保留至少一条 user 打头，否则整段请求非法。
+    # 事故（会话 605 turn=2520）：保留区从 assistant(tool_calls) 起切，压缩后一条 user
+    # 也没有；ta3 侧再把 summary(developer)→assistant、boundary 丢弃，最终消息序列变成
+    # `system → assistant → assistant`，网关直接拒请求，客户端只看到「AI服务异常，请稍后重试」，
+    # 重试 3 次必然同样失败（用户重发「继续」后才恢复）。
+    # 这里在摘要之后补一条 user 承接，明确「上下文已压缩、接着上次进度继续」。
+    if not any(m.role == "user" for m in result):
+        _lead = ChatMessage(
+            role="user",
+            content=("（上下文已压缩，请接着上面的进度继续当前任务。）" if _zh
+                     else "(Context was compacted; continue the current task from the summary above.)"),
+        )
+        # 插到边界/摘要之后、保留区之前，保证「摘要即上文、user 即当前请求」的语义
+        _at = next((i for i, m in enumerate(result) if m.role not in ("system", "developer")),
+                   len(result))
+        result = result[:_at] + [_lead] + result[_at:]
+
     logger.info(
         "[auto_compact] %d -> %d 条消息（折叠 %d 回合/%d tokens 为摘要，ReadState 提醒 %d 文件）",
         len(messages), len(result), len(old_rounds), old_tokens, len(read_paths),

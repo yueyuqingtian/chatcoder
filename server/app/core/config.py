@@ -207,8 +207,8 @@ class Settings(BaseSettings):
     # - agent_empty_response_retries: 空响应重试次数（0 = 关闭重试）
     # - agent_empty_retry_efforts: 每次重试的 effort 降档序列（逗号分隔；
     #   空项表示不传 effort；"none" 表示关闭 thinking）
-    # - ta3_kimi_thinking_effort: kimi 系思考档位兜底（kimi 官方档位 low/high/max，
-    #   默认保守取 low，避免 high/max 长思考放大网关断流概率）
+    # - (deprecated) ta3_kimi_thinking_effort: plan-601-2495 起不再读取——官方 0.7.5 对 kimi
+    #   没有档位特判，档位按目录 thinkingLevels 校验、非法值回落 low。
     # - (deprecated) ta3_thinking_watchdog: plan-838 起不再读取——思考/空闲统一使用
     #   ta3_stream_idle_timeout。
     agent_empty_response_retries: int = 2
@@ -218,7 +218,7 @@ class Settings(BaseSettings):
     # 默认 10,20,30 = 共 3 次重试，分别等 10/20/30 秒；空串 = 不自动重试。
     # 由设置-常规面板写入（/settings/global）并持久化到 config.json。
     agent_retry_intervals: str = "10,20,30"
-    ta3_kimi_thinking_effort: str = "low"
+    ta3_kimi_thinking_effort: str = "low"  # DEPRECATED (plan-601-2495)：仅兼容旧配置文件
     # DEPRECATED (plan-838): 思考看门狗已移除——kimi-k3 与 TA3 其它模型统一使用
     # ta3_stream_idle_timeout(300s) 空闲超时，此字段仅保留以兼容旧配置文件，不再被读取。
     ta3_thinking_watchdog: int = 240
@@ -467,6 +467,19 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
         "ta3-new-coder-desktop/1.0.0 Chrome/126.0.0.0 Electron/31.0.0 Safari/537.36"
     )
+    # plan-598-2482 / plan-601-2495：是否用上面的伪装 UA。
+    # 官方 build*Headers 不设 User-Agent，由主进程 undici 补默认值 `node`（undici
+    # lib/web/fetch/index.js:76-78、1468-1470）。默认 False → 发 `node`（与官方一致）；
+    # True → 发 ta3_user_agent，仅供应急伪装。
+    ta3_send_user_agent: bool = False
+    # plan-598-2482：是否对出站消息内容做竞品签名脱敏。
+    # 内置拦截策略：**默认开启**。`you are claude code` 这类签名一旦被工具执行
+    # （grep 源码、读依赖）读进历史消息，后续每条请求都会带着它，网关会直接 403 拦掉
+    # 整条链路；现场表现只是「模型请求失败 403」，用户无从判断原因，因此默认就做替换
+    # （语义保留、特征消除）。此外 ta3 provider 在「请求确实含该特征、且网关以 403 + 风控/
+    # 拦截字样拒绝」时还会自动强制脱敏并重发一次（plan-601-2495：400 不再重发）。
+    # 若需要与官方逐字节一致的调试场景可置 False。
+    ta3_sanitize_outbound: bool = True
 
     # v24: workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商
     workbuddy_endpoint: str = "https://copilot.tencent.com"  # 可覆盖（staging 调试）

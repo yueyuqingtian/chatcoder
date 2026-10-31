@@ -16,6 +16,7 @@ import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
 import { DebugCard } from "./DebugCard";
 import { StreamingTail } from "./StreamingTail";
+import { StreamingText } from "./StreamingText";
 import { IconSearch, IconChevronUp, IconChevronDown, IconX, IconArrowDown } from "../icons";
 import { ErrorCard } from "./ErrorCard";
 // plan-156-619 S10：后续任务建议卡（消息流底部收尾卡）
@@ -139,19 +140,15 @@ const FlowErrorCard = memo(function FlowErrorCard({
   );
 });
 
-/** v39: 后台子代理运行期间的等待行（主会话保持“运行中”的视觉表达）。
- *  与 StreamingText 的状态行同款样式（呼吸点 + 文案），语义为「等子代理结束」；
- *  子代理结束会自动创建唤醒轮，届时转为常规流式尾部。 */
+/** plan-20261112-loading-home-sidebar：后台等待复用流式状态行，避免主轮次交接时三点动画消失。 */
 const SubagentWaitingLine = memo(function SubagentWaitingLine({ count }: { count: number }) {
   return (
-    <div className="turn-group turn-flow streaming-tail">
-      <div className="turn-status-line">
-        <span className="thinking-breath-dot" />
-        <span className="thinking-block-status">
-          {count > 1 ? `等待子代理结束…（${count} 个运行中）` : "等待子代理结束…"}
-        </span>
-      </div>
-    </div>
+    <StreamingText
+      active
+      thinking=""
+      text=""
+      waitingLabel={count > 1 ? `等待子代理结束…（${count} 个运行中）` : "等待子代理结束…"}
+    />
   );
 });
 
@@ -1712,7 +1709,7 @@ function MainMessageFlow({
         // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；
         // 若同时存在 turn 级瞬态提示（如重试），瞬态提示仍优先）。
         <StreamingTail
-          active={Boolean((isRunning && runningTurnId) || workflowOnly)}
+          active={isRunning || workflowOnly}
           statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
           persistedText={workflowOnly ? "" : lastPersistedText(entries)}
         />

@@ -80,6 +80,12 @@ class MemoryWriteTool(Tool):
         if not getattr(settings, "auto_memory_enabled", True):
             return ToolResult(ok=False, output="", error="记忆功能已在「设置 → 记忆」中关闭。")
 
+        # plan-601：ta3 官方 generate_project_memory 一次传一组记忆（还原层转成 memories 数组）。
+        # schema 不暴露该参数；只传 text 的既有调用不受影响。
+        batch = args.get("memories")
+        if batch is not None and not args.get("text"):
+            return await self._run_batch(batch, ctx)
+
         text = str(args.get("text") or "").strip()
         if len(text) < 8:
             return ToolResult(ok=False, output="", error="记忆内容过短（至少 8 字符）")
@@ -125,6 +131,33 @@ class MemoryWriteTool(Tool):
                 data={"count": count, "scope": scope, "keywords": keywords or []},
             )
         return ToolResult(ok=True, output="记忆已存在（去重跳过），未重复写入。", data={"count": 0})
+
+    async def _run_batch(self, batch: Any, ctx: ToolContext) -> ToolResult:
+        """批量写入：逐条复用单条路径（同一套长度门槛、作用域降级与去重）。"""
+        items = batch if isinstance(batch, list) else [batch]
+        items = [m for m in items if isinstance(m, dict) and str(m.get("text") or "").strip()]
+        if not items:
+            return ToolResult(
+                ok=False, output="",
+                error="memories 为空：每条记忆至少需要 name/type/content，正文不能为空",
+            )
+        lines: list[str] = []
+        saved = 0
+        failed = 0
+        for m in items:
+            sub = {k: m.get(k) for k in ("text", "kind", "scope", "keywords") if m.get(k) is not None}
+            r = await self.run(sub, ctx)
+            if r.ok:
+                saved += int((r.data or {}).get("count") or 0)
+                lines.append(r.output)
+            else:
+                failed += 1
+                lines.append(f"未写入：{r.error}")
+        summary = f"共 {len(items)} 条，写入 {saved} 条：\n" + "\n".join(lines)
+        if failed == len(items):
+            # 全部失败（功能关闭 / 内容过短）才算调用失败；部分成功或去重跳过都算成功
+            return ToolResult(ok=False, output="", error=summary, data={"count": 0, "total": len(items)})
+        return ToolResult(ok=True, output=summary, data={"count": saved, "total": len(items)})
 
 
 def _parse_keywords_arg(raw) -> list[str]:

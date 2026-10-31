@@ -711,6 +711,44 @@ def _prune_messages_for_compaction(messages: list, retain_tokens: int) -> list:
     return [m for m in messages if m.role in ("system", "developer") or id(m) in kept_ids]
 
 
+def resolve_compact_thresholds(agent_window: int, ratio: float, max_out: int) -> dict:
+    """压缩阈值解析（plan-598-2517，纯函数，诊断日志与前置检查共用）。
+
+    返回：{configured, out_reserve, pre_threshold, post_threshold}
+
+    背景（真实事故）：旧实现的前置触发点用
+        `_out_reserve = min(输出配置 or 8192, agent_window // 4)`
+        `_pre_threshold = max(窗口*0.5, 窗口*ratio - _out_reserve)`
+    本机配置（ratio=0.90、输出上限=128000）下，512K 窗口的触发点被压到
+    332800（65%）——**远未到配置的 90% 就开始压缩**，且与「后置触发点」
+    （纯 ratio，无预留）口径相差 25 个百分点。
+
+    两个缺陷：
+    1. 输出上限未配（0）时兜底 8192 是凭空加的——请求根本不带 max_tokens；
+    2. 输出上限很大时预留吃满 1/4 窗口，把输入预算挤掉一大块。
+
+    现在：
+    - 输出余量已隐含在「100% - ratio」的窗口差额里，不再二次扣减；
+    - 预留只在「阈值以上还有余量」时取一点，且不超过输出上限与窗口 15%；
+    - 窗口 50% 的下限保护保持不变。
+    """
+    window = max(0, int(agent_window))
+    configured = int(window * ratio)
+    # 阈值以上的窗口余量；ratio 很小时它就是全部可用的输出空间
+    headroom = max(0, window - configured)
+    reserve = 0
+    if max_out and max_out > 0:
+        reserve = min(int(max_out), headroom, int(window * 0.15))
+    pre = max(int(window * 0.5), configured - reserve)
+    return {
+        "configured": configured,
+        "out_reserve": reserve,
+        # 前置（调用前估算触发）可能略早；后置（真实占用触发）严格等于配置阈值
+        "pre_threshold": pre,
+        "post_threshold": configured,
+    }
+
+
 async def _compact_persistent_or_fallback(
     db: AsyncSession, *, session_id: int, provider, agent_window: int,
     used_tokens: int | None, agent_id: int, agent_name: str,
@@ -1162,6 +1200,9 @@ async def run_agent_loop(
     loop_step_limit = 10_000_000 if is_unlimited_steps else max_steps
 
     # v6.4: 启动时打印压缩阈值诊断日志
+    # plan-598-2517：这条日志过去只报「配置比例 × 窗口」，而真实的前置触发点还要扣掉
+    # 输出预留（旧公式最多扣满 1/4 窗口），两者能差 25 个百分点——用户看到「阈值 90%」
+    # 却在 65% 就被压缩，很难自证。现在把真实触发点一并打印，日志与行为对得上。
     try:
         from app.orchestration.token_counter import get_agent_context_window
         _diag_window = await get_agent_context_window(db, agent, model_id=model_id)
@@ -1171,11 +1212,18 @@ async def run_agent_loop(
                 turn_id, _diag_window,
             )
             _diag_window = 500000
+        _diag_ratio = settings.auto_compact_threshold_ratio
+        _diag_max_out = int(settings.agent_max_output_tokens or 0)
+        _diag = resolve_compact_thresholds(_diag_window, _diag_ratio, _diag_max_out)
         logger.info(
-            "[agent] turn=%s agent_context_window=%d, 压缩阈值=%.0f%% (%d tokens)",
+            "[agent] turn=%s agent_context_window=%d, 压缩配置阈值=%.0f%% (%d tokens)，"
+            "前置触发点=%d tokens (%.1f%%，输出预留 %d)，后置触发点=%d tokens (%.0f%%)",
             turn_id, _diag_window,
-            settings.auto_compact_threshold_ratio * 100,
-            int(_diag_window * settings.auto_compact_threshold_ratio),
+            _diag_ratio * 100, _diag["configured"],
+            _diag["pre_threshold"],
+            _diag["pre_threshold"] / _diag_window * 100 if _diag_window else 0,
+            _diag["out_reserve"],
+            _diag["post_threshold"], _diag_ratio * 100,
         )
     except Exception:
         logger.warning("[agent] turn=%s 压缩阈值诊断日志获取失败", turn_id, exc_info=True)
@@ -1395,12 +1443,15 @@ async def run_agent_loop(
                 _tools_tokens = _est_tools(tool_schemas)
                 _est_raw = _est_tokens(api_messages) + _tools_tokens
                 _est_prompt = int(_est_raw * _calib_factor)
-                # 阈值为窗口的比例，再扣掉为本次输出预留的余量（否则输出一吃满就会超窗）；下限取窗口的一半
-                _out_reserve = min(settings.agent_max_output_tokens or 8192, agent_window // 4)
-                _pre_threshold = max(
-                    int(agent_window * 0.5),
-                    int(agent_window * settings.auto_compact_threshold_ratio) - _out_reserve,
+                # plan-598-2517：输出预留只为「避免本次输出撑爆窗口」，不能反过来把输入预算
+                # 挤到配置阈值以下一半以上。阈值口径统一由 resolve_compact_thresholds 给出，
+                # 与启动诊断日志、后置（真实占用）触发点共用同一份计算。
+                _th = resolve_compact_thresholds(
+                    agent_window,
+                    settings.auto_compact_threshold_ratio,
+                    int(settings.agent_max_output_tokens or 0),
                 )
+                _pre_threshold = _th["pre_threshold"]
                 if _est_prompt >= _pre_threshold:
                     logger.info("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) >= 阈值 %d，调用前压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
                     await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _est_prompt, "context_window": agent_window, "ratio": round(_est_prompt / agent_window * 100, 1)}})
@@ -5048,6 +5099,8 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             db, agent=sub_agent, session=session, project=project, task=task,
             handoff_summary=task_desc,
             original_request=_orig_req,
+            # plan-598-2482：对齐官方 SubAgent 的 inherit_context 参数
+            inherit_context=bool(args.get("inherit_context", False)),
         )
         # plan-568-2333：工具面已在派发前（写库之前）定稿并校验，此处不再重复计算。
         # plan-549-2281 双保险：工作流工具不在 tool_registry 里，子代理原本就拿不到；

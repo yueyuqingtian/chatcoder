@@ -1,13 +1,17 @@
-"""ta3 系统提示词还原与融合（方案 §5.5）。
+"""ta3 系统提示词还原（对齐官方客户端 ta3 0.7.5 的段序）。
 
-结构 = ① ta3 远端下发 baseAgentSystemMessage（主体还原）
-      + ② ta3 任务列表纪律（原文移植自参考项目 chatService.ts:121-135）
-      + ③ ta3 工具使用纪律（原文移植自 chatService.ts:137-157）
-      + ④ <runtime-context> 快照（ta3 格式，chatService.ts:159-173）
-      + ⑤ 当前项目流程规范追加段（不依赖工具名的通用约束）
+结构 = ① 平台下发 persona 主体（agent / plan / chat 按模式取，plan-601-2495）
+      + ② 任务列表纪律（chat 模式不注入）
+其余官方内容段（<available_skills> / 记忆 / <project-context> / 工作区目录）由
+context_manager 按官方顺序追加在其后。
 
-上下文分层（developer 片段/压缩/审批）仍由当前项目 context_manager 注入，本模块
-只负责 system 主体替换。
+plan-598-2482: 官方装配顺序是「persona 主体 → 任务列表 → 各内容段」，且**没有**
+附加的流程规范段与语言纪律块（见官方 systemPromptAssembly.buildLegacyCombinedSystemMessage
+与 personaRegistry.buildSystemPrompt）。此前本模块在末尾追加本地流程规范段并把语言纪律块
+置于首尾双锚，段序与官方不一致、文本量也多出一截；现按官方段序输出，语言纪律交由
+规则文档与用户消息承载，不再重复注入。
+
+上下文分层（历史消息/工具结果/审批）仍由 context_manager 注入，本模块只负责 system 主体。
 """
 from __future__ import annotations
 
@@ -33,19 +37,22 @@ in_progress 任务可以提供 activeForm 描述当前正在做的动作；未�
 回复正文只输出给用户看的结论、步骤和结果；不要把内部思考、自我分析或类似 "The user asked..." 的自言自语写进正文。
 简单问答、无需跟踪步骤的小任务可以不创建任务列表。"""
 
-# ③ 工具使用纪律（参考项目 chatService.ts:137-157 原文）
+# ③ 工具使用纪律
+# plan-598-2482: 只保留通用纪律，不点名任何具体工具——工具名由会话实际下发的
+# 工具面决定（各供应商的伪装名还不一样），把名字写死在提示词里会指向不存在的能力。
 TA3_TOOL_DISCIPLINE_SECTION = """## 工具使用纪律
 只有通过工具调用（tool_calls）实际执行的操作才会真实生效；你回复正文中的描述本身不代表操作已经发生。
 不要编造工具调用，不要虚构工具执行结果，也不要声称执行了并未真正调用的操作（例如"已修改""已保存""已执行"）。
-需要读取或修改文件、运行命令、搜索代码时，直接调用对应工具；在工具返回结果之前，不要宣称操作已完成。
+需要读取或修改文件、运行命令、搜索代码时，直接调用当前可用的对应工具；在工具返回结果之前，不要宣称操作已完成。
 工具返回的错误要如实报告，不要假装成功。
-回答关于项目结构、文件路径、代码内容的问题前，先调用 Read/Search/List 等工具核实，禁止凭记忆描述或编造。
+回答关于项目结构、文件路径、代码内容的问题前，先用当前可用的检索或读取工具核实，禁止凭记忆描述或编造。
 历史上下文中的 assistant 消息若带 tool_calls 及其 tool 返回结果，说明这些操作真实发生过，其返回内容是可查验的事实依据；不要重复声称已做过上下文中不存在的操作，也不要把上下文中的叙述性描述当成已发生的事实。
 历史消息中出现 "tool call aborted before dispatch" 或 "TOOL_OUTCOME_UNKNOWN" 错误结果时，说明对应操作未完成或结果未知；在重新核实外部状态前，不得假定该操作已经成功。"""
 
-# ⑤ 当前项目流程规范追加段（不依赖工具名的通用约束）
-# plan-19-82: 回复语言不再写死「简体中文」——由 language 参数动态生成，
-# 与远端 systemMessage 及主提示词口径统一（用户发什么语言就用什么语言回复）。
+# 以下三段流程规范模板 **ta3 路径已不再注入**（plan-598-2482：官方没有这一段，
+# 追加它会与官方段序不一致）。保留定义仅因既有单测仍直接引用这些常量；
+# 新代码不要再用它们拼接 ta3 系统提示词——ta3 上行提示词里不应出现本地产品名。
+# plan-19-82: 回复语言由 language 参数动态生成（历史行为，仅对保留的模板生效）。
 CHATCODER_ADDENDUM = """## 流程规范（本环境附加）
 1. 本环境由 chatcoder 工作台托管：任务拆解、上下文压缩、工具审批由平台自动完成，你只需专注执行。
 2. 工具调用按平台定义执行：Write/Edit/Bash 等写操作默认需用户审批，审批通过后才会真正生效；被拒绝时如实说明并调整方案。
@@ -102,6 +109,10 @@ def _build_addendum(execution_mode: str = "agent", approval_mode: str = "ask",
                     language: str = "auto") -> str:
     """按「执行模式 × 权限模式」选择流程规范段。
 
+    plan-598-2482: **ta3 系统提示词不再调用本函数**。官方客户端的 system 段里没有
+    流程规范段（只有 persona 主体 + 任务列表 + 内容段），继续追加会让段序偏离官方。
+    函数与三段模板保留，仅因既有单测仍直接引用；新代码不要用它拼接 ta3 提示词。
+
     plan-75-332: 参数由 sandbox_mode 改为两条正交轴。
 
     plan-562-2318 A24：两条轴正交，**执行模式的硬边界优先**。此前先判
@@ -138,7 +149,7 @@ def _build_addendum(execution_mode: str = "agent", approval_mode: str = "ask",
 # （出站只发 SubAgentAsync）；② 通篇不提「团队协作只有主代理一条线」，与内部通道口径不一致。
 SUBAGENT_GUIDE_SECTION = """## 子代理使用
 SubAgent 是唯一的并行执行通道（不存在子会话）：既能做只读调研，也能做可写实现。
-`subagent_type=Explore` 为只读调研（对应内部 readonly 模式）；其余 / 缺省为可写（agent 模式）。
+`subagent_type=Explore` / `Plan` 为只读调研（对应内部 readonly 模式）；其余 / 缺省为可写（agent 模式）。
 同一轮的派发量以「单会话同时运行上限」为准（设置 →「子代理」；每次派发结果会回带上限/占用/剩余），超出的派发会被立即拒绝；剩余为 0 时不要再派，先把已有结果收回来。单文件读取、单关键词搜索等琐碎调研必须自己用直接工具调用完成，不得派发。
 写入范围互不相交的实现工作可以派出去——实现可以委派，不必自己逐处改。
 派发方式：一律用 SubAgentAsync 后台派发，立即返回、完成后结果自动推送，不要轮询；
@@ -164,32 +175,84 @@ def build_runtime_snapshot(workspace: str = "") -> str:
     return "\n".join(p for p in parts if p)
 
 
+def ta3_persona_mode(execution_mode: str | None) -> str:
+    """chatcoder 执行模式 → 官方 persona 模式（agent / plan / chat）。
+
+    plan-601-2495：官方内置模式只有 chat（无工具）/ plan（只读）/ agent
+    （builtInCatalog.js:91-120）。chatcoder 的 plan 与 readonly 都是只读档，
+    与官方 plan 的 toolPolicy.readonlyOnly 同语义，统一取 plan persona；
+    agent / workflow / 自定义可写模式取 agent persona；显式 chat 才取 chat。
+    """
+    raw = str(execution_mode or "").strip().lower()
+    if raw == "chat":
+        return "chat"
+    kind = _mode_kind(execution_mode)
+    if kind in ("plan", "readonly"):
+        return "plan"
+    return "agent"
+
+
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def ta3_persona_system_message(model_meta: dict | None, mode: str = "agent") -> str:
+    """按官方 getSystemMessage 取 persona 主体（systemPromptAssembly.js:22-39）。
+
+    plan-601-2495：官方 agent 取 chatOptions.baseAgentSystemMessage、plan 取
+    basePlanSystemMessage、chat 回退 baseSystemMessage / baseChatSystemMessage /
+    systemMessage。目录入库目前只存了一份合并后的 `systemMessage`（catalog.py:187-192,469），
+    因此这里**先看** ta3_meta 中是否带了原始 chatOptions / 各字段，带了就按模式取，
+    没带就回退到那份 systemMessage（与改造前一致）。
+    """
+    meta = _as_dict(model_meta)
+    chat_options = _as_dict(meta.get("chatOptions"))
+
+    def _fallback() -> str:
+        return (
+            _text(chat_options.get("baseSystemMessage"))
+            or _text(meta.get("baseChatSystemMessage"))
+            or _text(meta.get("systemMessage"))
+        )
+
+    if mode == "agent":
+        return (_text(chat_options.get("baseAgentSystemMessage"))
+                or _text(meta.get("baseAgentSystemMessage")) or _fallback())
+    if mode == "plan":
+        return (_text(chat_options.get("basePlanSystemMessage"))
+                or _text(meta.get("basePlanSystemMessage")) or _fallback())
+    return _fallback()
+
+
+def build_ta3_task_section(mode: str = "agent") -> str:
+    """官方 buildTaskManagementSystemSection：chat 模式不注入（systemPromptAssembly.js:40-53）。"""
+    return "" if mode == "chat" else TA3_TASK_MANAGEMENT_SECTION
+
+
 def build_ta3_system_prompt(model_meta: dict | None, workspace: str = "",
                             enable_subagents: bool = True,
+                            # 以下参数中 approval_mode / language / language_source 仅为兼容
+                            # 既有调用方而保留（官方无流程规范段、无语言纪律块）；
+                            # execution_mode 自 plan-601-2495 起用于选择 persona。
                             execution_mode: str = "agent",
                             approval_mode: str = "ask",
                             language: str = "auto",
                             language_source: str = "user") -> str:
-    """组装 ta3 模式系统提示词（见模块 docstring 结构）。
+    """组装 ta3 模式系统提示词的 persona 主体 + 任务列表（官方前两段）。
 
-    plan-75-332：参数由 sandbox_mode 改为两条正交轴——execution_mode
-    （readonly / plan / agent）决定能力边界，approval_mode（ask / auto / full）
-    决定是否免询问；流程规范段按二者生成，避免注入与所选模式矛盾的审批条款。
-    language（plan-19-82）：远端 systemMessage 可能是英文，与本地流程规范口径不一；
-    这里把统一的语言纪律块置于**首尾双锚**，并按本轮语言生成「回复用 X」文案。
+    plan-598-2482：官方 system 在平台下发主体之后紧跟 `## 任务列表`，其余内容段
+    （skills / memory / project-context / workspace）由 context_manager 按官方顺序追加；
+    不含工具纪律、runtime 快照、子代理引导。
+
+    plan-601-2495：persona 主体按模式取（agent / plan / chat），chat 模式不注入任务列表。
     """
-    from app.orchestration.prompts.language import build_language_directive
-
-    model_meta = model_meta or {}
+    mode = ta3_persona_mode(execution_mode)
     sections = [
-        (model_meta.get("systemMessage") or "").strip(),
-        TA3_TASK_MANAGEMENT_SECTION,
-        TA3_TOOL_DISCIPLINE_SECTION,
-        build_runtime_snapshot(workspace),
+        ta3_persona_system_message(model_meta, mode),
+        build_ta3_task_section(mode),
     ]
-    if enable_subagents:
-        sections.append(SUBAGENT_GUIDE_SECTION)
-    sections.append(_build_addendum(execution_mode, approval_mode, language=language))
-    body = "\n\n".join(s for s in sections if s)
-    _lang_dir = build_language_directive(language, source=language_source)
-    return f"{_lang_dir}\n\n{body}\n\n{_lang_dir}"
+    return "\n\n".join(s for s in sections if s)

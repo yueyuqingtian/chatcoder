@@ -60,6 +60,12 @@ class FsWriteTool(Tool):
         content = args.get("content", "")
         if not path:
             return ToolResult(ok=False, output="", error="path 不能为空")
+        # plan-601：ta3 官方 Write 有 mode=overwrite/append；本工具 schema 不暴露该参数，
+        # 只在还原层透传时生效，缺省即原有的整体覆盖行为
+        mode = str(args.get("mode") or "overwrite").strip().lower()
+        if mode not in ("overwrite", "append"):
+            return ToolResult(ok=False, output="", error="mode 只支持 overwrite 或 append")
+        append = mode == "append"
 
         # plan-75-332: 不再限制写入必须落在工作区内——越界写入由 approval_policy
         # 归类为 write_outside，在审批卡上呈现（完全访问下直接执行）。
@@ -72,6 +78,7 @@ class FsWriteTool(Tool):
         # 局部修改请用 editor_apply_diff（以 old_text 校验，无需先整体读取）。
         # 缓存为空（进程刚重启）时不做强制，避免升级后首次覆盖被误拦。
         _rc = getattr(ctx, "read_cache", None)
+        # 追加同样要求先读过（对齐官方 Write：「追加前仍需先读取一次该文件」）
         if _rc is not None and _rc.has_any() and target.is_file() and not _rc.has_read(target):
             return ToolResult(
                 ok=False, output="", error=f"拒绝覆盖未读取的已有文件: {path}", error_code="STALE_READ",
@@ -86,9 +93,13 @@ class FsWriteTool(Tool):
             try:
                 tf = read_text_file(target)
                 old_text = tf.text
-                data = encode_text(tf, str(content))
+                # 追加：拼在原文末尾后整体按原编码/BOM/换行写回（追加内容的行尾随文件风格）
+                data = encode_text(tf, (old_text + str(content)) if append else str(content))
             except (TextFileError, UnicodeEncodeError):
                 data = None
+            if append and data is None:
+                # 原文件无法按文本识别（二进制/编码未知）：拒绝追加，不能退化成整体覆盖丢掉原内容
+                return ToolResult(ok=False, output="", error=f"无法按文本追加到该文件: {path}")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if data is not None:
@@ -112,8 +123,16 @@ class FsWriteTool(Tool):
         _data: dict[str, Any] = {"path": display, "bytes": len(content.encode("utf-8"))}
         if old_text is not None and len(old_text) <= _NEW_CONTENT_MAX_CHARS:
             _data["old_content"] = old_text
-        if len(content) <= _NEW_CONTENT_MAX_CHARS:
-            _data["new_content"] = content
+        _new_full = (old_text or "") + str(content) if append else content
+        if len(_new_full) <= _NEW_CONTENT_MAX_CHARS:
+            _data["new_content"] = _new_full
+        if append:
+            _data["mode"] = "append"
+            return ToolResult(
+                ok=True,
+                output=f"已追加 {len(content)} 字符到 {display}",
+                data=_data,
+            )
         return ToolResult(
             ok=True,
             output=f"已写入 {len(content)} 字符到 {display}",

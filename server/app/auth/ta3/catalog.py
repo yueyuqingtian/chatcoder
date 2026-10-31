@@ -75,18 +75,97 @@ def _context_window(completion_opts: dict, model: dict) -> int:
     return 200000
 
 
+# 官方 getModelIdentity 的字段顺序（modelClient.js:44-60）
+_IDENTITY_KEYS = (
+    "provider", "providerName", "modelProvider", "model", "modelName", "modelId",
+    "name", "title", "id",
+)
+# JS 正则 \b 只认 ASCII 单词字符；Python 默认按 Unicode，需加 re.ASCII 才与官方一致
+_ANTHROPIC_WORD_RE = re.compile(r"\b(anthropic|claude|kimi)\b", re.ASCII)
+_DEEPSEEK_WORD_RE = re.compile(r"\bdeepseek\b", re.ASCII)
+# 基址字段优先级（modelClient.js:113-120、150-157）
+_OPENAI_BASE_KEYS = ("apiBaseOpenAI", "apiBase", "apiBaseUrl", "baseURL", "baseUrl", "base_url")
+_ANTHROPIC_BASE_KEYS = ("apiBaseAnthropic", "apiBase", "apiBaseUrl", "baseURL", "baseUrl", "base_url")
+# 显式端点字段（modelClient.js:102-109、137-146 两组的并集，按原样入库）
+ENDPOINT_KEYS = (
+    "anthropicMessagesEndpoint", "messagesEndpoint", "messageEndpoint",
+    "chatCompletionsEndpoint", "chatCompletionEndpoint", "completionEndpoint",
+    "apiEndpoint", "apiUrl", "endpoint",
+)
+# 系统提示词相关字段（官方 systemPromptAssembly.js:22-39 getSystemMessage 读取的键）
+_CHAT_OPTION_PROMPT_KEYS = (
+    "baseAgentSystemMessage", "basePlanSystemMessage", "baseSystemMessage",
+    "baseChatSystemMessage", "systemMessage",
+)
+_TOP_LEVEL_PROMPT_KEYS = ("baseAgentSystemMessage", "basePlanSystemMessage", "baseChatSystemMessage")
+
+
+def _string_value(value) -> str:
+    """官方 stringValue：只认字符串并 trim（modelClient.js:11-13）。"""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _first_string_by_keys(model: dict, keys) -> str:
+    for k in keys:
+        v = _string_value(model.get(k))
+        if v:
+            return v
+    return ""
+
+
+def model_identity(model: dict) -> str:
+    """官方 getModelIdentity：非空字段以空格拼接后小写。"""
+    return " ".join(str(model.get(k)) for k in _IDENTITY_KEYS if model.get(k)).lower()
+
+
+def _explicit_protocol(model: dict) -> str:
+    return str(model.get("protocol") or model.get("apiProtocol") or "").lower()
+
+
+def is_anthropic_protocol_model(model: dict) -> bool:
+    """对齐官方 isAnthropicProtocolModel（modelClient.js:61-73）。
+
+    plan-601-2495：此前用子串匹配且忽略显式 protocol 字段——名称里带 "skimix" 之类的
+    模型会被误判成 Anthropic；显式声明 protocol=openai 的 claude 代理模型也会被判错。
+    """
+    explicit = _explicit_protocol(model)
+    if explicit:
+        return explicit.startswith("anthropic")
+    provider = str(model.get("provider") or model.get("providerName")
+                   or model.get("modelProvider") or "").lower()
+    return (provider in ("anthropic", "kimi")
+            or bool(_ANTHROPIC_WORD_RE.search(model_identity(model)))
+            or "/anthropic" in str(model.get("apiBase") or "").lower())
+
+
+def is_deepseek_model(model: dict) -> bool:
+    """对齐官方 isDeepSeekModel（modelClient.js:78-87）。"""
+    explicit = _explicit_protocol(model)
+    if explicit:
+        return explicit == "deepseek"
+    provider = str(model.get("provider") or model.get("providerName")
+                   or model.get("modelProvider") or "").lower()
+    return provider == "deepseek" or bool(_DEEPSEEK_WORD_RE.search(model_identity(model)))
+
+
+def resolve_protocol(model: dict) -> str:
+    """流式聊天的协议分派：官方 builtInProviders 顺序是 deepseek → anthropic → openai
+    （providers.js:122-131），因此 DeepSeek 先匹配。"""
+    if is_deepseek_model(model):
+        return "deepseek"
+    if is_anthropic_protocol_model(model):
+        return "anthropic"
+    return "openai"
+
+
 def _is_anthropic(model: dict) -> bool:
-    """协议判定（对齐 modelClient.ts:56-68 isAnthropicProtocolModel 的 identity 启发式）。"""
-    identity = " ".join(str(model.get(k) or "") for k in (
-        "provider", "providerName", "modelProvider", "model", "modelName", "modelId",
-        "name", "title", "id",
-    )).lower()
-    api_base = str(model.get("apiBase") or "").lower()
-    return (
-        model.get("provider") in ("anthropic", "kimi")
-        or any(kw in identity for kw in ("anthropic", "claude", "kimi"))
-        or "/anthropic" in api_base
-    )
+    """是否走 Anthropic 协议（DeepSeek 先匹配，plan-601-2495）。"""
+    return resolve_protocol(model) == "anthropic"
+
+
+def resolve_api_base(model: dict, anthropic: bool) -> str:
+    """按官方字段优先级取请求基址（OpenAI 面优先 apiBaseOpenAI，Anthropic 面优先 apiBaseAnthropic）。"""
+    return _first_string_by_keys(model, _ANTHROPIC_BASE_KEYS if anthropic else _OPENAI_BASE_KEYS)
 
 
 # plan-147-674: 视觉系模型 identity 兜底——上游目录缺 isMultimodal 字段时，
@@ -193,17 +272,24 @@ def _parse_config_models(assistant: dict) -> list[dict]:
         default_opts = m.get("defaultCompletionOptions") or {}
         completion_opts = {**(default_opts if isinstance(default_opts, dict) else {}),
                            **(m.get("completionOptions") or {} if isinstance(m.get("completionOptions"), dict) else {})}
-        api_base = m.get("apiBase") or ""
-        api_base_anthropic = m.get("apiBaseAnthropic") or ""
-        # 协议判定对齐参考项目 isAnthropicProtocolModel：只看 provider/identity/apiBase
-        # （apiBaseAnthropic 字段只是双端点模型的备选，不参与协议选择）
-        anthropic = _is_anthropic(m)
+        # plan-601-2495：协议判定与基址选择对齐官方 modelClient.js:61-163——显式
+        # protocol 优先、DeepSeek 先匹配、名称按词边界匹配；OpenAI 面优先 apiBaseOpenAI。
+        protocol = resolve_protocol(m)
+        anthropic = protocol == "anthropic"
         entries.append({
             "name": name,
             "api_key": m.get("apiKey") or "",
-            # Anthropic 协议优先 apiBaseAnthropic（kimi 等双端点模型）
-            "base_url": ((api_base_anthropic or api_base) if anthropic else api_base),
+            "base_url": resolve_api_base(m, anthropic).rstrip("/"),
             "anthropic": anthropic,
+            "deepseek": protocol == "deepseek",
+            # 官方 buildAnthropicHeaders 取 model.anthropicVersion ?? anthropic_version（modelClient.js:228）
+            "anthropic_version": _first_text(m.get("anthropicVersion"), m.get("anthropic_version")),
+            "protocol": str(m.get("protocol") or ""),
+            "api_protocol": str(m.get("apiProtocol") or ""),
+            "endpoints": {k: m[k] for k in ENDPOINT_KEYS if _string_value(m.get(k))},
+            "identity": {k: m[k] for k in _IDENTITY_KEYS if m.get(k)},
+            "chat_options": dict(chat_options),
+            "top_level_prompts": {k: m.get(k) or "" for k in _TOP_LEVEL_PROMPT_KEYS},
             "system_message": system_message,
             "completion_options": completion_opts,
             "request_headers": (m.get("requestOptions") or {}).get("headers") or {},
@@ -213,6 +299,41 @@ def _parse_config_models(assistant: dict) -> list[dict]:
             "is_multimodal": _is_multimodal_model(m),
         })
     return entries
+
+
+def entry_meta(entry: dict, name: str = "") -> dict:
+    """目录条目 → 模型行 ta3_meta 的增量字段（纯函数，便于单测）。
+
+    plan-601-2495：除原有字段外补存官方请求构造要读的字段——anthropicVersion、显式
+    protocol、DeepSeek 判定、显式端点、identity 各字段，以及 persona 选择用的
+    chatOptions / 顶层 base*SystemMessage（官方 systemPromptAssembly.js:22-39）。
+    原有 systemMessage 保持不变，旧代码继续可用。
+    """
+    chat_options = entry.get("chat_options") or {}
+    meta = {
+        "systemMessage": entry.get("system_message") or "",
+        "anthropic": bool(entry.get("anthropic")),
+        "deepseek": bool(entry.get("deepseek")),
+        "provider": entry.get("provider") or "",
+        "completionOptions": entry.get("completion_options") or {},
+        "requestHeaders": entry.get("request_headers") or {},
+        "title": entry.get("title") or name or entry.get("name") or "",
+        "orgId": entry.get("org_id") or "",
+        "orgName": entry.get("org_name") or "",
+        "profileId": entry.get("profile_id") or "",
+        "anthropicVersion": entry.get("anthropic_version") or "",
+        "protocol": entry.get("protocol") or "",
+        "apiProtocol": entry.get("api_protocol") or "",
+        "endpoints": dict(entry.get("endpoints") or {}),
+        "identity": dict(entry.get("identity") or {}),
+        # 原样保存 chatOptions，并保证 persona 相关键始终存在（缺省空串）
+        "chatOptions": {**{k: "" for k in _CHAT_OPTION_PROMPT_KEYS}, **dict(chat_options)},
+    }
+    for k, v in (entry.get("top_level_prompts") or {}).items():
+        meta[k] = v or ""
+    for k in _TOP_LEVEL_PROMPT_KEYS:
+        meta.setdefault(k, "")
+    return meta
 
 
 def _is_success(body: dict) -> bool:
@@ -465,17 +586,7 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
             if not meta.get("multimodal_override"):
                 m.is_multimodal = bool(entry.get("is_multimodal"))
             m.api_format = "ta3"
-            meta.update({
-                "systemMessage": entry.get("system_message") or "",
-                "anthropic": bool(entry.get("anthropic")),
-                "provider": entry.get("provider") or "",
-                "completionOptions": entry.get("completion_options") or {},
-                "requestHeaders": entry.get("request_headers") or {},
-                "title": entry.get("title") or name,
-                "orgId": entry.get("org_id") or "",
-                "orgName": entry.get("org_name") or "",
-                "profileId": entry.get("profile_id") or "",
-            })
+            meta.update(entry_meta(entry, name))
             m.ta3_meta = meta
             updated_local += 1
         # v0.5.13 修复：Ta3Auth 主键是自增 id，不是 provider_id——此前 s.get(Ta3Auth,

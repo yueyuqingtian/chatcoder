@@ -13,8 +13,11 @@ from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
-# 每次最多问题数（防止模型刷屏）
-_MAX_QUESTIONS = 4
+# 每次最多问题数（防止模型刷屏）。
+# plan-598-2517：4 → 8。旧值 4 配合 run() 里的静默切片，会让模型一次抛 5 个问题时
+# 第 5 个被无提示地丢掉——模型以为问了 5 个、用户只看到 4 个，后续还会基于“用户已答第 5 题”
+# 继续推理。改为 8（前端分步渲染本身无压力），并在超限时把“已忽略第 N 题”回给模型。
+_MAX_QUESTIONS = 8
 
 
 def _normalize_option(opt: Any) -> str:
@@ -68,7 +71,7 @@ class AskUserQuestionTool(Tool):
         "能从代码库/文档/会话历史中查到的事实不要问（先自行探索）；"
         "只问真正的决策点。"
         "问题必须简洁、选项互斥且覆盖主要可能，"
-        "相关的问题合并到一次调用中（最多 4 个），不要反复打断用户；"
+        "相关的问题合并到一次调用中（最多 8 个），不要反复打断用户；"
         "allow_custom 为 true 时用户可自由输入选项之外的答案。"
     )
 
@@ -83,9 +86,11 @@ class AskUserQuestionTool(Tool):
                     "properties": {
                         "questions": {
                             "type": "array",
+                            "maxItems": _MAX_QUESTIONS,
                             "description": (
-                                "问题列表（1-4 个）。每个问题包含 question 文本与 options 选项数组；"
+                                f"问题列表（1-{_MAX_QUESTIONS} 个）。每个问题包含 question 文本与 options 选项数组；"
                                 "allow_custom 为 true 时用户可自由输入答案。"
+                                f"超过 {_MAX_QUESTIONS} 个时后续问题会被忽略（请不要依赖被忽略的问题）。"
                             ),
                             "items": {
                                 "type": "object",
@@ -111,6 +116,11 @@ class AskUserQuestionTool(Tool):
         questions = args.get("questions") or []
         if not isinstance(questions, list) or not questions:
             return ToolResult(ok=False, output="", error="questions 不能为空")
+        # plan-598-2517：截断不能静默——被丢掉的问题模型以为问过了，会基于不存在的回答
+        # 继续推理（用户实测：AI 说“清理/还原那项没作答”，而那条问题根本没展示给用户）。
+        # 这里记录被忽略的区间，随 tool result 一同回给模型，让它知道哪些问题没问出口。
+        _requested = len(questions)
+        _dropped = _requested - _MAX_QUESTIONS if _requested > _MAX_QUESTIONS else 0
         questions = questions[:_MAX_QUESTIONS]
         # v36 紧急修复：规范化选项——模型常把 options 写成 [{label, description}] 对象数组，
         # 旧前端把对象当 React 子元素渲染会抛 React #31 并整页崩溃（用户实测）。
@@ -146,6 +156,13 @@ class AskUserQuestionTool(Tool):
             )
         return ToolResult(
             ok=True,
-            output="用户回答:\n" + json.dumps(answer, ensure_ascii=False, indent=2),
-            data={"answer": answer},
+            output="用户回答:\n" + json.dumps(answer, ensure_ascii=False, indent=2)
+            + (
+                # plan-598-2517：明确告知模型这部分问题**从未展示给用户**，不要当作已问过
+                f"\n\n注意：本次共提交 {_requested} 个问题，超过单次上限 {_MAX_QUESTIONS}，"
+                f"第 {_MAX_QUESTIONS + 1}~{_requested} 个问题（共 {_dropped} 个）**未被展示给用户**，"
+                "因此没有对应回答。若仍需这些信息，请另起一次提问。"
+                if _dropped else ""
+            ),
+            data={"answer": answer, "dropped_questions": _dropped},
         )

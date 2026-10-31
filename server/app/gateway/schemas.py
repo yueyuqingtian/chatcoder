@@ -348,7 +348,9 @@ class HookConfigCreate(BaseModel):
 # ── 记忆 ──
 class MemoryEntryOut(BaseModel):
     id: int
-    session_id: int
+    # plan-537-2256：来源会话删除后 session_id 被外键置空（SET NULL），
+    # 项目/全局记忆会继续保留；此处必须允许 None，否则列表接口整体 500。
+    session_id: int | None = None
     turn_id: int | None = None
     text: str
     kind: str = "fact"

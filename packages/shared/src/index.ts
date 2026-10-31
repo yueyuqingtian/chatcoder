@@ -558,7 +558,8 @@ export interface HookConfigOut {
 
 export interface MemoryEntryOut {
   id: number;
-  session_id: number;
+  /** 来源会话；project/global 记忆在来源会话删除后为 null（plan-537-2256） */
+  session_id: number | null;
   turn_id: number | null;
   text: string;
   kind: string;

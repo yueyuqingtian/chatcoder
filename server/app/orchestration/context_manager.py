@@ -126,6 +126,11 @@ class ContextBundle:
     # 本轮规则锚点（紧贴用户消息）。单独保留一份：engine 的「确认执行」路径会整体
     # 重写 instruction（换成方案文档指令），需要把锚点原样拼回去而不是重新构造。
     rules_anchor: str = ""
+    # plan-598-2482: ta3 对齐官方客户端——官方最终只下发**一条** system 消息
+    # （systemPromptAssembly.js:273-279），而本地额外产出的 developer 规则消息出站后会被
+    # 降级成 system，导致同一请求出现多条 system。此开关只在 ta3 分支置 True：
+    # 规则段与 developer 段全部并入首条 system，其余供应商保持原分流不变。
+    merge_developer_into_system: bool = False
 
     def to_messages(self) -> list[ChatMessage]:
         """组装 system + developer 段 + 历史 + user 指令。
@@ -133,7 +138,12 @@ class ContextBundle:
         plan-19-82 增强：规则段独立为一条 developer 消息（紧随首条 developer 之后），
         避免与工具说明/结构/记忆平铺在同一条消息里被稀释——对齐 ZCode 把
         userInstructions 放进独立 meta_user 通道的做法。
+
+        plan-598-2482: merge_developer_into_system=True（仅 ta3）时改为把规则段与
+        developer 段依次并入首条 system 尾部，本次请求只产出一条 system 消息。
         """
+        if self.merge_developer_into_system:
+            return self._to_messages_merged()
         messages = [ChatMessage(role="system", content=self.system)]
         # 规则通道优先落位：模型对"紧邻 system 的独立段落"注意力高于长段落中段。
         if self.rules_parts:
@@ -149,6 +159,28 @@ class ContextBundle:
         # 模型倾向续写旧内容。显式声明"上一任务已结束、以下是新指令"可显著降低该倾向。
         if self.task_boundary and self.history:
             messages.append(ChatMessage(role="system", content=self.task_boundary))
+        if self.instruction or self.instruction_blocks:
+            messages.append(ChatMessage(
+                role="user", content=self.instruction,
+                content_blocks=self.instruction_blocks,
+            ))
+        return messages
+
+    def _to_messages_merged(self) -> list[ChatMessage]:
+        """ta3 专用：规则段与 developer 段全部并入首条 system（plan-598-2482）。
+
+        官方装配把 persona 主体与各内容段合成一条 system；本地若继续把它们拆成
+        独立 developer 消息，出站会变成多条 system，与官方请求结构不一致。
+        内容顺序保持「规则 → developer 段」，与官方内容段追加顺序同向。
+        任务边界标记（仅当有历史时存在）同样并入 system 尾部——它不能保留独立
+        system 消息，否则本次请求又变成两条 system。
+        """
+        merged = [*self.rules_parts, *self.developer_parts]
+        if self.task_boundary and self.history:
+            merged.append(self.task_boundary)
+        system = "\n\n".join([self.system, *merged]).strip() if merged else self.system
+        messages = [ChatMessage(role="system", content=system)]
+        messages.extend(self.history)
         if self.instruction or self.instruction_blocks:
             messages.append(ChatMessage(
                 role="user", content=self.instruction,
@@ -548,6 +580,555 @@ async def _load_memories(db: AsyncSession, session_id: int, project_id: int | No
     except Exception:
         logger.warning("[context] 记忆加载失败 session=%s", session_id, exc_info=True)
     return ""
+
+
+# ─────────────── ta3 官方记忆与项目上下文注入（plan-598-2482） ───────────────
+# 官方客户端的记忆注入由 memory/promptBuilder.js 产出，分两段：
+#   ① <memory_instructions>：记忆系统说明（存储架构 / 记忆类型 / 不要保存 / 工具入口）
+#   ② <system-reminder> + # 项目记忆索引：**只列索引**（每条一行标题+文件名+一句描述），
+#      正文不进上下文；索引文件 MEMORY.md 超 200 行或 25KB 时截断并加 WARNING
+# 全局目录存 user / feedback，项目目录存 project / reference。
+_TA3_MEMORY_INDEX_MAX_LINES = 200
+_TA3_MEMORY_INDEX_MAX_BYTES = 25000
+_TA3_MEMORY_INDEX_WARNING = "> WARNING: 索引文件已超出上限被截断。请清理或合并旧记忆条目。"
+
+
+def _ta3_memory_system_prompt(global_dir: str, project_dir: str) -> str:
+    """官方 <memory_instructions> 段（逐字对齐 memory/promptBuilder.js:12-39）。"""
+    return (
+        "<memory_instructions>\n"
+        "# 项目记忆系统\n"
+        "\n"
+        "你拥有一个持久化的文件记忆系统，用于跨对话记住重要信息。\n"
+        "\n"
+        "## 存储架构\n"
+        f"- 全局目录 `{global_dir}`：存放用户偏好、行为纠正，跨项目通用\n"
+        f"- 项目目录 `{project_dir}`：存放项目上下文、外部引用，按项目隔离\n"
+        "\n"
+        "## 记忆类型\n"
+        "- user：用户角色、偏好、技术背景，存全局目录\n"
+        "- feedback：跨项目通用的纠正和确认，存全局目录\n"
+        "- project：项目特定决策、约束、API 约定，存项目目录\n"
+        "- reference：外部系统指针，存项目目录\n"
+        "\n"
+        "feedback 和 project 类型应包含 Why: 和 How to apply: 行。\n"
+        "\n"
+        "## 不要保存\n"
+        "- 可通过阅读代码、文档、git 历史直接获得的信息\n"
+        "- 临时任务状态、调试过程、变更过程记录\n"
+        "- 已写入项目文档的内容\n"
+        "- 代码实现细节，例如函数参数、字段命名、组件 prop\n"
+        "\n"
+        "如果用户明确要求记住某事，使用 generate_project_memory 工具保存。\n"
+        "如果需要查看已有记忆，使用 get_project_memory 工具。\n"
+        "使用记忆前应验证其中提到的文件路径、函数名、配置项是否仍然存在。\n"
+        "</memory_instructions>"
+    )
+
+
+def _ta3_truncate_index(content: str) -> str:
+    """按官方 truncateIndex 同规则截断索引（200 行 / 25000 字节）。"""
+    lines = str(content or "").split("\n")
+    truncated = False
+    if len(lines) > _TA3_MEMORY_INDEX_MAX_LINES:
+        lines = lines[:_TA3_MEMORY_INDEX_MAX_LINES]
+        truncated = True
+    result = "\n".join(lines)
+    raw = result.encode("utf-8")
+    if len(raw) > _TA3_MEMORY_INDEX_MAX_BYTES:
+        cut = raw[:_TA3_MEMORY_INDEX_MAX_BYTES].decode("utf-8", errors="ignore")
+        idx = cut.rfind("\n")
+        result = cut[:idx] if idx > 0 else cut
+        truncated = True
+    if truncated:
+        result = f"{result.rstrip()}\n\n{_TA3_MEMORY_INDEX_WARNING}\n"
+    return result
+
+
+_ONE_DAY_SECONDS = 86400
+
+
+def _ta3_memory_age_days(entry, now=None) -> int:
+    """条目距今天数（官方 memoryAgeDays：floor((now - mtime) / 1 天)，下限 0）。
+
+    plan-601-2495：MemoryEntry 没有 created_at / updated_at / age_days
+    （persistence/models/memory.py:12-48），官方用文件 mtime，这里取最接近「最后修改」
+    语义的 `generated_at`（写入/整合时间）；`last_usage_at` 只代表被检索命中，不代表内容更新。
+    解析失败按 0 天处理（不提示陈旧，宁缺勿误）。
+    """
+    from datetime import datetime, timezone
+
+    raw = getattr(entry, "generated_at", None)
+    if not raw:
+        return 0
+    try:
+        if isinstance(raw, datetime):
+            ts = raw
+        else:
+            ts = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00").replace(" ", "T", 1))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return max(0, int((current - ts).total_seconds() // _ONE_DAY_SECONDS))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ta3_memory_slug(entry) -> str:
+    """记忆条目的稳定文件名主干（对应官方 `{name}.md`，utils.sanitizeFileName 同口径）。
+
+    plan-601-2495：chatcoder 记忆存库不落文件，官方索引行要求 `[name](name.md)`；
+    用 `m{id}-{正文前 24 字}` 生成：id 保证唯一与稳定（正文改动不改 id），
+    正文片段让模型能从名字看出主题。字符集按官方 sanitizeFileName 收窄。
+    """
+    import re as _re
+
+    eid = getattr(entry, "id", None)
+    head = " ".join(str(getattr(entry, "text", "") or "").split())[:24]
+    stem = _re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fff-]", "_", head)
+    stem = _re.sub(r"_+", "_", stem).strip("_")
+    prefix = f"m{eid}" if eid is not None else "memory"
+    return f"{prefix}-{stem}" if stem else prefix
+
+
+def _ta3_memory_description(entry) -> str:
+    """一句话摘要（官方 index 行的 hook / description）：取正文首句，限 80 字。"""
+    import re as _re
+
+    text = " ".join(str(getattr(entry, "text", "") or "").split())
+    if not text:
+        return "无描述"
+    first = _re.split(r"(?<=[。！？!?；;])\s*|(?<=\.)\s+", text, maxsplit=1)[0].strip() or text
+    return first if len(first) <= 80 else first[:79] + "…"
+
+
+def _ta3_index_line(entry) -> str:
+    """官方索引行 `- [name](name.md) — description`（indexManager.js:51,75）。"""
+    name = _ta3_memory_slug(entry)
+    return f"- [{name}]({name}.md) — {_ta3_memory_description(entry)}"
+
+
+def _ta3_freshness_warnings(entries: list, now=None) -> str:
+    """陈旧记忆提醒行（官方 appendFreshnessWarnings 的 staleEntries，promptBuilder.js:66-77）。
+
+    官方按文件名升序列出 > 1 天未更新的条目：`- \\`{file}\\`: N 天前更新，…`。
+    """
+    rows: list[tuple[str, int]] = []
+    for e in entries:
+        days = _ta3_memory_age_days(e, now)
+        if days > 1:
+            rows.append((f"{_ta3_memory_slug(e)}.md", days))
+    rows.sort(key=lambda r: r[0])
+    return "\n".join(f"- `{f}`: {d} 天前更新，内容可能已过时，使用前请验证" for f, d in rows)
+
+
+def _ta3_append_freshness(index_content: str, entries: list, now=None) -> str:
+    """官方 appendFreshnessWarnings：在（已截断的）索引后追加「> 陈旧记忆提醒：」块。"""
+    warnings = _ta3_freshness_warnings(entries, now)
+    if not warnings:
+        return index_content
+    return f"{index_content}\n\n> 陈旧记忆提醒：\n{warnings}"
+
+
+def _ta3_data_root() -> str:
+    """chatcoder 真实数据根目录（官方 getContinueGlobalPath 的对应物）。
+
+    plan-601-2495：settings 没有 data_dir 字段（core/config.py）。真实数据根与
+    run_server._resolve_data_dir / core.logging._writable_data_dir 同口径：
+    打包后为 %LOCALAPPDATA%/chatcoder（chatcoder.db 所在目录），开发模式为项目根。
+    这里只做路径插值、不创建目录——chatcoder 的记忆存数据库，模型应经
+    get_project_memory 工具读取，路径仅用于说明「存储分区」，读不到也不会出错。
+    """
+    try:
+        from app.core.logging import _writable_data_dir
+
+        return str(_writable_data_dir())
+    except Exception:  # noqa: BLE001 — 解析失败时退回用户目录下的同名目录
+        return str(Path.home() / ".chatcoder")
+
+
+def _ta3_sanitize_path(value: str) -> str:
+    """官方 paths.sanitizePath：非字母数字一律换成 '-'，合并并去首尾 '-'。"""
+    import re as _re
+
+    out = _re.sub(r"[^a-zA-Z0-9]", "-", str(value or "default"))
+    out = _re.sub(r"-+", "-", out).strip("-")
+    return out or "default"
+
+
+def _ta3_memory_dirs(workspace: str) -> tuple[str, str]:
+    """官方 getBothMemoryDirs 的目录形态：`{root}/memories` 与 `{root}/projects/{slug}/memory`。"""
+    root = Path(_ta3_data_root())
+    return (
+        str(root / "memories"),
+        str(root / "projects" / _ta3_sanitize_path(workspace) / "memory"),
+    )
+
+
+async def _load_ta3_memory_entries(db: AsyncSession, session_id: int | None,
+                                   project_id: int | None) -> list:
+    """官方 MEMORY.md 是**全量**索引（readIndex 读整份文件，再 200 行截断）。
+
+    plan-601-2495：此前复用 load_memories 的 5/4/3 分层预算只取 12 条，与官方「全量索引」
+    口径不一致。这里直接读三层全部有效条目（排除候选区、已被取代、已过期），
+    按官方索引的追加顺序（updateIndex 每次 push 到末尾 → 写入时间升序）排列。
+    行数上限交给 _ta3_truncate_index 的 200 行 / 25KB 截断。
+    """
+    from sqlalchemy import or_, select
+
+    from app.persistence.models.memory import MemoryEntry
+
+    try:
+        from app.services.memory_service import _is_expired
+    except Exception:  # noqa: BLE001
+        def _is_expired(_e):  # type: ignore[no-redef]
+            return False
+
+    conds = [MemoryEntry.scope == "global"]
+    if project_id is not None:
+        conds.append((MemoryEntry.scope == "project") & (MemoryEntry.project_id == project_id))
+    if session_id:
+        conds.append(
+            ((MemoryEntry.scope == "session") | MemoryEntry.scope.is_(None))
+            & (MemoryEntry.session_id == session_id)
+        )
+    res = await db.execute(
+        select(MemoryEntry).where(
+            MemoryEntry.candidate.is_(False),
+            MemoryEntry.superseded_by.is_(None),
+            or_(*conds),
+        ).order_by(MemoryEntry.generated_at.asc(), MemoryEntry.id.asc())
+    )
+    return [e for e in res.scalars().all() if not _is_expired(e)]
+
+
+async def _build_ta3_memory_injection(db: AsyncSession, session_id: int | None,
+                                      project_id: int | None = None,
+                                      workspace: str = "") -> str:
+    """ta3 官方格式的记忆注入（memory/promptBuilder.js:88-112）。
+
+    结构 = `<memory_instructions>` 说明段 +（有索引时）`<system-reminder>` 里的
+    `## 全局记忆索引` / `## 项目记忆索引`。只列索引不注入正文，正文靠 get_project_memory 取。
+
+    plan-601-2495 修正：
+    - 无记忆时也注入说明段（官方 injection = systemPrompt + (context ? … : '')）；
+    - 先按官方 truncateIndex 截断索引，再追加陈旧提醒（官方 readIndex 读到的是 updateIndex
+      写盘时已截断的内容，appendFreshnessWarnings 在其后追加，promptBuilder.js:94,97）；
+    - 全量加载（不再 5/4/3 分层）；本会话（session）层官方无对应概念，并入项目段；
+    - 目录插值用 chatcoder 真实数据根 + 官方 paths.js 形态。
+    """
+    entries: list = []
+    try:
+        entries = await _load_ta3_memory_entries(db, session_id, project_id)
+    except Exception:
+        logger.debug("[context] ta3 记忆索引加载失败(非阻塞，仅注入说明段)", exc_info=True)
+        entries = []
+
+    global_entries = [e for e in entries if (getattr(e, "scope", "") or "") == "global"]
+    project_entries = [e for e in entries if (getattr(e, "scope", "") or "") != "global"]
+    global_entries = [e for e in global_entries if str(getattr(e, "text", "") or "").strip()]
+    project_entries = [e for e in project_entries if str(getattr(e, "text", "") or "").strip()]
+
+    parts: list[str] = []
+    for title, items in (("## 全局记忆索引", global_entries), ("## 项目记忆索引", project_entries)):
+        if not items:
+            continue
+        index = _ta3_truncate_index("\n".join(_ta3_index_line(e) for e in items)).strip()
+        parts.append(f"{title}\n{_ta3_append_freshness(index, items)}")
+
+    global_dir, project_dir = _ta3_memory_dirs(workspace)
+    system_prompt = _ta3_memory_system_prompt(global_dir, project_dir)
+    if not parts:
+        return system_prompt
+    return (
+        system_prompt
+        + "\n\n<system-reminder>\n# 项目记忆索引\n"
+        + "\n\n".join(parts)
+        + "\n</system-reminder>"
+    )
+
+
+# 官方 PROJECT_CONTEXT_MAX_CHARS（systemPromptAssembly.js:164）：按 code point 计数
+_TA3_PROJECT_CONTEXT_MAX_CHARS = 32 * 1024
+
+
+def _ta3_user_level_rules(workspace: str) -> str:
+    """用户级块的正文 = 真实 ~/.claude/CLAUDE.md + 设置中心全局规则 + 设置中心工作目录规则。
+
+    plan-601-2495（用户决策）：官方用户级块只读 ~/.claude/CLAUDE.md；chatcoder 的
+    「设置中心全局规则 / 工作目录规则」（user_rules_loader，数据存 CHATCODER_USER_CONFIG
+    即 ~/.chatcoder/config.json 的 global_rules / rules_workdir_<路径>）语义上就是用户级长期约定，
+    并入同一块输出，避免 ta3 下这两类规则完全丢失。各来源之间以空行分隔并标注出处。
+    """
+    chunks: list[str] = []
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+    try:
+        if claude_md.is_file() and claude_md.stat().st_size > 0:
+            raw = claude_md.read_text(encoding="utf-8", errors="ignore")
+            if raw.strip():
+                chunks.append(raw)
+    except OSError:
+        logger.debug("[context] 读取用户级 CLAUDE.md 失败(非阻塞)", exc_info=True)
+    try:
+        from app.orchestration.user_rules_loader import (
+            load_global_rules_labeled,
+            load_workdir_rules_labeled,
+        )
+
+        _gr = load_global_rules_labeled()
+        if _gr.strip():
+            chunks.append(_gr)
+        _wd = load_workdir_rules_labeled(workspace) if workspace else ""
+        if _wd.strip():
+            chunks.append(_wd)
+    except Exception:
+        logger.debug("[context] 设置中心规则加载失败(非阻塞)", exc_info=True)
+    return "\n\n".join(chunks)
+
+
+def _ta3_read_context_block(raw: str, label: str, file_path: str, used: dict) -> str:
+    """官方 readProjectContextFile 的截断口径（systemPromptAssembly.js:165-196）。
+
+    计数按 code point（Python str 长度即 code point 数，与官方 `[...sliced]` 一致），
+    超限截断并加「（内容过长，已截断）」；截断提示不计入额度。
+    """
+    if not raw:
+        return ""
+    remaining = _TA3_PROJECT_CONTEXT_MAX_CHARS - used["count"]
+    if remaining <= 0:
+        return ""
+    if len(raw) <= remaining:
+        used["count"] += len(raw)
+        return f"--- {label} ({file_path}) ---\n{raw}"
+    truncated = raw[:remaining]
+    used["count"] += len(truncated)
+    return f"--- {label} ({file_path}) ---\n{truncated}\n\n（内容过长，已截断）"
+
+
+def _build_ta3_project_context(workspace: str) -> str:
+    """官方 <project-context> 段（systemPromptAssembly.js:198-223）。
+
+    - 工作区块只读工作区 `AGENTS.md`（官方只读它，不读 CLAUDE.md / .cursorrules 等）；
+    - 工作区为空仍输出用户级块（官方 candidates 总会 push 用户级 CLAUDE.md）；
+    - plan-601-2495：用户级块 = ~/.claude/CLAUDE.md + 设置中心全局规则 + 工作目录规则；
+    - 各部分以 `\\n\\n` 拼接（官方 `.join('\\n\\n')`），32KB 总上限按 code point 计。
+    """
+    ws = str(workspace or "").strip()
+    if ws.startswith("file://"):
+        ws = ws[len("file://"):]
+    used = {"count": 0}
+    parts: list[str] = []
+    if ws:
+        agents_md = Path(ws) / "AGENTS.md"
+        try:
+            if agents_md.is_file() and agents_md.stat().st_size > 0:
+                block = _ta3_read_context_block(
+                    agents_md.read_text(encoding="utf-8", errors="ignore"),
+                    "项目级 AGENTS.md", str(agents_md), used,
+                )
+                if block:
+                    parts.append(block)
+        except OSError:
+            logger.debug("[context] 读取 AGENTS.md 失败(非阻塞)", exc_info=True)
+    user_block = _ta3_read_context_block(
+        _ta3_user_level_rules(ws), "用户级 CLAUDE.md",
+        str(Path.home() / ".claude" / "CLAUDE.md"), used,
+    )
+    if user_block:
+        parts.append(user_block)
+    if not parts:
+        return ""
+    return "\n\n".join([
+        "<project-context>",
+        "以下指令来自 AGENTS.md / CLAUDE.md，是项目或用户级的长期约定（构建/测试命令、代码风格、架构说明等）。请遵守这些约定，除非用户当前消息明确要求偏离：",
+        *parts,
+        "</project-context>",
+    ])
+
+
+def _build_ta3_skills_section(skills: list) -> str:
+    """官方 `<available_skills>` 段（skillService.js:563-571）。
+
+    按 name 升序；每项 `- name:` / `  description:` / 可选 `  whenToUse:`（chatcoder 的
+    trigger 字段语义对应）；末尾固定一句 ReadSkill 引导（模型可见的技能读取工具名）。
+    """
+    if not skills:
+        return ""
+
+    def _one_line(v) -> str:
+        return " ".join(str(v or "").split())
+
+    rows: list[str] = []
+    for s in sorted(skills, key=lambda x: str(getattr(x, "name", "") or "")):
+        name = str(getattr(s, "name", "") or "").strip()
+        if not name:
+            continue
+        item = [f"- name: {name}", f"  description: {_one_line(getattr(s, 'description', ''))}"]
+        when = _one_line(getattr(s, "trigger", ""))
+        if when:
+            item.append(f"  whenToUse: {when}")
+        rows.append("\n".join(item))
+    if not rows:
+        return ""
+    return (
+        "<available_skills>\n" + "\n".join(rows) + "\n</available_skills>\n"
+        "Use the ReadSkill tool to read full instructions before applying a skill."
+    )
+
+
+def _build_ta3_workspace_section(workspace_dirs: list[str]) -> str:
+    """官方工作区目录段（systemPromptAssembly.js:73-87，含去重归一）。"""
+    dirs: list[str] = []
+    for d in workspace_dirs or []:
+        d = str(d or "").strip()
+        if d and d not in dirs:
+            dirs.append(d)
+    if not dirs:
+        return ""
+    return "\n".join([
+        f"当前桌面项目明确绑定了 {len(dirs)} 个工作区目录。这里的“工作区”是桌面应用配置的本地目录，不是 pnpm、npm、IDE 或代码仓库内部自行定义的 workspace。",
+        "以下列表是当前项目工作区数量与路径的唯一准确信息；回答“有几个工作区”“有哪些工作区”时必须完整依据此列表，不要只根据默认目录或仓库文件推断：",
+        *[f"{i + 1}. {d}{'（默认目录）' if i == 0 else ''}" for i, d in enumerate(dirs)],
+        "这些目录都属于当前项目，不属于跨项目路径。访问非默认目录时，请在文件工具参数中使用对应的绝对路径。",
+    ])
+
+
+def _ta3_system_reminder(body: str) -> str:
+    """把 chatcoder 自有的功能性上下文包成 `<system-reminder>`，放进当轮 user 消息（plan-601-2495）。"""
+    body = str(body or "").strip()
+    return f"<system-reminder>\n{body}\n</system-reminder>" if body else ""
+
+
+def _ta3_visible(real_name: str) -> str:
+    """ta3 会话里模型可见的工具名（Read / ReadSkill / mcp__{拓展 serverId}__xxx …）。"""
+    try:
+        from app.models.providers.ta3_tool_aliases import visible_tool_name
+
+        return visible_tool_name(real_name, True)
+    except Exception:  # noqa: BLE001 — 别名层不可用时原样返回
+        return real_name
+
+
+def _ta3_rewrite_tool_names(text: str, names: tuple[str, ...]) -> str:
+    """把提醒文本里的真实工具名替换为 ta3 可见名（按词边界，长名优先）。"""
+    import re as _re
+
+    out = str(text or "")
+    for n in sorted(set(names), key=len, reverse=True):
+        vis = _ta3_visible(n)
+        if vis != n:
+            out = _re.sub(rf"(?<![\w-]){_re.escape(n)}(?![\w-])", vis, out)
+    return out
+
+
+# 子代理 inherit_context 快照上限（plan-601-2495）。
+# 官方 fork 种子是「最后一个完整轮次之前的完整消息前缀」（providers/fork.js:33-44），
+# 超预算先由模型摘要成删节版，摘要不可用才退到最近 120 条（manager.js:42,120-125）。
+# chatcoder 在构建上下文阶段不发额外摘要请求，因此直接用 120 条兜底 + 总字符上限，
+# 字符上限取官方 project-context 同一 32K 口径，防止快照把子代理首轮请求撑爆。
+_INHERIT_MAX_MESSAGES = 120
+_INHERIT_MAX_CHARS = 32 * 1024
+_INHERIT_PER_MESSAGE_CHARS = 2000
+
+
+async def _load_completed_turns_snapshot(db: AsyncSession, session_id: int | None,
+                                         max_turns: int = _INHERIT_MAX_MESSAGES,
+                                         per_message_chars: int = _INHERIT_PER_MESSAGE_CHARS,
+                                         *, max_messages: int = _INHERIT_MAX_MESSAGES,
+                                         max_chars: int = _INHERIT_MAX_CHARS) -> str:
+    """已完成轮次快照的文本形态（非 ta3 子代理注入 developer 段用）。"""
+    rows = await _load_completed_turns_rows(
+        db, session_id, max_turns, per_message_chars,
+        max_messages=max_messages, max_chars=max_chars,
+    )
+    blocks: list[str] = []
+    current_turn: int | None = None
+    for turn_id, role, text in rows:
+        if turn_id != current_turn:
+            current_turn = turn_id
+            blocks.append(f"\n### Turn {turn_id}")
+        blocks.append(f"{role}: {text}")
+    return "\n".join(blocks).strip()
+
+
+async def _load_completed_turns_rows(db: AsyncSession, session_id: int | None,
+                                     # 官方 fork 种子取「全部已完成轮次」前缀，不按轮数限；
+                                     # 这里给一个足够大的轮数上限，真正的收缩由条数/字符上限负责
+                                     max_turns: int = _INHERIT_MAX_MESSAGES,
+                                     per_message_chars: int = _INHERIT_PER_MESSAGE_CHARS,
+                                     *, max_messages: int = _INHERIT_MAX_MESSAGES,
+                                     max_chars: int = _INHERIT_MAX_CHARS) -> list[tuple[int, str, str]]:
+    """加载本对话**已完成的轮次**快照行 `(turn_id, "User"|"Assistant", text)`。
+
+    plan-598-2482：对齐官方 SubAgent 的 inherit_context 语义——子代理拿到的是
+    「创建时刻」的已完成轮次快照，不含正在进行的这一轮，之后主对话再推进它也看不到。
+    只取 user/agent 的文本，跳过工具调用往返（工具结果会占掉大量预算）。
+
+    plan-601-2495 修复：
+    - 主代理消息落库的 sender_type 是 `agent`（core/enums.py:20 SenderType.AGENT），
+      此前过滤 `("user", "assistant")` 导致快照里只剩用户消息、助手结论全丢；
+    - 加总量上限（最近 120 条 / 32K 字符，见上方常量），超限从**最早**处丢弃，保留最近轮次，
+      并保证起点不落在助手消息上（与官方「起点不能落在工具结果上」同理，避免无头回复）。
+
+    只读查询，任何异常返回空列表（不阻塞派发）。
+    """
+    if not session_id:
+        return []
+    try:
+        from sqlalchemy import select
+
+        from app.core.enums import MsgType, SenderType
+        from app.persistence.models.message import Message
+        from app.persistence.models.turn import Turn
+
+        # 已完成的轮次（不含当前正在跑的 turn——它 status 不是 completed）
+        t_res = await db.execute(
+            select(Turn).where(Turn.session_id == session_id, Turn.status == "completed")
+            .order_by(Turn.id.desc()).limit(max_turns)
+        )
+        turn_ids = [t.id for t in reversed(list(t_res.scalars().all()))]
+        if not turn_ids:
+            return []
+        m_res = await db.execute(
+            select(Message).where(
+                Message.session_id == session_id,
+                Message.turn_id.in_(turn_ids),
+                Message.thread_id.is_(None),
+                Message.sender_type.in_((
+                    SenderType.USER.value, SenderType.AGENT.value,
+                    "assistant",  # 兼容旧数据
+                )),
+                Message.msg_type == MsgType.TEXT.value,
+                Message.deleted == False,  # noqa: E712 排除已回滚软删
+            ).order_by(Message.id.asc())
+        )
+        rows: list[tuple[int, str, str]] = []
+        for m in m_res.scalars().all():
+            text = ""
+            if isinstance(m.content, dict):
+                text = str(m.content.get("text") or "")
+            elif isinstance(m.content, str):
+                text = m.content
+            text = text.strip()
+            if not text:
+                continue
+            role = "User" if m.sender_type == SenderType.USER.value else "Assistant"
+            if len(text) > per_message_chars:
+                text = text[:per_message_chars] + "…（已截断）"
+            rows.append((m.turn_id, role, text))
+        if len(rows) > max_messages:
+            rows = rows[-max_messages:]
+        # 总字符上限：从最早处丢弃
+        total = sum(len(r[2]) + 12 for r in rows)
+        while rows and total > max_chars:
+            total -= len(rows[0][2]) + 12
+            rows.pop(0)
+        while rows and rows[0][1] != "User":
+            rows.pop(0)
+        return rows
+    except Exception:
+        logger.debug("[context] 加载已完成轮次快照失败 session=%s", session_id, exc_info=True)
+        return []
 
 
 async def _session_memory_summary(db: AsyncSession, session_id: int) -> str:
@@ -1061,6 +1642,12 @@ async def build_main_context(
     _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_src)
     _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
 
+    # plan-601-2495：ta3 下 system 只承载官方段（persona → 任务列表 → <available_skills> →
+    # 记忆 → <project-context> → 工作区目录，systemPromptAssembly.js:228-239）；chatcoder 自有
+    # 但功能必需的上下文（目标、可续跑任务、计划历史、压缩检查点、截断提示、本轮引用、附件）
+    # 收进 _ta3_reminders，最终以 <system-reminder> 放进当轮 user 消息。
+    _ta3_sys: dict[str, str] = {}
+    _ta3_reminders: list[str] = []
     if ta3_meta is not None:
         from app.orchestration.prompts.ta3_fusion import build_ta3_system_prompt
         system_prompt = build_ta3_system_prompt(
@@ -1093,6 +1680,10 @@ async def build_main_context(
         instruction=user_message,
         reply_language=_reply_lang,
         reply_language_source=_lang_source,
+        # plan-598-2482: ta3 对齐官方——官方最终只有一条 system 消息
+        # （systemPromptAssembly.js:273-279），ta3 下把规则段与 developer 段
+        # 一并并入 system；其余供应商保持原有分流（逐字节不变）。
+        merge_developer_into_system=ta3_meta is not None,
     )
     # v16（用户要求）：移除重建时的静默渐进摘要 —— 重建不再改写历史。
     # 此前按 0.85×窗口（且窗口口径可能与实际调用模型不一致）静默摘要并落库
@@ -1102,18 +1693,33 @@ async def build_main_context(
     # 1. Current Goal（plan-671：目标激活时为持久目标）。
     # 不再把本轮用户原文复制进 developer 段：它位于历史之前，原文每轮变化会让前缀失效（缓存不命中），
     # 且原文会在对话末尾再出现一次。非目标模式只留一句常量指引，原文以末尾的用户消息为准。
-    if goal and goal.get("text"):
-        bundle.developer_parts.append(
-            f"## Current Goal\n{goal['text'][:2000]}\n"
-            f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
-            f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
+    # plan-598-2482：官方 system 段里**没有** Current Goal / Reply Language /
+    # 派发子代理 / 操控子代理 等段落，ta3 下这些自造段一律跳过；
+    # 其他供应商保持原有行为（逐字节不变）。
+    if ta3_meta is None:
+        if goal and goal.get("text"):
+            bundle.developer_parts.append(
+                f"## Current Goal\n{goal['text'][:2000]}\n"
+                f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
+                f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
+            )
+        else:
+            bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
+        # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
+        # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
+        from app.orchestration.prompts.language import build_language_pin_line
+        bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
+    elif goal and goal.get("text"):
+        # plan-601-2495：官方目标续轮把「当前目标 + 结束方式」放在 role=user 的运行时消息里
+        # （goalRoundDriver.js:129-165：完成调 update_goal(complete)）。chatcoder 没有
+        # update_goal，结束工具是 goal_complete（ta3 下可见名由调用方 goal_tool_name 传入），
+        # 因此以 <system-reminder> 放当轮 user 消息，system 段保持官方结构。
+        _ta3_reminders.append(
+            f"[目标模式 已续跑 {goal.get('turns_used', 0)} 轮]\n"
+            f"当前目标：{goal['text'][:2000]}\n"
+            "请持续推进该目标：完成前先对照目标逐条核验证据（运行测试 / 读取结果）；"
+            f"确认目标已经达成后调用 {_ta3_visible(goal_tool_name)} 结束目标；未达成就继续推进，不要提前宣告完成。"
         )
-    else:
-        bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
-    # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
-    # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
-    from app.orchestration.prompts.language import build_language_pin_line
-    bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
     # 1.15 派发子代理（plan-549-2281）：子会话下线后，spawn_subagent 是唯一的并行执行通道。
     # 注入前先判身份——**子代理自己不再注入派发提示**（它不能再派下级，注入只会诱导
     # 它调用不存在的工具，这正是旧提示词在同一份上下文里自相矛盾的根因之一）；
@@ -1126,7 +1732,8 @@ async def build_main_context(
     )
     _is_legacy_child = bool(session is not None and getattr(session, "side_kind", None) == "sub")
     _dispatch_hint = subagent_dispatch_hint(_execution_mode, is_legacy_child=_is_legacy_child)
-    if _dispatch_hint:
+    # plan-598-2482：官方 system 段没有派发子代理 / 操控子代理提示，ta3 下跳过
+    if _dispatch_hint and ta3_meta is None:
         bundle.developer_parts.append(_dispatch_hint)
     # 1.16 GUI 操作交给操控子代理（原 plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
     # 且当前模式下发子代理工具时才注入；子代理自身不注入（它不能再派发）。
@@ -1135,129 +1742,180 @@ async def build_main_context(
     _operator_hint = operator_subagent_hint(
         _execution_mode, gui_tools=_gui_tools, is_legacy_child=_is_legacy_child,
     )
-    if _operator_hint:
+    if _operator_hint and ta3_meta is None:
         bundle.developer_parts.append(_operator_hint)
     # plan-549-2281：历史子会话（side_kind=sub）仍可打开并继续对话，但它没有子会话工具、
     # 也没有派发工具——给一条轻量约束，避免模型去找已不存在的入口。
     _legacy_hint = legacy_child_session_hint(_is_legacy_child)
-    if _legacy_hint:
+    if _legacy_hint and ta3_meta is None:
         bundle.developer_parts.append(_legacy_hint)
     # 1.3 Paused Subagents（plan-91-394）：上一轮中断、已保存进度的子代理。紧贴本轮用户消息之后，
     # 保证“继续”类意图与可续跑清单在注意力最高处同时出现。
+    # plan-601-2495：ta3 下这三类可续跑/待确认清单是功能必需（用户说「继续」时要续跑而不是重派），
+    # 但官方 system 没有对应段，改走当轮 user 消息里的 <system-reminder>，工具名换成可见名。
+    _paused_parts: list[str] = []
     if paused_subagents and enable_subagents:
-        bundle.developer_parts.append(_build_paused_subagents_block(paused_subagents))
+        _paused_parts.append(_build_paused_subagents_block(paused_subagents))
     if paused_workflows:
-        bundle.developer_parts.append(_build_paused_workflows_block(paused_workflows))
+        _paused_parts.append(_build_paused_workflows_block(paused_workflows))
     if workflow_decisions:
-        bundle.developer_parts.append(_build_workflow_decisions_block(workflow_decisions))
+        _paused_parts.append(_build_workflow_decisions_block(workflow_decisions))
+    if ta3_meta is None:
+        bundle.developer_parts.extend(_paused_parts)
+    else:
+        _ta3_reminders.extend(
+            _ta3_rewrite_tool_names(p, (
+                "resume_subagent", "spawn_subagent", "resume_workflow",
+                "plan_workflow", "decide_workflow",
+            ))
+            for p in _paused_parts
+        )
     # 1.2 Rule Documents（plan-19-82 步骤 4）：规则段**前移**到 developer 段最前部并加 MANDATORY 语义。
     # 现状（本轮改造前）规则在第 4/4.1 位且标题无强制语义，模型容易忽略 → 遵循度不足。
     # 加载提前到此，顺序：Global Rules（优先级最高）→ Project Rules（工作区文档 + 工作目录规则）。
     # plan-19-82 增强：规则改走独立通道（bundle.rules_parts → 单独一条 developer 消息），
     # 避免与工具说明/结构摘要/记忆平铺在同一条消息里被稀释；并附上冲突优先级裁决
     # （对齐 ZCode `# agentsMd` 的 "OVERRIDE any default behavior" 语义）。
-    _rule_fragments: list[str] = []
-    # 冲突优先级裁决：用户全局规则 > 项目规则文档 > 内置方法论（与系统提示口径一致）
-    _rule_fragments.append(
-        "## Rule Documents — MANDATORY\n"
-        "The rules below OVERRIDE default behavior and MUST be followed exactly as written. "
-        "Priority when they conflict: user Global Rules > project rule documents "
-        "(AGENTS.md / CLAUDE.md / .cursorrules / CODEBUDDY.md / QODER.md / .trae/rules / "
-        "GEMINI.md / .windsurfrules / .github/instructions …) > the built-in methodology."
-    )
-    try:
-        from app.orchestration.user_rules_loader import load_global_rules_labeled
-        _gr = load_global_rules_labeled()
-        if _gr:
-            _rule_fragments.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
-    except Exception:
-        logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
-    _rules_parts: list[str] = []
-    try:
-        _docs = await load_session_rules(workspace, project.rules_docs if project else None)
-        if _docs:
-            _rules_parts.append(_docs)
-    except Exception:
-        logger.debug("[context] 工作区规则文档加载失败(非阻塞)", exc_info=True)
-    try:
-        from app.orchestration.user_rules_loader import load_workdir_rules_labeled
-        _wd = load_workdir_rules_labeled(workspace)
-        if _wd:
-            _rules_parts.append(_wd)
-    except Exception:
-        logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
-    if _rules_parts:
+    # plan-598-2482：官方 system 段里**没有** Rule Documents / Global Rules /
+    # Project Rules 这三段（它们是 chatcoder 自有机制），ta3 下改用官方
+    # <project-context>（只取工作区 AGENTS.md + 用户级 ~/.claude/CLAUDE.md）；
+    # 其他供应商保持原有三段结构（逐字节不变）。
+    if ta3_meta is None:
+        _rule_fragments: list[str] = []
+        # 冲突优先级裁决：用户全局规则 > 项目规则文档 > 内置方法论（与系统提示口径一致）
         _rule_fragments.append(
-            "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
+            "## Rule Documents — MANDATORY\n"
+            "The rules below OVERRIDE default behavior and MUST be followed exactly as written. "
+            "Priority when they conflict: user Global Rules > project rule documents "
+            "(AGENTS.md / CLAUDE.md / .cursorrules / CODEBUDDY.md / QODER.md / .trae/rules / "
+            "GEMINI.md / .windsurfrules / .github/instructions …) > the built-in methodology."
         )
+        try:
+            from app.orchestration.user_rules_loader import load_global_rules_labeled
+            _gr = load_global_rules_labeled()
+            if _gr:
+                _rule_fragments.append(f"## Global Rules (MANDATORY — highest priority)\n{_gr}")
+        except Exception:
+            logger.debug("[context] 全局规则加载失败(非阻塞)", exc_info=True)
+        _rules_parts: list[str] = []
+        try:
+            _docs = await load_session_rules(workspace, project.rules_docs if project else None)
+            if _docs:
+                _rules_parts.append(_docs)
+        except Exception:
+            logger.debug("[context] 工作区规则文档加载失败(非阻塞)", exc_info=True)
+        try:
+            from app.orchestration.user_rules_loader import load_workdir_rules_labeled
+            _wd = load_workdir_rules_labeled(workspace)
+            if _wd:
+                _rules_parts.append(_wd)
+        except Exception:
+            logger.debug("[context] 工作目录规则加载失败(非阻塞)", exc_info=True)
+        if _rules_parts:
+            _rule_fragments.append(
+                "## Project Rules (MANDATORY)\n" + "\n\n".join(_rules_parts)
+            )
+        else:
+            _rule_fragments.append(
+                "## Project Rules\n(未检测到 AGENTS.md / CLAUDE.md 等项目规则文档。"
+                "如工作区存在约定，请按既有代码风格与目录结构执行。)"
+            )
+        bundle.rules_parts.extend(_rule_fragments)
     else:
-        _rule_fragments.append(
-            "## Project Rules\n(未检测到 AGENTS.md / CLAUDE.md 等项目规则文档。"
-            "如工作区存在约定，请按既有代码风格与目录结构执行。)"
-        )
-    bundle.rules_parts.extend(_rule_fragments)
+        # ta3：官方 <project-context> 取代三段规则（用户级块含设置中心全局/工作目录规则，plan-601-2495）
+        _ta3_sys["project_context"] = _build_ta3_project_context(workspace)
     # 1.3 本轮规则锚点：让规则**紧贴本轮用户消息**出现。
     # 用户反馈"规则遵循度不够"——规则段虽在 developer 段最前部，但与本轮指令之间隔着
     # 工具说明/结构摘要/记忆/历史消息，长会话下模型读到用户消息时规则已被稀释。
     # 这里把一条轻量锚点放进 instruction 前置，点名本轮**实际加载**的规则文档，
     # 使"读指令"与"遵循规则"在同一注意力窗口内完成。
-    try:
-        from app.orchestration.prompts import build_rules_anchor
-        from app.orchestration.rules_loader import list_rules_doc_names
-        _doc_names = await list_rules_doc_names(workspace, project.rules_docs if project else None)
-        bundle.rules_anchor = build_rules_anchor(
-            _reply_lang, _doc_names, language_source=_lang_source,
-        )
-        if bundle.instruction:
-            bundle.instruction = bundle.rules_anchor + "\n\n" + bundle.instruction
-    except Exception:
-        logger.debug("[context] 规则锚点注入失败(非阻塞)", exc_info=True)
+    # plan-598-2482: ta3 对齐官方——官方没有「每条用户消息前的规则锚点」这一段，
+    # ta3 下跳过（不影响其他供应商的既有行为）。
+    if ta3_meta is None:
+        try:
+            from app.orchestration.prompts import build_rules_anchor
+            from app.orchestration.rules_loader import list_rules_doc_names
+            _doc_names = await list_rules_doc_names(workspace, project.rules_docs if project else None)
+            bundle.rules_anchor = build_rules_anchor(
+                _reply_lang, _doc_names, language_source=_lang_source,
+            )
+            if bundle.instruction:
+                bundle.instruction = bundle.rules_anchor + "\n\n" + bundle.instruction
+        except Exception:
+            logger.debug("[context] 规则锚点注入失败(非阻塞)", exc_info=True)
     # 2. Working Directory & Tool Rules
+    # plan-598-2482：官方 system 段里**没有** Working directory / ## Tool Usage Rules /
+    # ## Project Structure（都在平台下发主体之后的内容段以外），ta3 下整段跳过；
+    # 官方唯一保留的尾段是「工作区目录列表」，由 buildWorkspaceDirectoriesSystemSection 负责。
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
         "\n\n## Tool Usage Rules\n"
         "Use tools via structured function calls. Never describe tool actions in natural language.\n"
         f"All paths are relative to the working directory: {workspace}."
     )
-    # v1.2: 注入 shell 环境说明，避免 agent 用错 shell 语法（Get-ChildItem/grep/… 报错）
-    ws_ctx += "\n\n" + shell_hint()
-    # plan-248-1258 M3.3: 注入代码符号索引状态——让 AI 在会话中自动识别项目是否已索引，
-    # 并在探索代码/文件/函数时主动使用 symbol_search / outline。
-    try:
-        _idx_hint = await _symbol_index_hint(workspace)
-        if _idx_hint:
-            ws_ctx += "\n\n" + _idx_hint
-    except Exception:
-        logger.debug("[context] 符号索引状态注入失败(非阻塞)", exc_info=True)
-    bundle.developer_parts.append(ws_ctx)
+    # plan-598-2482: ta3 对齐官方——官方 system 段没有 Shell 环境说明与代码符号索引状态，
+    # ta3 下跳过这两段；非 ta3 路径逐字节不变。
+    if ta3_meta is None:
+        # v1.2: 注入 shell 环境说明，避免 agent 用错 shell 语法（Get-ChildItem/grep/… 报错）
+        ws_ctx += "\n\n" + shell_hint()
+        # plan-248-1258 M3.3: 注入代码符号索引状态——让 AI 在会话中自动识别项目是否已索引，
+        # 并在探索代码/文件/函数时主动使用 symbol_search / outline。
+        try:
+            _idx_hint = await _symbol_index_hint(workspace)
+            if _idx_hint:
+                ws_ctx += "\n\n" + _idx_hint
+        except Exception:
+            logger.debug("[context] 符号索引状态注入失败(非阻塞)", exc_info=True)
+        bundle.developer_parts.append(ws_ctx)
     # 3. Git Repos（并入结构摘要）
-    structure = await project_structure_brief(workspace)
-    if structure:
-        bundle.developer_parts.append(f"## Project Structure\n{structure}")
+    if ta3_meta is None:
+        structure = await project_structure_brief(workspace)
+        if structure:
+            bundle.developer_parts.append(f"## Project Structure\n{structure}")
     # plan-19-82: 原「4. Project Rules / 4.1 Global Rules」已前移至 developer 段最前部
     # （见上方 1.2 Rule Documents，标题带 MANDATORY 并统一命名），此处不再重复注入。
     # 5. Session Memory（turn 摘要 + 记忆条目）
     # plan-644: Plan History（会话级计划需求全集）置于 Session Memory 之前--
     # 多轮 /plan 迭代时模型不可能遗忘未完成需求（机制保证，非纯提示词）
     if plan_history.strip():
-        bundle.developer_parts.append(
+        _ph = (
             "## Plan History (all previous plan rounds of this session)\n"
             "The new plan document MUST cover every unexecuted item below and MUST NOT "
             "repeat items already implemented and delivered.\n\n" + plan_history
         )
-    mem_summary = await _session_memory_summary(db, session.id)
+        # plan-601-2495：计划多轮继承是 chatcoder 计划模式的机制保证（功能必需），
+        # ta3 下改放当轮 user 消息的 <system-reminder>
+        if ta3_meta is None:
+            bundle.developer_parts.append(_ph)
+        else:
+            _ta3_reminders.append(_ph)
+    # plan-601-2495：Session Memory（turn 摘要）在 ta3 下去掉——历史消息已完整回放，
+    # 官方没有这一段，重复注入只增加噪声。
+    mem_summary = await _session_memory_summary(db, session.id) if ta3_meta is None else ""
     if mem_summary:
         bundle.developer_parts.append(f"## Session Memory\n{mem_summary}")
     # plan-230-1144 M4.1: 传 project_id——三层记忆（会话→项目→全局）合并注入
     # plan-537-2256：记忆关闭时必须同时停住「写」与「读」。此前开关只在自动提取一处生效，
     # 关闭后旧记忆仍会每轮注入；这里补上读取侧门禁。
     if getattr(settings, "auto_memory_enabled", True):
-        memories = await _load_memories(
-            db, session.id,
-            project_id=getattr(project, "id", None),
-            # plan-548-2276：带上本轮用户消息关键词，注入优先给「与这次任务相关」的记忆
-            task_keywords=_task_keywords(user_message),
-        )
+        # plan-598-2482：ta3 下改用**官方记忆注入格式**——<memory_instructions> 说明段 +
+        # <system-reminder> 里的「全局记忆索引 / 项目记忆索引」，只列索引不注入正文
+        # （官方 memory/promptBuilder.js:101-112、indexManager 200 行/25KB 截断），
+        # 避免上下文随记忆条数线性膨胀。其余供应商保持原有全文追加格式。
+        if ta3_meta is not None:
+            # plan-601-2495：官方「自由对话」（工作区显式为空串）不注入记忆段；chatcoder 无项目
+            # 会话仍有全局 / 会话记忆，保留注入以免丢功能（项目目录插值按 default 分区）。
+            _ta3_sys["memory"] = await _build_ta3_memory_injection(
+                db, session.id, project_id=getattr(project, "id", None), workspace=workspace,
+            )
+            memories = ""
+        else:
+            memories = await _load_memories(
+                db, session.id,
+                project_id=getattr(project, "id", None),
+                # plan-548-2276：带上本轮用户消息关键词，注入优先给「与这次任务相关」的记忆
+                task_keywords=_task_keywords(user_message),
+            )
         if memories:
             bundle.developer_parts.append(
                 "## Your Memory (from previous tasks)\n"
@@ -1273,7 +1931,9 @@ async def build_main_context(
     _ctx = getattr(session, "shared_context", None) or {}
     if isinstance(_ctx, dict):
         _summary = (_ctx.get("summary") or "").strip()
-        if _summary:
+        # plan-601-2495：ta3 下不注入 Session Summary——plan-527-2218 起历史不再按
+        # summarized_ids 过滤，渐进摘要与完整回放的历史重复，官方也没有这一段。
+        if _summary and ta3_meta is None:
             # plan-19-82: 标题按本轮语言生成，避免英文标题污染中文会话的回复语言
             _sum_title = ("## Session Summary（较早对话已压缩）" if _reply_lang == "zh"
                           else "## Session Summary (earlier conversation compressed)")
@@ -1332,8 +1992,15 @@ async def build_main_context(
                         "history** — that defeats compaction. Available blocks: "
                         + ", ".join(_index_lines)
                     )
-                bundle.developer_parts.append(_title + "\n" + "\n\n".join(_checkpoint_parts)
-                                              + "\n\n" + _howto)
+                _cp_text = _title + "\n" + "\n\n".join(_checkpoint_parts) + "\n\n" + _howto
+                if ta3_meta is None:
+                    bundle.developer_parts.append(_cp_text)
+                else:
+                    # plan-601-2495：压缩检查点是功能必需（被压缩历史的唯一载体），
+                    # ta3 下放当轮 user 消息的 <system-reminder>，并改用模型可见工具名
+                    _ta3_reminders.append(_ta3_rewrite_tool_names(
+                        _cp_text, ("compaction_index", "compaction_view", "memory_search"),
+                    ))
                 if _new_injected:
                     _ctx = dict(_ctx)
                     _ctx["injected_compactions"] = list(_injected) + _new_injected
@@ -1424,6 +2091,10 @@ async def build_main_context(
             # 用 95% 上限预留 5% 给它。
             _est_fixed = rough_token_estimate(bundle.system) + sum(
                 rough_token_estimate(p) for p in bundle.developer_parts)
+            if ta3_meta is not None:
+                # plan-601-2495：ta3 的官方段与 user 侧提醒不在 developer_parts 里，同样占窗口
+                _est_fixed += sum(rough_token_estimate(p) for p in _ta3_sys.values() if p)
+                _est_fixed += sum(rough_token_estimate(p) for p in _ta3_reminders if p)
             _hard_limit = max(4000, int(context_window * 0.95) - _est_fixed)
             _est_all = estimate_outbound_tokens_db(unsummarized)
             if _est_all > _hard_limit:
@@ -1438,19 +2109,24 @@ async def build_main_context(
                     session.id, _est_all, _hard_limit, len(recent), _dropped, _dropped_tokens,
                 )
                 if _reply_lang == "zh":
-                    bundle.developer_parts.append(
+                    _trunc = (
                         f"## 历史截断提示\n"
                         f"本轮上下文超过窗口硬上限，更早的 {_dropped} 条历史消息"
                         f"（约 {_dropped_tokens} tokens）未注入。这些消息尚未被压缩，"
                         f"下一轮上下文重建会重新纳入；若当前任务需要，可用 memory_search 检索。"
                     )
                 else:
-                    bundle.developer_parts.append(
+                    _trunc = (
                         f"## History truncated\n"
                         f"{_dropped} earlier messages (~{_dropped_tokens} tokens) were omitted because "
                         f"the context exceeded the hard window limit. They are not compacted and will be "
                         f"restored on the next rebuild; use memory_search if needed."
                     )
+                if ta3_meta is None:
+                    bundle.developer_parts.append(_trunc)
+                else:
+                    # plan-601-2495：截断提示功能必需，ta3 下放当轮 user 消息
+                    _ta3_reminders.append(_ta3_rewrite_tool_names(_trunc, ("memory_search",)))
         except Exception:  # noqa: BLE001 — 估算失败必须退化为全量注入，不能连累历史
             logger.warning(
                 "[context] session=%s 历史预算估算失败，降级为全量注入（%d 条）",
@@ -1654,22 +2330,44 @@ async def build_main_context(
         logger.warning("[context] 注入历史消息失败(非阻塞)", exc_info=True)
 
     # 6. Skills / MCP / Plugins
-    skills, mcp = await _load_skills_and_mcp(db)
+    if ta3_meta is None:
+        skills, mcp = await _load_skills_and_mcp(db)
+    else:
+        # plan-601-2495：ta3 用官方 <available_skills> 格式（skillService.js:563-571），
+        # 需要原始技能行而不是已渲染的 chatcoder 文本。官方「自由对话」（工作区显式为空串）
+        # 不注入技能；chatcoder 无项目会话的技能同样是全局可用的，保留注入以免丢功能。
+        skills, mcp = "", ""
+        try:
+            from app.services.skill_service import get_global_skills
+
+            _ta3_sys["skills"] = _build_ta3_skills_section(await get_global_skills(db))
+        except Exception:
+            logger.warning("[context] ta3 技能清单加载失败", exc_info=True)
     if skills:
         bundle.developer_parts.append(f"## Available Skills\n{skills}")
-    if mcp:
-        bundle.developer_parts.append(f"## Available MCP Servers\n{mcp}")
-    # plan-59-286：插件此前在模型侧完全不可见（无任何插件段），
-    # 模型不知道"这个插件带来了哪些能力"，这里补一段已启用插件的贡献摘要。
-    plugins_text = await _load_plugins(db)
-    if plugins_text:
-        bundle.developer_parts.append(f"## Available Plugins\n{plugins_text}")
+    # plan-598-2482: ta3 对齐官方——官方 system 段只有技能清单、项目记忆、项目长期指令
+    # 与工作区目录列表，**没有** MCP 连接器清单与插件清单；ta3 下跳过这两段
+    # （顺带省掉一次插件查询），非 ta3 路径保持不变。
+    if ta3_meta is None:
+        if mcp:
+            bundle.developer_parts.append(f"## Available MCP Servers\n{mcp}")
+        # plan-59-286：插件此前在模型侧完全不可见（无任何插件段），
+        # 模型不知道"这个插件带来了哪些能力"，这里补一段已启用插件的贡献摘要。
+        plugins_text = await _load_plugins(db)
+        if plugins_text:
+            bundle.developer_parts.append(f"## Available Plugins\n{plugins_text}")
     # plan-59-286：本轮显式引用（技能正文 / 连接器校验 / 插件说明）。
     # 用户点了 chip 就是最高优先级的意图表达，必须真的改变本轮上下文，
     # 否则"引用了却没生效"就是装完拓展后最大的认知落差来源。
     refs_text = await _load_refs_context(db, turn)
     if refs_text:
-        bundle.developer_parts.append(f"## 本轮引用（用户显式点名，优先满足）\n{refs_text}")
+        _refs_part = f"## 本轮引用（用户显式点名，优先满足）\n{refs_text}"
+        if ta3_meta is None:
+            bundle.developer_parts.append(_refs_part)
+        else:
+            # plan-601-2495：本轮引用是当轮意图（官方 <context-skills> 同样放在 user 消息里，
+            # contextEnrichment.js:193-242），ta3 下放当轮 user 消息
+            _ta3_reminders.append(_ta3_rewrite_tool_names(_refs_part, ("skill_view",)))
     # 附件注入（v14: 附件已统一为文件地址，注入路径清单 + 读取工具说明，
     # AI 通过 read_attachment 工具按 path 读取图片/文档内容）
     # v33: 注入绝对路径（_attachment_abs_path）——AI 直接拿到磁盘真实路径，
@@ -1723,7 +2421,133 @@ async def build_main_context(
                     "\n\n阅读方法：请将附件 path 交给当前可用的文件读取工具读取"
                     "（不要改写、不要加引号）。"
                 )
-            bundle.developer_parts.append(hint)
+            if ta3_meta is None:
+                bundle.developer_parts.append(hint)
+            else:
+                # plan-601-2495：附件属于当轮用户输入，ta3 下放当轮 user 消息
+                _ta3_reminders.append(_ta3_rewrite_tool_names(hint, ("read_attachment",)))
+    if ta3_meta is not None:
+        _finalize_ta3_main_bundle(bundle, workspace, _ta3_sys, _ta3_reminders)
+    return bundle
+
+
+def _finalize_ta3_main_bundle(bundle: "ContextBundle", workspace: str,
+                              sys_parts: dict[str, str], reminders: list[str]) -> None:
+    """ta3 主会话最终装配（plan-601-2495）。
+
+    system = persona 主体 → 任务列表（均已在 bundle.system）→ <available_skills> → 记忆 →
+    <project-context> → 工作区目录段，全部 `\\n\\n` 拼成一条（官方
+    buildLegacyCombinedSystemMessage / personaRegistry.buildSystemPrompt 的顺序）。
+    自有功能段统一包进一个 <system-reminder> 放在当轮 user 消息正文之前（与官方
+    applyContextEnrichment 「富化段在前、用户原文在后」同向）。提醒文本存进
+    rules_anchor：engine 的「确认执行」路径重写 instruction 时会把 rules_anchor 原样拼回，
+    提醒因此不会丢。task_boundary（grok 复述抑制）官方无对应、非功能必需，ta3 下不注入。
+    """
+    sections = [
+        bundle.system,
+        sys_parts.get("skills", ""),
+        sys_parts.get("memory", ""),
+        sys_parts.get("project_context", ""),
+        _build_ta3_workspace_section([workspace] if workspace else []),
+    ]
+    bundle.system = "\n\n".join(s.strip() for s in sections if s and s.strip())
+    # 防御：ta3 下不应再有 developer / 规则段残留（若有，仍由 merged 模式并入 system 尾部）
+    bundle.task_boundary = ""
+    reminder = _ta3_system_reminder("\n\n".join(r for r in reminders if r and r.strip()))
+    bundle.rules_anchor = reminder
+    if reminder:
+        bundle.instruction = (reminder + "\n\n" + bundle.instruction) if bundle.instruction else reminder
+
+
+# 官方子代理 system 构造（subagent/child-agent.js:18-27,83-103）——plan-601-2495 逐字移植
+_TA3_SUBAGENT_ROLE_PROMPTS = {
+    "Explore": "你是 Explore 子代理。只做只读研究：理解代码结构、定位文件、总结发现。不要建议直接修改，除非用户明确要求方案。",
+    "GeneralPurpose": "你是 GeneralPurpose 子代理。独立分析任务并给出可执行结果，只能使用运行时明确提供的能力。",
+}
+_TA3_SUBAGENT_DEFAULT_ROLE = "你是主会话派生出的独立子代理。你的输出不会直接展示给用户，主代理会读取你的结果后继续工作。"
+# 官方默认工具面说明是「只使用已授权的只读工具」；chatcoder 子代理可以是可写的（agent 模式），
+# 照搬会让可写子代理误以为不能改文件，因此改为不区分读写的同义表述。
+_TA3_SUBAGENT_TOOL_SCOPE = "当前子代理只使用本次请求中已授权的工具。"
+_TA3_SUBAGENT_TAIL = (
+    "不要臆测文件内容；需要分析代码时，先列目录、搜索或读取文件。",
+    "最终回复必须是可供主代理使用的中文结论，包含关键文件、发现、证据和下一步建议；不要只回复 completed、done、success 这类状态词。",
+    "请保持结果紧凑、可操作；如果信息不足，明确说明缺口。",
+)
+# chatcoder 主代理解析子代理汇报依赖固定小节（subagent._parse_structured_report），功能必需；
+# 放在官方 `交接要求：` 槽位（child-agent.js:95）。
+_TA3_SUBAGENT_HANDOFF = (
+    "交接要求：最终回复按以下小节顺序组织（小节标题保持原样）："
+    "### Result（一段话结论）、### Files Touched（新建或修改的每个文件的相对路径，没有写 None）、"
+    "### Key Findings（主代理必须知道的事实，尽量附 file:line 证据）、"
+    "### Verification（实际运行或检查了什么、结果如何，没有写 None）、"
+    "### Acceptance（逐条对照验收标准写 met / not met 及证据）、"
+    "### Risks / Open Questions（阻塞、不确定点与后续事项，没有写 None）。不要编造未验证的结果。"
+)
+
+
+async def _build_ta3_subagent_context(
+    db: AsyncSession, *, agent, session, project, task, workspace: str,
+    handoff_summary: str, original_request: str, inherit_context: bool,
+) -> ContextBundle:
+    """ta3 子代理上下文（plan-601-2495，对齐官方 child-agent.buildMessages）。
+
+    官方结构 = 一条 system（角色段 + 默认角色 + 工具面 + 交接要求 + 固定尾句）
+             + 继承历史（inherit_context=true 时的 fork 种子，providers/fork.js）
+             + 一条 user（task.prompt，即委派时写的任务说明）。
+    官方子代理 system 不含项目规则、记忆、技能清单（普通 SubAgent 无 skillContexts、
+    includeProjectMemory 默认 false），这里同样不注入。chatcoder 功能必需的补充
+    （工作目录、原始请求、任务标题、验收标准）以 <system-reminder> 放在 user 消息正文之前。
+    """
+    from app.orchestration.prompts.language import LANG_ZH
+
+    _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
+    _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
+    _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
+
+    system = "\n\n".join([
+        _TA3_SUBAGENT_ROLE_PROMPTS["GeneralPurpose"],
+        _TA3_SUBAGENT_DEFAULT_ROLE,
+        _TA3_SUBAGENT_TOOL_SCOPE,
+        _TA3_SUBAGENT_HANDOFF,
+        *_TA3_SUBAGENT_TAIL,
+    ])
+
+    reminder_lines: list[str] = []
+    if workspace:
+        reminder_lines.append(f"工作目录：{workspace}（文件工具的相对路径以它为根）")
+    if task.title:
+        reminder_lines.append(f"子任务标题：{task.title}")
+    _ac = str(getattr(task, "acceptance_criteria", "") or "").strip()
+    if _ac:
+        reminder_lines.append(f"验收标准：\n{_ac}")
+    if original_request and not inherit_context:
+        # 继承上下文时原始请求已在历史里，不再重复
+        reminder_lines.append(f"用户原始请求：\n{original_request[:2000]}")
+    prompt = (handoff_summary or task.description or task.title or "").strip()
+    if not prompt:
+        prompt = (f"开始执行分配给你的子任务：{task.title}" if _reply_lang == LANG_ZH
+                  else f"Start working on the assigned task: {task.title}")
+    reminder = _ta3_system_reminder("\n\n".join(reminder_lines))
+    instruction = f"{reminder}\n\n{prompt}" if reminder else prompt
+
+    bundle = ContextBundle(
+        system=system,
+        instruction=instruction,
+        reply_language=_reply_lang,
+        reply_language_source=_lang_source,
+        rules_anchor=reminder,
+        merge_developer_into_system=True,
+    )
+    if inherit_context:
+        # 官方 fork：创建时一次性截取已完成轮次前缀作为种子历史（快照，不随主对话更新）
+        try:
+            rows = await _load_completed_turns_rows(db, getattr(session, "id", None))
+            for _tid, role, text in rows:
+                bundle.history.append(ChatMessage(
+                    role="user" if role == "User" else "assistant", content=text,
+                ))
+        except Exception:
+            logger.debug("[context] ta3 子代理继承上下文加载失败(非阻塞)", exc_info=True)
     return bundle
 
 
@@ -1731,6 +2555,7 @@ async def build_subagent_context(
     db: AsyncSession, *, agent, session, project, task,
     handoff_summary: str,
     original_request: str = "",
+    inherit_context: bool = False,
 ) -> ContextBundle:
     """构建子代理上下文（plan-330-1648 M3：子代理 = 受限的新会话）。
 
@@ -1739,7 +2564,12 @@ async def build_subagent_context(
     同一项目结构摘要。隔离边界仅体现在替代项：
       - 「原始用户请求」替代主代理的 Current Goal；
       - 「交接摘要」说明子任务来源与范围；
-      - 「主会话摘要」替代历史消息窗口（子代理不加载完整对话历史）。
+      - 「主会话摘要」替代历史消息窗口（子代理默认不加载完整对话历史）。
+
+    plan-598-2482：新增 `inherit_context`（对齐官方 SubAgent 的同名参数语义）——
+    默认 False 时只看 handoff 与主会话摘要；True 时额外加载本对话**已完成的轮次**
+    （截至最近一次完整回复，不含正在进行的这一轮），用于「接着这个结论继续分析」
+    这类离不开上下文的委派。继承的是创建时的快照，之后主对话再推进它也看不到。
 
     v19: 修复上下文继承断裂——子代理此前仅能看到 handoff 摘要，不知道用户
     原始诉求与主会话进展；现注入 original_request 与主会话 shared_context 摘要。
@@ -1747,6 +2577,21 @@ async def build_subagent_context(
                 ②规则段前移并与主代理统一为 MANDATORY 命名。
     """
     workspace = session.worktree_path or (project.path if project else "")
+    # plan-601-2495：三处调用方（子代理派发 / 工作流节点 / 计划步骤重试）都不传 ta3 信息，
+    # 这里按与主会话相同的方式（子代理 agent 绑定模型 → 会话模型）在函数内部解析。
+    # 子代理 agent 的 model_id 是派发时解析出的真实模型（可能来自设置中心子代理模型），
+    # 因此优先看 agent，再看会话。
+    if getattr(agent, "model_id", None):
+        # _resolve_ta3_model_meta 优先取第三参（session 位）的 model_id，这里传 agent 使其只看子代理模型
+        _sub_ta3_meta = await _resolve_ta3_model_meta(db, None, agent)
+    else:
+        _sub_ta3_meta = await _resolve_ta3_model_meta(db, agent, session)
+    if _sub_ta3_meta is not None:
+        return await _build_ta3_subagent_context(
+            db, agent=agent, session=session, project=project, task=task,
+            workspace=workspace, handoff_summary=handoff_summary,
+            original_request=original_request, inherit_context=inherit_context,
+        )
     # plan-19-82: 语言以用户原始请求为准（缺则回退任务标题/描述）
     _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
     _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
@@ -1832,6 +2677,21 @@ async def build_subagent_context(
                 bundle.developer_parts.append(f"## Main Session Summary\n{_summary[:2000]}")
     except Exception:
         logger.debug("[context] 读取主会话摘要失败(非阻塞)", exc_info=True)
+    # plan-598-2482：inherit_context=true 时加载本对话已完成的轮次。
+    # 对齐官方 SubAgent 的同名语义：继承的是**创建时快照**，不含正在进行的这一轮，
+    # 之后主对话再推进它也看不到（快照深拷贝进 bundle，不随主会话变化）。
+    if inherit_context:
+        try:
+            _inherited = await _load_completed_turns_snapshot(db, getattr(session, "id", None))
+            if _inherited:
+                bundle.developer_parts.append(
+                    "## Inherited Conversation (completed rounds before this dispatch)\n"
+                    "以下内容是本对话在你被派发之前已完成的轮次快照，"
+                    "用于承接既有结论；它不是新指令，不要重复执行其中已完成的工作。\n\n"
+                    + _inherited
+                )
+        except Exception:
+            logger.debug("[context] 子代理继承上下文加载失败(非阻塞)", exc_info=True)
     ws_ctx = f"Working directory: {workspace}"
     ws_ctx += (
         "\n\n## Tool Usage Rules\n"

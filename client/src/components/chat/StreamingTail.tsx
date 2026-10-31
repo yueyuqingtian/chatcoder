@@ -21,6 +21,7 @@ import { useChatStore } from "../../store/chat";
 import { useMergedStreamText, useMergedThinkingText } from "../../store/streamMerged";
 import { StreamingText } from "./StreamingText";
 import { recordComponentRender } from "../../perf/metrics";
+import { visibleStreamingText } from "./streamingTailState";
 
 export interface StreamingTailProps {
   /** true = 主会话桶；数字 = 该 threadId 的子代理桶 */
@@ -35,7 +36,7 @@ export interface StreamingTailProps {
   persistedText?: string;
 }
 
-/** 尾部渲染体：不运行不占位；正文与已落库正文一致时隐藏，其余交 StreamingText。 */
+/** plan-20261112-loading-home-sidebar：正文落库只隐藏重复正文，工具收集结果期间仍需保留运行反馈。 */
 function TailBody({ active, statusLabel, persistedText, text, thinking, threadId }: {
   active: boolean;
   statusLabel?: string;
@@ -45,9 +46,9 @@ function TailBody({ active, statusLabel, persistedText, text, thinking, threadId
   threadId?: number;
 }) {
   if (!active) return null;
-  if (text && persistedText && text.trim() === persistedText.trim()) return null;
+  const visibleText = visibleStreamingText(text, persistedText);
   return (
-    <StreamingText active={active} thinking={thinking} text={text} statusLabel={statusLabel} threadId={threadId} />
+    <StreamingText active={active} thinking={thinking} text={visibleText} statusLabel={statusLabel} threadId={threadId} />
   );
 }
 

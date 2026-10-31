@@ -151,6 +151,11 @@ class MemorySearchTool(Tool):
         if not scopes:
             scopes = set(_MEMORY_SCOPES)
 
+        # plan-601：ta3 官方 get_project_memory(query='all') = 返回全部记忆。只由还原层置 list_all，
+        # schema 不暴露；普通调用既有行为不变（keyword='all' 仍按关键词检索）。
+        if args.get("list_all") is True:
+            return await _list_all_memories(ctx.session_id, limit=limit, offset=offset, scopes=scopes)
+
         if not keyword:
             return ToolResult(ok=False, output="", error="keyword 不能为空")
 
@@ -318,6 +323,47 @@ class MemorySearchTool(Tool):
             else:
                 header += f"（记忆库共 {data['memory_total']} 条，可用 offset 翻页）"
         return ToolResult(ok=True, output=header + "\n\n" + "\n\n".join(sections), data=data)
+
+
+async def _list_all_memories(session_id: int, *, limit: int, offset: int,
+                             scopes: set[str]) -> ToolResult:
+    """列出当前会话可见的全部记忆（作用域约束与关键词检索同口径，按 id 倒序分页）。"""
+    from sqlalchemy import and_, func, or_, select
+
+    from app.persistence.models.memory import MemoryEntry
+    from app.services.memory_service import resolve_project_id
+
+    async with async_session_factory() as db:
+        project_id = await resolve_project_id(db, session_id)
+        conds = []
+        if "session" in scopes:
+            conds.append(and_(
+                or_(MemoryEntry.scope == "session", MemoryEntry.scope.is_(None)),
+                MemoryEntry.session_id == session_id,
+            ))
+        if "project" in scopes and project_id is not None:
+            conds.append(and_(MemoryEntry.scope == "project", MemoryEntry.project_id == project_id))
+        if "global" in scopes:
+            conds.append(MemoryEntry.scope == "global")
+        if not conds:
+            return ToolResult(ok=True, output="当前没有已保存的记忆。", data={"memory": 0, "memory_total": 0})
+        where = [MemoryEntry.superseded_by.is_(None), or_(*conds)]
+        total = int((await db.execute(
+            select(func.count()).select_from(MemoryEntry).where(*where)
+        )).scalar() or 0)
+        res = await db.execute(
+            select(MemoryEntry).where(*where).order_by(MemoryEntry.id.desc()).offset(offset).limit(limit)
+        )
+        entries = list(res.scalars().all())
+    data = {"memory": len(entries), "memory_total": total, "offset": offset, "list_all": True}
+    if not entries:
+        return ToolResult(ok=True, output="当前没有已保存的记忆。", data=data)
+    lines = _render_memory(entries)
+    if total > offset + len(entries):
+        lines.append(f"（共 {total} 条，已显示第 {offset + 1}-{offset + len(entries)} 条，翻页用 offset={offset + len(entries)}）")
+    # 列全量不是「主动检索命中」，不补记使用次数（否则一次 all 会把所有条目都计一次）
+    lines.append(_STALE_HINT)
+    return ToolResult(ok=True, output=f"全部记忆（共 {total} 条）：\n\n" + "\n".join(lines), data=data)
 
 
 def _schedule_bump(ids: list[int]) -> None:

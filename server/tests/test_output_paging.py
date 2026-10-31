@@ -63,9 +63,19 @@ def test_tool_ref_follows_ta3_aliases():
         "collect_results(agent_id=7, report_offset={offset})"
     set_ta3_visible(True)
     try:
-        ref = tool_ref("collect_results", agent_id=7, report_offset="{offset}")
-        assert ref == "TaskQuery(taskId=7, reportOffset={offset})"
-        assert tool_ref("read_attachment", path="a.txt").startswith("ReadAttachment(")
+        # 内置通道：名字与参数键都换算成官方形态
+        assert tool_ref("fs_read", path="a.txt") == 'Read(filepath="a.txt")'
+        assert tool_ref("fs_grep", pattern="x", path="src") == 'Search(query="x", path="src")'
+        # plan-598-2482：拓展工具走 MCP 通道，提示里的引用名必须与模型实际看到的
+        # `mcp__{EXTENSION_SERVER_ID}__{真实名}` 一致（plan-601 起 serverId 带稳定后缀）。
+        from app.models.providers.ta3_mcp import EXTENSION_SERVER_ID
+
+        assert tool_ref("collect_results", agent_id=7, report_offset="{offset}") == (
+            f"mcp__{EXTENSION_SERVER_ID}__collect_results(agent_id=7, report_offset={{offset}})"
+        )
+        assert tool_ref("read_attachment", path="a.txt").startswith(
+            f"mcp__{EXTENSION_SERVER_ID}__read_attachment("
+        )
     finally:
         set_ta3_visible(False)
 

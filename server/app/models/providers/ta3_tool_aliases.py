@@ -1,229 +1,118 @@
-"""工具名伪装映射（ta3 模式专用）。
+"""工具名伪装映射（ta3 模式专用，plan-598-2482 重写，plan-601 参数还原对齐）。
 
-当前项目真实执行名（snake_case）→ ta3 工具名（PascalCase / 原生命名）。
-映射原则（方案 §5.4）：
-- 语义完全一致 → 直接映射（参数名一致或做适配层转换）
-- ta3 无对应工具 → 剔除（不发给模型），由系统提示词引导用替代工具
-- 参数差异 → ARGS_* 适配表在 Ta3Provider 内做键名双向转换
+目标：ta3 会话上行的工具面与官方客户端（Ta+3 牛码 0.7.5）保持同一体系。
+官方在普通 agent 会话里只下发内置工具 + MCP 外部工具（见
+`ta3_official_tools.TA3_OFFICIAL_BUILTIN_TOOLS`），因此映射拆成两张表：
 
-参数适配说明：
-- editor_apply_diff(path/old_text/new_text) → Edit(filepath/oldString/newString)
-- spawn_subagent(task_title/task_description/acceptance_criteria/explore)
-    → SubAgentAsync(description/prompt/subagent_type)
-- v36 (plan-321-1600 M3): 接入 ta3 侧异步子代理三件套——
-    SubAgentAsync → spawn_subagent（后台派发，完成时自动推送）
-    TaskQuery     → collect_results(taskId→agent_id)
-    TaskCancel    → cancel_subagent(taskId→agent_id)
-- plan-541-2264: 同步派发整体下线。出站只下发 SubAgentAsync（一个真实工具对应一个伪装
-  工具，取消原先的一对多下发）；入站两个伪装名都只按 subagent_type 还原 explore 语义，
-  不再给任何分支补充调度参数——调度方式恒为后台异步，由执行层保证，无需参数表达。
-  SubAgent 仅保留入站映射，用于历史会话回放（旧会话里的 SubAgent 调用仍能执行）。
-- plan-73-322: SubAgentAsync 入站补透传只读语义（subagent_type=Explore → explore=True），
-  避免只读调研被派发成可写子代理。
+- `TO_TA3`：本项目真实名 → **官方内置工具名**（逐字一致，含 snake_case 的那些）；
+- `TO_TA3_EXTENSION`：本项目独有工具 → 拓展 MCP 工具名 `mcp__{serverId}__{真实名}`。
+
+参数换算分两层：
+1. `ARGS_TO_TA3` / `ARGS_FROM_TA3`：纯键名改写（`tool_ref` 等只需键名的场景也用它）；
+2. `disguise_args` / `restore_args`：在键名改写之上做**值级还原**——官方参数面与真实工具
+   能力不一一对应（ask_user 的对象数组选项、generate_project_memory 的 memories 数组、
+   Diff 无参数却要完整 diff……），plan-601 要求模型按官方 schema 传参时真实工具照样能执行，
+   历史回放时真实参数也能换算回官方形态，与当轮 schema 一致。
 """
 from __future__ import annotations
 
-# 真实执行名 → ta3 伪装名
+import copy
+
+from app.models.providers.ta3_mcp import EXTENSION_SERVER_ID, ta3_mcp_name
+from app.models.providers.ta3_official_tools import TA3_OFFICIAL_BUILTIN_TOOLS
+
+# ─────────────────── 一、官方内置工具映射 ───────────────────
+# 真实执行名 → 官方 function.name。
+# 键必须落在 TA3_OFFICIAL_BUILTIN_TOOLS 里，由 tests 守护（漏配/多配都会失败）。
 TO_TA3: dict[str, str] = {
-    "fs_read": "Read",                 # filepath ✓
-    "fs_list": "List",                 # dirPath/recursive ✓
-    "fs_grep": "Search",               # query/path ✓
-    "git_diff": "Diff",                # 无参数 ✓
-    "fs_write": "Write",               # filepath/content ✓
-    "editor_apply_diff": "Edit",       # 参数适配 path→filepath / old_text→oldString / new_text→newString
-    "terminal_exec": "Bash",           # command/waitForCompletion ✓
-    "web_search": "WebSearch",         # query ✓
-    "todo_write": "TodoWrite",         # todos ✓
-    # plan-541-2264: 同步派发下线后只下发异步入口；参数按 description/prompt/subagent_type 适配
-    "spawn_subagent": "SubAgentAsync",
-    "memory_search": "get_project_memory",  # query ✓
-    # plan-147-674: 附件/图片读取工具——ta3 参考项目无对应工具，但缺失会导致
-    # 多模态图片只能用 Read 读二进制、docx/pdf 附件完全无法解析，故补充伪装名
-    # （PascalCase 对齐 ta3 原生命名风格）；两工具参数均为 path，与真实工具一致
-    "read_attachment": "ReadAttachment",   # path ✓（参数名一致，无需适配）
-    "view_image": "ViewImage",             # path ✓（参数名一致，无需适配）
-    # plan-153-705: 后台进程管理（配合 Bash waitForCompletion=false）——
-    # 参考项目无对应工具，伪装名对齐 ta3 PascalCase 风格（ReadAttachment 先例）；
-    # shell_id → shellId 键名适配见 ARGS_* 表
-    "terminal_bg_status": "BashStatus",    # shell_id→shellId / offset ✓
-    "terminal_bg_kill": "BashKill",        # shell_id→shellId
-    # 会话目标管理工具
-    "goal_complete": "CompleteGoal",       # summary ✓
-    # 通用提问工具（需求澄清）——四种模式均可用；参数 questions 键名一致，无需 ARGS 适配
-    "ask_user_question": "AskUser",        # questions/allow_custom ✓
-    # plan-238-1191: 多文件批量编辑（当前项目核心写工具，此前缺映射被伪装层剔除——
-    # ta3 会话里模型既拿不到该工具、历史调用还被降级成"结果已略"提示，导致批量
-    # 编辑工作流中断）。伪装名对齐自造 PascalCase 先例（ReadAttachment 等）；
-    # edits[{path,old_text,new_text}] 键名与真实工具一致，无需 ARGS 适配。
-    "multi_file_edit": "MultiFileEdit",    # edits ✓
-    # plan-248-1258 M3.3: 符号索引检索/文件骨架（此前缺映射被伪装层剔除——系统提示词
-    # 仍在引导模型"优先用 symbol_search/outline"（context_manager._symbol_index_hint），
-    # 但 ta3 会话里模型根本拿不到这两个工具，引导落空且索引能力完全闲置）。
-    # outline → 参考项目原生 get_file_outline（语义一致：文件结构骨架+行号区间），
-    # 仅键名适配 path→filepath；symbol_search 参考项目无对应工具，伪装名对齐自造
-    # PascalCase 先例（ReadAttachment/BashStatus 等），query/kind/file_glob/limit
-    # 键名与真实工具一致，无需 ARGS 适配。
-    "symbol_search": "SymbolSearch",       # query/kind/file_glob/limit ✓
-    "outline": "get_file_outline",         # path→filepath（见 ARGS_* 表）
-    # ── v43: 全量补齐（此前缺映射的工具被伪装层整体剔除）──
-    # 背景：disguise_tools 对无映射工具直接丢弃——这些工具在 ta3 会话里模型既看不到、
-    # 也调不动，历史调用还会被降级成"当前模型下不可用"文本。现按真实注册表补全。
-    "web_fetch": "WebFetch",                 # url ✓
-    "ci_run": "CiRun",                       # check ✓
-    "git": "Git",                            # command/cwd/message/files/... ✓
-    "codebase_search": "CodebaseSearch",     # query/top_k/file_glob ✓
-    "compaction_index": "CompactionIndex",   # 无参 ✓
-    "compaction_view": "CompactionView",     # index/compaction_id/keyword/offset/limit/full ✓
-    "skill_view": "SkillView",               # name ✓
-    "memory_write": "MemoryWrite",           # text/kind/scope ✓
-    "browser_navigate": "BrowserNavigate",       # url/wait_until ✓
-    "browser_screenshot": "BrowserScreenshot",   # url/full_page ✓
-    "browser_click": "BrowserClick",             # selector/x/y ✓
-    "browser_type": "BrowserType",               # selector/text/press_enter/clear_before ✓
-    "browser_snapshot": "BrowserSnapshot",       # max_depth ✓
-    "browser_evaluate": "BrowserEvaluate",       # script ✓
-    # plan-20261015-browser-agent：内置浏览器新增工具（参数键名与真实工具一致，schema 动态派生）
-    "browser_tabs": "BrowserTabs",
-    "browser_get_text": "BrowserGetText",
-    "browser_press": "BrowserPress",
-    "browser_scroll": "BrowserScroll",
-    "browser_hover": "BrowserHover",
-    "browser_drag": "BrowserDrag",
-    "browser_fill": "BrowserFill",
-    "browser_clipboard": "BrowserClipboard",
-    "browser_wait": "BrowserWait",
-    "browser_logs": "BrowserLogs",
-    "browser_batch": "BrowserBatch",
-    # plan-20261018-operator-boost：下载记录 / 网页操作路线
-    "browser_downloads": "BrowserDownloads",
-    "browser_recipe": "BrowserRecipe",
-    # plan-334-1661: 电脑操控工具集（内置原生工具）。
-    # 缺映射会被 disguise_tools 整体剔除——ta3 会话里模型既看不到也调不动，
-    # 而本能力正是为提升界面任务效率而建，故必须补齐。参数键名与真实工具一致，无需 ARGS 适配。
-    # plan-20261019-desktop-precision：去掉 desktop_hit / desktop_find_text（OCR），新增 desktop_batch
-    "desktop_windows": "DesktopWindows",         # limit ✓
-    "desktop_snapshot": "DesktopSnapshot",       # handle/title/depth/interactive_only/budget ✓
-    "desktop_screenshot": "DesktopScreenshot",   # handle/title/zoom/wait_stable ✓
-    "desktop_click": "DesktopClick",             # element/x/y/handle/title/button/count/focus_first ✓
-    "desktop_type": "DesktopType",               # text/handle/title/clear_first ✓
-    "desktop_keys": "DesktopKeys",               # keys/handle/title ✓
-    "desktop_scroll": "DesktopScroll",           # x/y/clicks/horizontal ✓
-    "desktop_batch": "DesktopBatch",             # actions/handle/title/focus_first ✓
-    "desktop_focus": "DesktopFocus",             # handle/title ✓
-    "desktop_apps": "DesktopApps",               # action/keyword/exe ✓
-    "desktop_recipe": "DesktopRecipe",           # action/app_name/intent/principle/pitfalls/steps ✓
-    # v43: 子代理管理工具——v36 只补了入站三条（SubAgentAsync/TaskQuery/TaskCancel），
-    # 出站 TO_TA3 缺失 → ta3 会话里 collect_results 等历史调用被降级、模型侧拿不到
-    # 查询/取消/检视/指令能力（只能单向派发）。现补齐，键名适配见 ARGS_TO_TA3。
-    "collect_results": "TaskQuery",          # agent_id→taskId
-    "cancel_subagent": "TaskCancel",         # agent_id→taskId
-    "subagent_inspect": "SubAgentInspect",   # agent_id/section ✓
-    "send_to_subagent": "SendToSubagent",    # agent_id/message ✓
-    # plan-91-394: 续跑中断/暂停的子代理（自造伪装名，schema 从真实工具动态派生）
-    "resume_subagent": "ResumeSubagent",     # agent_id ✓
-    # plan-156-619 S10：后续任务建议（收尾时提一条可执行的下一步）
-    "suggest_next_task": "SuggestNextTask",       # title/summary/steps/mode/rationale ✓
-    # plan-549-2281：执行子会话工具（create_subsession / send_to_subsession /
-    # get_subsession_progress / interrupt_subsession / message_main / message_peer）
-    # 已随子会话能力下线从映射表剔除——ta3 侧不再下发这些伪装名，
-    # 历史会话里的旧调用会落到「未知工具」，与其它已下线工具的处理一致。
-    # 工作流工具（设计 §5.8）：主代理专用，经同一别名通道映射
-    "plan_workflow": "PlanWorkflow",
-    "start_workflow": "StartWorkflow",
-    "workflow_status": "WorkflowStatus",
-    "resume_workflow": "ResumeWorkflow",
-    "cancel_workflow": "CancelWorkflow",
-    "amend_workflow": "AmendWorkflow",
-    "decide_workflow": "DecideWorkflow",
-    "request_write_scope": "RequestWriteScope",
-    # v43: 子代理侧上报工具（只在子代理线程暴露）——子代理同样可能运行在 ta3 模型上，
-    # 缺映射会让子代理失去向主代理上报/求助的通道。
-    "report_to_leader": "ReportToLeader",    # message/kind/wait/timeout_s ✓
-    # plan-548-2276：功能→模块地图与符号索引开关。
-    # 缺这两条映射时 disguise_tools 会把它们静默丢弃（见 ta3_tool_schemas.disguise_tools），
-    # 而主提示词仍在引导模型「只知道功能时就先用 feature_lookup」——
-    # ta3 会话里等于写了一条调不到的工具引导，模型只能退回全库 grep。
-    # 参考项目无对应工具，伪装名对齐自造 PascalCase 先例；参数键名与真实工具一致，无需 ARGS 适配。
-    "feature_lookup": "FeatureLookup",           # query/limit/rebuild ✓
-    "symbol_index_enable": "SymbolIndexEnable",  # 无参 ✓
+    # 文件与检索
+    "fs_read": "Read",                       # path→filepath
+    "fs_list": "List",                       # path→dirPath
+    "fs_grep": "Search",                     # pattern→query
+    "git_diff": "Diff",                      # 官方无参数；入站补 stat_only=false
+    "fs_write": "Write",                     # path→filepath，mode 透传
+    "editor_apply_diff": "Edit",             # path/old_text/new_text → filepath/oldString/newString
+    "outline": "get_file_outline",           # path→filepath
+    # 项目记忆
+    "memory_search": "get_project_memory",   # keyword→query（'all' → 全量列表）
+    "memory_write": "generate_project_memory",  # text/kind/scope ↔ memories[]
+    # 网络与终端
+    "web_search": "WebSearch",               # engine/max_results ↔ searchEngine/maxResults
+    "terminal_exec": "Bash",                 # 入站丢 purpose；出站补 purpose
+    # 任务与交互
+    "todo_write": "TodoWrite",
+    "ask_user_question": "ask_user",         # options 字符串 ↔ {label,value,description}
+    # 技能
+    "skill_view": "ReadSkill",               # name→skillName
+    # 子代理
+    "spawn_subagent": "SubAgent",            # task_title/task_description ↔ description/prompt
 }
 
-# 伪装名 → 真实执行名（反查）
-FROM_TA3: dict[str, str] = {v: k for k, v in TO_TA3.items()}
-# v36 (plan-321-1600 M3): ta3 子代理工具 → 本项目工具（此处显式列出，不依赖 TO_TA3 反查）
-FROM_TA3.update({
+# 入站额外别名：官方名字 → 本项目真实名。
+# 覆盖「出站不用但模型可能按官方习惯调用」的名字，以及历史会话回放。
+FROM_TA3_EXTRA: dict[str, str] = {
+    # 官方的单文件精确替换工具，语义等价于本项目的 editor_apply_diff
+    "single_find_and_replace": "editor_apply_diff",
+    # 官方 SubAgent 之外的旧回放名（历史会话里可能残留）
     "SubAgentAsync": "spawn_subagent",
-    # plan-541-2264: 出站已改指 SubAgentAsync，SubAgent 不再能由 TO_TA3 反查得到；
-    # 显式保留这条入站映射，保证历史会话里的旧 SubAgent 调用回放时仍能执行。
-    "SubAgent": "spawn_subagent",
+    # 官方 TaskQuery / TaskCancel 与本项目子代理查询/取消同义（历史回放）
     "TaskQuery": "collect_results",
     "TaskCancel": "cancel_subagent",
-    # ta3 参考项目的另一套编辑工具：schema 已随 TA3_NATIVE_SCHEMAS 定义，此前
-    # 入站未映射，模型一旦按参考项目习惯调用就会落到「未知工具」。语义与
-    # editor_apply_diff 一致（精确字符串替换），补成入站别名。
-    "single_find_and_replace": "editor_apply_diff",
-    # 技能读取：语义与 skill_view 完全一致（名称→正文）
-    "ReadSkill": "skill_view",
-})
+}
 
-# ── plan-365-1769 F1：动态派生 schema 的自造伪装名 ──
-#
-# **为什么需要这份清单**：`ta3_tool_schemas.py` 里的原生 schema 是**硬编码快照**，而
-# `disguise_tools` 命中映射时是用快照**整体替换**真实 schema 的（`out.append(native)`）。
-# 于是真实工具新增任何参数都不会到达模型——plan-365-1757 给 `desktop_click` 加了
-# ref/image_x/text_target/expect 等参数，ta3 会话里模型仍然只看到 x/y，
-# 只能「看图心算屏幕坐标」，直接造成点击准确率大幅下降（plan-365-1769 故）。
-#
-# **判定规则**：「自造伪装名」（非 ta3 参考项目原生）**且无参数适配器**
-# （即不在 ARGS_TO_TA3 / ARGS_FROM_TA3 中，参数键名与真实工具逐一对应）的工具，
-# 其伪装 schema 一律**从真实 schema 派生**——只改 function.name，描述与参数原样沿用。
-# 这样真实工具演进后，ta3 侧自动跟随，不再需要人工同步。
-#
-# **维持硬编码的**：① ta3 原生工具（Read/Write/Edit/Bash/List/Search/Diff/WebSearch/
-# TodoWrite/SubAgent/SubAgentAsync 等，描述需贴合 ta3 语义）；② 有参数适配器的（键名需转换）。
-# plan-541-2264: 原先的「一对多下发特例（spawn_subagent → SubAgent + SubAgentAsync）」已取消，
-# 出站只下发 SubAgentAsync；SubAgent 的硬编码 schema 仍留在 TA3_NATIVE_SCHEMAS，仅用于
-# 历史会话入站还原与 TA3 schema 守护测试。
-#
-# 新增自造工具时，只需在 TO_TA3 与本清单各加一行；漏加会被
-# `tests/test_ta3_schema_parity.py` 守护测试直接拦下（不会静默漂移）。
-DYNAMIC_SCHEMA_ALIASES: frozenset[str] = frozenset({
-    # 电脑操控（plan-334-1661 起；plan-365-1769 起改为动态派生）
-    "DesktopWindows", "DesktopSnapshot", "DesktopScreenshot",
-    "DesktopClick", "DesktopType", "DesktopKeys", "DesktopScroll", "DesktopBatch",
-    "DesktopFocus", "DesktopApps", "DesktopRecipe",
-    # 浏览器套件（v43 补映射）
-    "BrowserNavigate", "BrowserScreenshot", "BrowserClick",
-    "BrowserType", "BrowserSnapshot", "BrowserEvaluate",
-    "BrowserTabs", "BrowserGetText", "BrowserPress", "BrowserScroll", "BrowserHover", "BrowserDrag",
-    "BrowserFill", "BrowserClipboard", "BrowserWait", "BrowserLogs", "BrowserBatch",
-    "BrowserDownloads", "BrowserRecipe",
-    # 附件与图片读取（plan-147-674）
-    "ReadAttachment", "ViewImage",
-    # 工作流工具（设计 §5.8）：schema 从真实工具派生，参数与描述随 workflow/tools.py 同步
-    "PlanWorkflow", "StartWorkflow", "WorkflowStatus", "ResumeWorkflow", "CancelWorkflow", "AmendWorkflow",
-    "DecideWorkflow",
-    "RequestWriteScope",
-    # 其余自造工具（v43 全量补齐）
-    "CompleteGoal", "AskUser", "MultiFileEdit", "SymbolSearch",
-    "WebFetch", "CiRun", "Git", "CodebaseSearch",
-    "CompactionIndex", "CompactionView", "SkillView", "MemoryWrite",
-    # 子代理管理/上报（v43 补齐）
-    "SubAgentInspect", "SendToSubagent", "ReportToLeader", "ResumeSubagent",
-    # plan-548-2276：功能地图与符号索引开关（参数键名与真实工具一致，走动态派生）
-    "FeatureLookup", "SymbolIndexEnable",
-    # plan-156-619 S10：后续任务建议
-    "SuggestNextTask",
-})
+# ─────────────────── 二、拓展工具映射（走 MCP 通道） ───────────────────
+_EXTENSION_REAL_NAMES: tuple[str, ...] = (
+    # 浏览器套件
+    "browser_navigate", "browser_screenshot", "browser_click", "browser_type",
+    "browser_snapshot", "browser_evaluate", "browser_tabs", "browser_get_text",
+    "browser_press", "browser_scroll", "browser_hover", "browser_drag",
+    "browser_fill", "browser_clipboard", "browser_wait", "browser_logs",
+    "browser_batch", "browser_downloads", "browser_recipe",
+    # 电脑操控
+    "desktop_windows", "desktop_snapshot", "desktop_screenshot", "desktop_click",
+    "desktop_type", "desktop_keys", "desktop_scroll", "desktop_batch",
+    "desktop_focus", "desktop_apps", "desktop_recipe",
+    # 附件与图片
+    "read_attachment", "view_image",
+    # 后台进程管理（Bash 的配套能力，官方无独立工具）
+    "terminal_bg_status", "terminal_bg_kill",
+    # 编辑与检索增强
+    "multi_file_edit", "symbol_search", "codebase_search", "feature_lookup",
+    "symbol_index_enable",
+    # 网络与命令
+    "web_fetch", "ci_run", "git",
+    # 上下文与记忆
+    "compaction_index", "compaction_view",
+    # 子代理管理
+    "collect_results", "cancel_subagent", "subagent_inspect",
+    "send_to_subagent", "resume_subagent", "report_to_leader",
+    # 会话目标
+    "goal_complete",
+    # 工作流
+    "plan_workflow", "start_workflow", "workflow_status", "resume_workflow",
+    "cancel_workflow", "amend_workflow", "decide_workflow",
+    # 后续任务建议
+    "suggest_next_task",
+)
+
+TO_TA3_EXTENSION: dict[str, str] = {
+    name: ta3_mcp_name(EXTENSION_SERVER_ID, name) for name in _EXTENSION_REAL_NAMES
+}
+
+# 伪装名 → 真实执行名（反查）。
+FROM_TA3: dict[str, str] = {v: k for k, v in TO_TA3.items()}
+FROM_TA3.update({v: k for k, v in TO_TA3_EXTENSION.items()})
+FROM_TA3.update(FROM_TA3_EXTRA)
 
 # 出站参数键名适配：真实键 → ta3 键（None = 丢弃该键）
 ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
-    # 键名不一致的工具做出站转换；其余参数名一致的键保留原名
     "fs_read": {"path": "filepath"},
     "fs_list": {"path": "dirPath"},
     "fs_grep": {"pattern": "query"},
     "fs_write": {"path": "filepath"},
     "memory_search": {"keyword": "query"},
+    "read_file_range": {"path": "filepath"},
+    "outline": {"path": "filepath"},
     "editor_apply_diff": {
         "path": "filepath",
         "old_text": "oldString",
@@ -234,134 +123,400 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
         "engine": "searchEngine",
         "max_results": "maxResults",
     },
+    # 官方 SubAgent 的参数面：description + prompt + subagent_type + inherit_context。
+    # explore / mode 由 subagent_type 表达，acceptance_criteria 并入 prompt（见 disguise_args）。
     "spawn_subagent": {
         "task_title": "description",
         "task_description": "prompt",
-        "acceptance_criteria": None,   # ta3 无对应
-        "explore": None,               # 出站丢弃：ta3 侧由 subagent_type 表达
-        # plan-549-2281：mode（readonly / agent）同样出站丢弃——
-        # ta3 侧的执行语义只由 subagent_type 表达（Explore=只读，其余=可写），
-        # 多传一个 mode 会让模型以为 ta3 支持本项目独有的三档语义。
+        "acceptance_criteria": None,
+        "explore": None,
         "mode": None,
+        "purpose": None,
     },
-    # plan-153-705: 后台进程工具键名适配（offset 键名一致免映射）
-    "terminal_bg_status": {"shell_id": "shellId"},
-    "terminal_bg_kill": {"shell_id": "shellId"},
-    # plan-248-1258 M3.3: 文件骨架键名适配（参考项目原生用 filepath）
-    "outline": {"path": "filepath"},
-    # v43: 子代理管理工具出站键名适配（ta3 侧查询/取消按 taskId 定位）
-    # wait 出站丢弃：ta3 网关是否接受该参数尚未确认，回放历史消息时多带它可能被 400 拒绝；
-    # 入站不受影响——模型在 TaskQuery 里显式传的 wait 由 ARGS_FROM_TA3 还原后照常生效
-    # plan-156-620：结论分段读取的起点（TaskQuery 侧键名 reportOffset）
-    "collect_results": {"agent_id": "taskId", "wait": None, "report_offset": "reportOffset"},
-    "cancel_subagent": {"agent_id": "taskId"},
+    "skill_view": {"name": "skillName"},
 }
 
 # 入站参数键名适配：ta3 键 → 真实键（None = 丢弃该键）
 ARGS_FROM_TA3: dict[str, dict[str, str | None]] = {
-    "Read": {"filepath": "path"},
+    "Read": {"filepath": "path", "document": None, "docx": None},
     "List": {"dirPath": "path"},
     "Search": {"query": "pattern"},
     "Write": {"filepath": "path"},
-    "get_project_memory": {"query": "keyword"},
     "Edit": {
         "filepath": "path",
         "oldString": "old_text",
         "newString": "new_text",
         "replaceAll": "replace_all",
     },
+    "Bash": {"purpose": None},
+    "read_file_range": {"filepath": "path"},
+    "get_file_outline": {"filepath": "path"},
+    "get_project_memory": {"query": "keyword"},
     "WebSearch": {
         "searchEngine": "engine",
         "maxResults": "max_results",
     },
+    "ReadSkill": {"skillName": "name"},
+    # 官方子代理派发：subagent_type 丢弃前先用于判定只读（见 restore_args）
     "SubAgent": {
         "prompt": "task_description",
         "description": "task_title",
-        "subagent_type": None,         # 丢弃前先用于判定 explore（见 restore_args）
+        "subagent_type": None,
     },
-    # v36 (plan-321-1600 M3): ta3 异步子代理三件套
     "SubAgentAsync": {
         "prompt": "task_description",
         "description": "task_title",
         "subagent_type": None,
     },
-    # wait 显式声明透传给内部 collect_results（缺省由内部按 false 处理）——
-    # 这张表是「哪些参数允许入站」的唯一说明，靠 restore_args 的兜底原样保留不算保障
+    # 历史回放用的查询/取消别名
     "TaskQuery": {"taskId": "agent_id", "wait": "wait", "reportOffset": "report_offset"},
     "TaskCancel": {"taskId": "agent_id"},
-    # plan-153-705: 后台进程工具入站适配（BashStatus/BashKill）
-    "BashStatus": {"shellId": "shell_id"},
-    "BashKill": {"shellId": "shell_id"},
-    # plan-248-1258 M3.3: 文件骨架入站适配（filepath → path）
-    "get_file_outline": {"filepath": "path"},
-    # ta3 参考项目的编辑/技能工具别名（见 FROM_TA3 同名条目）
+    # 官方单文件精确替换 → editor_apply_diff
     "single_find_and_replace": {
         "filepath": "path",
         "old_string": "old_text",
         "new_string": "new_text",
         "replace_all": "replace_all",
     },
-    "ReadSkill": {"skillName": "name"},
 }
-
-# v36 (plan-321-1600 M3): 原 SPAWN_FORCED_ARGS（强制 explore=True）已删除——
-# 它让 ta3 侧调用永远同步阻塞，模型无法并行派发子代理。现按 subagent_type 判定。
-# plan-541-2264: 同步派发整体下线，也不再存在「explore 强制同步」的分支——两个伪装名都
-# 只还原 explore（只读语义）；调度方式恒为后台异步，由执行层保证。
 
 
 def visible_tool_name(real_name: str, ta3: bool) -> str:
-    """plan-128-518：模型实际看到的工具名。
-
-    提示词里引用工具名时必须用它：ta3 会话的工具被伪装成 PascalCase 原生名（goal_complete → CompleteGoal），
-    模型根本没见过真实名；提示词若写真实名，会让模型去调用一个不存在的工具。
-    非 ta3 或无映射时原样返回。
-    """
+    """模型实际看到的工具名（提示词引用工具名时必须用它）。非 ta3 或无映射时原样返回。"""
     if not ta3:
         return real_name
-    return TO_TA3.get(real_name, real_name)
+    alias = TO_TA3.get(real_name)
+    if alias is not None:
+        return alias
+    return TO_TA3_EXTENSION.get(real_name, real_name)
 
 
-def disguise_args(real_name: str, args: dict) -> dict:
-    """出站：真实参数 → ta3 参数。"""
-    mapping = ARGS_TO_TA3.get(real_name)
-    if not mapping:
-        return dict(args)
-    out: dict = {}
-    for k, v in args.items():
-        target = mapping.get(k, k)
-        if target is None:
-            continue
-        out[target] = v
-    return out
-
-
-def restore_args(ta3_name: str, args: dict) -> dict:
-    """入站：ta3 参数 → 真实参数。"""
-    mapping = ARGS_FROM_TA3.get(ta3_name)
+def _rename(args: dict, mapping: dict[str, str | None] | None) -> dict:
     out: dict = {}
     for k, v in args.items():
         target = (mapping or {}).get(k, k)
         if target is None:
             continue
         out[target] = v
-    # plan-541-2264: 两个伪装名都只按 subagent_type 还原 explore（只读语义）；
-    # 调度方式恒为后台异步（执行层保证），不再给任何分支补充调度参数。
-    if ta3_name == "SubAgentAsync":
-        # ta3 异步派发 → 本项目后台子代理（立即返回，完成时自动推送）
-        # plan-73-322: 补透传只读语义——subagent_type=Explore 表示只读调研，须置 explore，
-        # 否则会被派发成可写子代理（全工具），与「Explore=只读」约定不符。
-        # plan-549-2281：新增 mode 参数后，只读语义要**同时**产 mode="readonly"——
-        # agent_loop 的解析顺序是「mode 优先、回落 explore」，只给 explore 虽仍兼容，
-        # 但一旦调用方同时带了 mode 就会以 mode 为准，显式补上才与「Explore=只读」等价。
-        if str(args.get("subagent_type") or "").strip().lower() == "explore":
-            out["explore"] = True
-            out["mode"] = "readonly"
-    elif ta3_name == "SubAgent":
-        # plan-541-2264: SubAgent 只在历史会话回放时出现，语义与 SubAgentAsync 一致——
-        # 只按 subagent_type 判定 explore，调度一律后台。
-        _st = str(args.get("subagent_type") or "").strip().lower()
-        if _st == "explore":
-            out["explore"] = True
-            out["mode"] = "readonly"
     return out
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "y", "on"):
+            return True
+        if low in ("false", "0", "no", "n", "off", "", "none", "null"):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+# ─────────────────── 入站值级还原（官方参数 → 真实工具参数） ───────────────────
+
+# 官方 WebSearch 的 searchEngine 是智谱搜索档位；映射到本项目真实搜索源：
+# 基础/高阶 → workbuddy（云端，不可用时自动回退 bing），搜狗/夸克（中文垂直源）→ bing 直连
+_WEB_ENGINE_FROM_TA3 = {
+    "search_std": "workbuddy",
+    "search_pro": "workbuddy",
+    "search_pro_sogou": "bing",
+    "search_pro_quark": "bing",
+}
+_WEB_ENGINE_TO_TA3 = {
+    "workbuddy": "search_std",
+    "bing": "search_std",
+    "duckduckgo": "search_std",
+    "google": "search_pro",
+}
+# 官方 WebSearch 有、真实工具无对应能力的参数（domain/includeDomains 改写为 site: 前缀保留语义）
+_WEB_UNSUPPORTED = ("timeRange", "contentSize", "searchIntent", "requestId", "userId",
+                    "domain", "includeDomains")
+
+# generate_project_memory.type → (scope, kind)。官方语义：user/feedback 存全局、project/reference 存项目
+_MEMORY_TYPE_MAP = {
+    "user": ("global", "fact"),
+    "feedback": ("global", "convention"),
+    "project": ("project", "decision"),
+    "reference": ("project", "fact"),
+}
+
+# 官方 SubAgent.subagent_type 中声明为「只读」角色的取值（plugins/tools/subAgent.js:48）
+_READONLY_SUBAGENT_TYPES = ("explore", "plan")
+
+
+def _restore_read(args: dict) -> dict:
+    # 官方 Read 无分页参数（整文件读入，上限 220KB）；本项目 fs_read 按窗口分页，
+    # 默认窗口由工具决定，长文件按结果页脚给出的 offset 续读（offset/limit 原样透传）。
+    # 不在这里注入 limit：注入值会随历史回放成为 schema 里不存在的参数。
+    # document / docx 已在键名表里丢弃——ta3.py 只换参数不换工具名，无法改派 read_attachment。
+    return args
+
+
+def _restore_diff(args: dict) -> dict:
+    # 官方 Diff 直接返回完整 `git diff -- .`（只含已跟踪文件）；本项目默认只给统计
+    args.setdefault("stat_only", False)
+    args.setdefault("tracked_only", True)
+    return args
+
+
+def _restore_write(args: dict) -> dict:
+    mode = str(args.get("mode") or "").strip().lower()
+    if mode in ("", "overwrite"):
+        args.pop("mode", None)
+    else:
+        args["mode"] = mode
+    return args
+
+
+def _restore_option(opt) -> object:
+    if not isinstance(opt, dict):
+        return opt
+    label = str(opt.get("label") or opt.get("value") or "").strip()
+    desc = str(opt.get("description") or "").strip()
+    if label and desc:
+        return f"{label} — {desc}"
+    return label or desc or opt
+
+
+def _restore_ask_user(args: dict) -> dict:
+    questions = args.get("questions")
+    if not isinstance(questions, list):
+        return args
+    restored = []
+    for q in questions:
+        if not isinstance(q, dict):
+            restored.append(q)
+            continue
+        item: dict = {}
+        text = str(q.get("question") or "").strip()
+        desc = str(q.get("description") or "").strip()
+        # 本项目问卷卡只展示 question 正文：背景说明并入正文，用户才能看到
+        item["question"] = f"{text}\n{desc}" if text and desc else (text or desc)
+        if isinstance(q.get("options"), list):
+            item["options"] = [_restore_option(o) for o in q["options"]]
+        if "allowCustom" in q or "allow_custom" in q:
+            item["allow_custom"] = _as_bool(q.get("allowCustom", q.get("allow_custom")), True)
+        restored.append(item)
+    args["questions"] = restored
+    args.pop("title", None)
+    return args
+
+
+def _restore_web_search(args: dict) -> dict:
+    engine = args.get("engine")
+    if isinstance(engine, str) and engine in _WEB_ENGINE_FROM_TA3:
+        args["engine"] = _WEB_ENGINE_FROM_TA3[engine]
+    domain = args.get("domain")
+    if not domain and isinstance(args.get("includeDomains"), list) and args["includeDomains"]:
+        domain = args["includeDomains"][0]
+    if isinstance(domain, str) and domain.strip() and isinstance(args.get("query"), str):
+        args["query"] = f"site:{domain.strip()} {args['query']}"
+    for key in _WEB_UNSUPPORTED:
+        args.pop(key, None)
+    return args
+
+
+def _memory_item_to_entry(item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    desc = str(item.get("description") or "").strip()
+    content = str(item.get("content") or "").strip()
+    scope, kind = _MEMORY_TYPE_MAP.get(str(item.get("type") or "").strip().lower(), ("project", "fact"))
+    head = "：".join(p for p in (name, desc) if p)
+    text = f"{head}\n{content}" if head and content else (head or content)
+    return {"text": text, "kind": kind, "scope": scope}
+
+
+def _restore_generate_memory(args: dict) -> dict:
+    memories = args.get("memories")
+    if isinstance(memories, dict):
+        memories = [memories]
+    if not isinstance(memories, list):
+        # 只给 chatHistory（自动提取）：本项目没有对应能力，交给 memory_write 报缺参
+        return {}
+    entries = [e for e in (_memory_item_to_entry(m) for m in memories) if e]
+    return {"memories": entries}
+
+
+def _restore_get_memory(args: dict) -> dict:
+    keyword = str(args.get("keyword") or "").strip()
+    if keyword.lower() in ("all", "*"):
+        # 官方 'all' = 返回全部记忆完整内容 → memory_search 的列表模式（只查记忆库），
+        # 单页取工具上限，超出部分按结果末尾的 offset 翻页
+        args["list_all"] = True
+        args.setdefault("limit", 50)
+    return args
+
+
+def _restore_subagent(raw: dict, args: dict) -> dict:
+    if "inherit_context" in args:
+        args["inherit_context"] = _as_bool(args["inherit_context"], False)
+    # 官方 Explore（只读研究）/ Plan（只读出计划）→ 本项目只读子代理；其余缺省为可写
+    if str(raw.get("subagent_type") or "").strip().lower() in _READONLY_SUBAGENT_TYPES:
+        args["explore"] = True
+        args["mode"] = "readonly"
+    return args
+
+
+def restore_args(ta3_name: str, args: dict) -> dict:
+    """入站：ta3 参数 → 真实参数（键名改写 + 值级还原）。"""
+    raw = args if isinstance(args, dict) else {}
+    out = _rename(raw, ARGS_FROM_TA3.get(ta3_name))
+    if ta3_name == "Read":
+        return _restore_read(out)
+    if ta3_name == "Diff":
+        return _restore_diff(out)
+    if ta3_name == "Write":
+        return _restore_write(out)
+    if ta3_name == "ask_user":
+        return _restore_ask_user(out)
+    if ta3_name == "WebSearch":
+        return _restore_web_search(out)
+    if ta3_name == "generate_project_memory":
+        return _restore_generate_memory(out)
+    if ta3_name == "get_project_memory":
+        return _restore_get_memory(out)
+    if ta3_name in ("SubAgent", "SubAgentAsync"):
+        return _restore_subagent(raw, out)
+    return out
+
+
+# ─────────────────── 出站值级换算（真实参数 → 官方参数，用于历史回放） ───────────────────
+
+# 历史回放时允许保留的非官方键：fs_read 结果页脚明确指引「用 offset 续读」，
+# 去掉它们会让同一 Read(filepath) 在历史里返回不同内容，模型无从理解分页
+_HISTORY_EXTRA_KEYS: dict[str, frozenset[str]] = {
+    "Read": frozenset({"offset", "limit"}),
+}
+
+
+def _official_props(alias: str) -> set[str] | None:
+    from app.models.providers.ta3_tool_schemas import TA3_OFFICIAL_DEFINITIONS
+
+    d = TA3_OFFICIAL_DEFINITIONS.get(alias)
+    if d is None:
+        return None
+    return set((d.get("parameters") or {}).get("properties") or {})
+
+
+def _disguise_ask_user(args: dict) -> dict:
+    questions = args.get("questions")
+    if not isinstance(questions, list):
+        return args
+    out = []
+    for q in questions:
+        if not isinstance(q, dict):
+            out.append(q)
+            continue
+        item = {k: v for k, v in q.items() if k not in ("allow_custom", "options")}
+        if isinstance(q.get("options"), list):
+            item["options"] = [
+                o if isinstance(o, dict) else {"label": str(o)} for o in q["options"]
+            ]
+        if "allow_custom" in q:
+            item["allowCustom"] = _as_bool(q.get("allow_custom"), True)
+        out.append(item)
+    args["questions"] = out
+    return args
+
+
+def _entry_to_memory_item(entry: dict) -> dict:
+    text = str(entry.get("text") or "").strip()
+    scope = str(entry.get("scope") or "session").strip().lower()
+    kind = str(entry.get("kind") or "fact").strip().lower()
+    if scope == "global":
+        mtype = "feedback" if kind in ("convention", "pitfall") else "user"
+    else:
+        mtype = "project"
+    keywords = entry.get("keywords")
+    name = ""
+    if isinstance(keywords, list) and keywords:
+        name = str(keywords[0])
+    elif isinstance(keywords, str) and keywords.strip():
+        name = keywords.replace("，", ",").split(",")[0].strip()
+    return {"name": name or f"{mtype}_{kind}", "type": mtype, "content": text}
+
+
+def _disguise_memory_write(args: dict) -> dict:
+    memories = args.get("memories")
+    if isinstance(memories, list):
+        items = [_entry_to_memory_item(m) for m in memories if isinstance(m, dict)]
+    else:
+        items = [_entry_to_memory_item(args)]
+    return {"memories": items}
+
+
+def _disguise_web_search(args: dict) -> dict:
+    engine = args.get("searchEngine")
+    if isinstance(engine, str):
+        mapped = _WEB_ENGINE_TO_TA3.get(engine)
+        if mapped:
+            args["searchEngine"] = mapped
+        elif engine not in _WEB_ENGINE_FROM_TA3:
+            args.pop("searchEngine", None)
+    return args
+
+
+def _disguise_bash(args: dict) -> dict:
+    if not str(args.get("purpose") or "").strip():
+        command = str(args.get("command") or "").strip().replace("\n", " ")
+        if len(command) > 60:
+            command = command[:60] + "…"
+        args["purpose"] = f"运行命令：{command}" if command else "运行终端命令"
+    return args
+
+
+def _disguise_subagent(real: dict, args: dict) -> dict:
+    mode = str(real.get("mode") or "").strip().lower()
+    if mode == "readonly" or (not mode and _as_bool(real.get("explore"), False)):
+        args["subagent_type"] = "Explore"
+    acceptance = str(real.get("acceptance_criteria") or "").strip()
+    if acceptance:
+        prompt = str(args.get("prompt") or "")
+        args["prompt"] = f"{prompt}\n\n验收标准：{acceptance}" if prompt else f"验收标准：{acceptance}"
+    if "inherit_context" in args:
+        args["inherit_context"] = _as_bool(args["inherit_context"], False)
+    return args
+
+
+def disguise_args(real_name: str, args: dict) -> dict:
+    """出站：真实参数 → ta3 参数（键名改写 + 值级换算 + 官方参数面收敛）。
+
+    内置通道的结果只保留官方 schema 里声明的键（例外见 `_HISTORY_EXTRA_KEYS`），
+    保证历史回放的调用参数与当轮下发的 schema 一致；拓展/MCP 通道原样透传。
+    """
+    src = copy.deepcopy(args) if isinstance(args, dict) else {}
+    alias = TO_TA3.get(real_name)
+    if real_name == "memory_write":
+        out = _disguise_memory_write(src)
+    else:
+        out = _rename(src, ARGS_TO_TA3.get(real_name))
+        if real_name == "ask_user_question":
+            out = _disguise_ask_user(out)
+        elif real_name == "web_search":
+            out = _disguise_web_search(out)
+        elif real_name == "terminal_exec":
+            out = _disguise_bash(out)
+        elif real_name == "spawn_subagent":
+            out = _disguise_subagent(src, out)
+    if alias is None:
+        return out
+    props = _official_props(alias)
+    if props is None:
+        return out
+    keep = props | _HISTORY_EXTRA_KEYS.get(alias, frozenset())
+    return {k: v for k, v in out.items() if k in keep}
+
+
+# 自检：内置映射的每个目标名都必须落在官方白名单里（漏配/多配在此暴露）
+_unmapped = [k for k, v in TO_TA3.items() if v not in TA3_OFFICIAL_BUILTIN_TOOLS]
+if _unmapped:  # pragma: no cover - 配置错误时尽早暴露，而不是静默下发错名字
+    raise RuntimeError(
+        f"TO_TA3 的目标名不在官方内置工具白名单内：{_unmapped}；"
+        f"请同步 server/app/models/providers/ta3_official_tools.py"
+    )

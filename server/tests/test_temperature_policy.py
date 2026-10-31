@@ -210,24 +210,33 @@ class TestWorkBuddyTemperature:
 
 
 class TestTa3Temperature:
-    def _provider(self, model: str) -> Ta3Provider:
+    """plan-601-2495：ta3 温度按官方口径——只取目录 completionOptions.temperature，缺省 0.1，
+    无 claude 名称特判，忽略本项目的 0.3/0.7 请求温度。
+    依据：tmp_ta3_ref/dist/main/chat/openAiAdapter.js:107、anthropicAdapter.js:297（均为
+    `toNumber(runtimeOptions.temperature ?? options.temperature, 0.1)`，主聊天不传 runtime 温度，
+    streamRequest.js:395 只透传 options.temperature，chatService.js:670-678 不设置该值）。
+    """
+
+    def _provider(self, model: str, opts: dict | None = None) -> Ta3Provider:
         return Ta3Provider(
             api_key="llm-test", base_url="https://lc.example.com/newcoder/ai/dispatch/v2",
-            model=model, meta={},
+            model=model, meta={"completionOptions": opts} if opts else {},
         )
 
-    def test_openai_body_drops_temperature_for_claude(self):
+    def test_openai_body_keeps_default_temperature_for_claude(self):
+        # 官方 openAiAdapter.js:107 无 claude 特判：恒发目录值/0.1
         body = self._provider("claude-opus-5.5")._build_openai_body(
             _request("claude-opus-5.5"), [],
         )
-        assert "temperature" not in body
+        assert body["temperature"] == 0.1
 
-    def test_openai_body_honors_requested_temperature_for_other(self):
-        """设置中心的温度（请求温度）对非 Claude 模型生效。"""
-        body = self._provider("metis-4")._build_openai_body(
-            _request("metis-4"), [],
-        )
-        assert body["temperature"] == 0.3  # _request 默认温度
+    def test_openai_body_ignores_requested_temperature(self):
+        """请求温度（0.3）不生效；目录温度生效（openAiAdapter.js:107）。"""
+        body = self._provider("metis-4")._build_openai_body(_request("metis-4"), [])
+        assert body["temperature"] == 0.1
+        body = self._provider("metis-4", {"temperature": 0.6})._build_openai_body(
+            _request("metis-4"), [])
+        assert body["temperature"] == 0.6
 
     def test_openai_body_falls_back_to_default_without_requested_temperature(self):
         """请求未给出温度时，回落目录默认 0.1。"""
@@ -236,18 +245,19 @@ class TestTa3Temperature:
         body = self._provider("metis-4")._build_openai_body(req, [])
         assert body["temperature"] == 0.1
 
-    def test_anthropic_body_drops_temperature_for_claude(self):
+    def test_anthropic_body_keeps_default_temperature_for_claude(self):
+        # 官方 anthropicAdapter.js:297 无 claude 特判；只在思考开启时删除（:332）
         body = self._provider("claude-opus-5.5")._build_anthropic_body(
             _request("claude-opus-5.5"), [],
         )
-        assert "temperature" not in body
+        assert body["temperature"] == 0.1
 
     def test_request_model_carries_claude(self):
-        """配置模型名不含 claude、请求侧带 claude 时同样适配。"""
+        """请求侧模型名带 claude 也不影响温度（openAiAdapter.js:107）。"""
         body = self._provider("metis-4")._build_openai_body(
             _request("kr/claude-opus-5.5"), [],
         )
-        assert "temperature" not in body
+        assert body["temperature"] == 0.1
 
 
 class TestCommandCodeTemperature:
@@ -297,16 +307,20 @@ class TestUnifiedTemperatureRules:
                         temperature=0.3, reasoning_effort="none")
         assert request_temperature(r, model_name="metis-4") == 0.3
 
-    def test_ta3_kimi_body_follows_setting_not_hardcoded(self):
+    def test_ta3_kimi_body_uses_catalog_temperature(self):
+        # plan-601-2495：ta3 温度只取目录值（anthropicAdapter.js:297），请求温度 0.5 不生效
         p = Ta3Provider(api_key="llm-test", base_url="https://lc.example.com/newcoder/ai/dispatch/v2",
-                        model="kimi-k2", meta={})
+                        model="kimi-k2", meta={"completionOptions": {"temperature": 0.2}})
         body = p._build_anthropic_body(_request("kimi-k2", 0.5), [])
-        assert body.get("temperature") == 0.5
+        assert body.get("temperature") == 0.2
 
-    def test_ta3_openai_body_drops_temperature_when_thinking(self):
+    def test_ta3_openai_body_keeps_temperature_when_thinking(self):
+        # plan-601-2495：官方 OpenAI 面思考开启也恒发 temperature（openAiAdapter.js:107、114-131
+        # 的思考分支只追加字段、从不删温度）
         p = Ta3Provider(api_key="llm-test", base_url="https://lc.example.com/newcoder/ai/dispatch/v2",
-                        model="metis-4", meta={})
+                        model="metis-4", meta={"completionOptions": {"thinkingEnabled": True}})
         req = _request("metis-4", 0.3)
         req.reasoning_effort = "high"
         body = p._build_openai_body(req, [])
-        assert "temperature" not in body
+        assert body["temperature"] == 0.1
+        assert body["thinking"] == {"type": "enabled"}

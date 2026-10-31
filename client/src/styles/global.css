@@ -285,7 +285,7 @@ a { color: var(--accent); text-decoration: none; }
 .sb-pinned { display: flex; flex-direction: column; gap: 2px; padding-bottom: 2px; }
 .sb-project:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-project.current { color: var(--text-1); font-weight: 500; }
-.sb-project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
 /* 项目行：保持「悬停才占位」——项目名可用宽度不受影响（三个按钮常驻会挤占 60px） */
 .sb-project-actions {
   display: none; align-items: center; justify-content: center;

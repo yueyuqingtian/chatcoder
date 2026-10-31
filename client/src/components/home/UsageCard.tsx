@@ -27,7 +27,7 @@ function prettyDate(key: string): string {
 
 export function UsageCard() {
   const sessions = useChatStore((s) => s.sessions);
-  const [tab, setTab] = useState<Tab>("sessions");
+  const [tab, setTab] = useState<Tab>("tokens");
   const [tokenMap, setTokenMap] = useState<Record<string, number> | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number; title: string; sub: string } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -135,7 +135,7 @@ export function UsageCard() {
           value={tab}
           onChange={setTab}
           aria-label="用量维度"
-          options={[{ value: "sessions", label: "会话" }, { value: "tokens", label: "Token" }]}
+          options={[{ value: "tokens", label: "Token" }, { value: "sessions", label: "会话" }]}
         />
         <span className="es-usage-sum">
           {summary}

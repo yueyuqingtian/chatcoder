@@ -62,9 +62,14 @@ def tool_ref(real_name: str, **kwargs: object) -> str:
     name = real_name
     keymap: dict[str, str | None] = {}
     if _TA3_VISIBLE.get():
-        from app.models.providers.ta3_tool_aliases import ARGS_TO_TA3, TO_TA3
+        from app.models.providers.ta3_tool_aliases import (
+            ARGS_TO_TA3, TO_TA3, TO_TA3_EXTENSION,
+        )
 
-        name = TO_TA3.get(real_name, real_name)
+        # plan-598-2482：ta3 上行工具面分两条通道——官方内置名与拓展 MCP 名。
+        # 这里必须同步换算，否则续读提示会引导模型调用一个模型侧不存在的真实名工具
+        # （输出分页的续读指引是模型唯一的续读依据，写错等于分页功能失效）。
+        name = TO_TA3.get(real_name) or TO_TA3_EXTENSION.get(real_name) or real_name
         keymap = ARGS_TO_TA3.get(real_name, {})
     parts: list[str] = []
     for key, value in kwargs.items():

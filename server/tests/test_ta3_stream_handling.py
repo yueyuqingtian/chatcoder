@@ -2,7 +2,7 @@
 
 覆盖：
 - Anthropic 帧解析补全：message_start/message_delta 的 usage、ping 心跳、message_stop 终止
-- Anthropic max_tokens 以目录 completionOptions.maxTokens 封顶（超上限会导致网关截断/空响应）
+- Anthropic max_tokens 取值优先级：运行时 ?? 目录 ?? 2048（plan-601-2495 对齐官方，不再截断）
 - agent_loop 超时识别 `_is_stream_timeout` 与响应健康检查 `_response_failure_reason`
 - v29 (plan-78)：kimi effort 归一化、supports_thinking、thinking 帧变体、思考看门狗
 """
@@ -108,9 +108,13 @@ def test_zero_frame_stream_is_reported_in_done_event():
 
 # ── Anthropic max_tokens 对齐 ──
 
-def test_anthropic_max_tokens_capped_by_catalog():
+def test_anthropic_max_tokens_runtime_value_wins_over_catalog():
+    """plan-601-2495：官方 max_tokens = runtime ?? 目录值（anthropicAdapter.js:287），不做 min 截断。"""
     p = _provider(anthropic=True, provider="kimi", completionOptions={"maxTokens": 32768})
     body = p._build_anthropic_body(ChatRequest(messages=[], model="kimi-k3", max_tokens=131072), [])
+    assert body["max_tokens"] == 131072
+    # 运行时未给出 → 目录值
+    body = p._build_anthropic_body(ChatRequest(messages=[], model="kimi-k3"), [])
     assert body["max_tokens"] == 32768
 
 
@@ -120,11 +124,18 @@ def test_anthropic_max_tokens_uses_request_when_below_catalog():
     assert body["max_tokens"] == 5000
 
 
-def test_anthropic_max_tokens_omitted_without_catalog():
-    """无目录声明且请求未指定 → 不传 max_tokens（不限制输出，由网关/模型决定上限）。"""
+def test_anthropic_max_tokens_default_backstop_without_catalog():
+    """无目录声明且请求未指定 → 下发官方 2048 兜底（plan-598-2482）。
+
+    官方 `anthropicAdapter.js:299` 的 max_tokens 有 2048 兜底；本项目此前目录与请求
+    都无值时不发该字段，形态与官方不同，因此改为对齐官方兜底值（仍是「不限制输出」的
+    语义——兜底值远小于各模型上限，不会造成截断）。
+    """
+    from app.models.providers.ta3 import _DEFAULT_MAX_TOKENS
+
     p = _provider(anthropic=True, provider="kimi")
     body = p._build_anthropic_body(ChatRequest(messages=[], model="kimi-k3"), [])
-    assert "max_tokens" not in body
+    assert body["max_tokens"] == _DEFAULT_MAX_TOKENS == 2048
 
 
 # ── agent_loop 超时识别 ──
@@ -192,9 +203,11 @@ def test_thinking_timeout_empty_response_is_fatal():
 
 # ── v29 (plan-78): kimi effort 归一化与 supports_thinking ──
 
-def test_supports_thinking_true_for_kimi():
-    p = _provider(anthropic=True, provider="kimi")
-    assert p.supports_thinking() is True
+def test_supports_thinking_only_follows_catalog_for_kimi():
+    """plan-601-2495：官方只看目录 thinkingEnabled（anthropicAdapter.js:305），删除 kimi 名称特判。"""
+    assert _provider(anthropic=True, provider="kimi").supports_thinking() is False
+    assert _provider(anthropic=True, provider="kimi",
+                     completionOptions={"thinkingEnabled": True}).supports_thinking() is True
 
 
 def test_supports_thinking_false_for_others():
@@ -208,22 +221,17 @@ def test_supports_thinking_true_when_catalog_enabled():
     assert p.supports_thinking() is True
 
 
-def test_kimi_effort_normalization():
-    from app.core.config import settings
-    p = _provider(anthropic=True, provider="kimi")
-    _orig = settings.ta3_kimi_thinking_effort
-    settings.ta3_kimi_thinking_effort = "low"
-    try:
-        # 通用档位 → kimi 官方档位（low/high/max）
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="low")) == "low"
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="medium")) == "low"
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="high")) == "high"
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="xhigh")) == "max"
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="max")) == "max"
-        # 未知档位 → 保守默认 low
-        assert p._kimi_effort(ChatRequest(messages=[], model="kimi-k3", reasoning_effort="ultra")) == "low"
-    finally:
-        settings.ta3_kimi_thinking_effort = _orig
+def test_kimi_effort_uses_catalog_levels():
+    """plan-601-2495：kimi 档位不再做私有映射，按目录 thinkingLevels 校验、非法回落 low
+    （anthropicAdapter.js:312-315）。"""
+    opts = {"thinkingEnabled": True,
+            "thinkingLevels": [{"level": "low"}, {"level": "high"}, {"level": "max"}]}
+    p = _provider(anthropic=True, provider="kimi", completionOptions=opts)
+    for eff, expected in (("low", "low"), ("high", "high"), ("max", "max"),
+                          ("medium", "low"), ("xhigh", "low")):
+        body = p._build_anthropic_body(
+            ChatRequest(messages=[], model="kimi-k3", reasoning_effort=eff), [])
+        assert body["output_config"] == {"effort": expected}, eff
 
 
 def test_kimi_effort_in_anthropic_body():
@@ -233,7 +241,7 @@ def test_kimi_effort_in_anthropic_body():
         [],
     )
     # medium → low（kimi 无 medium 档，保守降级）
-    assert body.get("output_config") == {"effort": "low"}
+    assert body.get("output_config") == {"effort": "medium"}
 
 
 def test_kimi_effort_unknown_falls_back_to_conservative():
@@ -273,23 +281,32 @@ def test_anthropic_explicit_off_sends_disabled():
     assert body.get("thinking") == {"type": "disabled"}
 
 
-def test_kimi_anthropic_explicit_off_leaves_no_thinking():
-    """kimi 系（Anthropic 协议）档位只有 low/high/max、无关闭表达，保持不传。"""
+def test_kimi_anthropic_explicit_off_sends_disabled():
+    """plan-598-2482：对齐官方——目录 thinkingEnabled=true 且档位为 none 时，
+
+    官方 anthropicAdapter 发 thinking {type:'disabled'}（不再区分 kimi 系，
+    也不再有"kimi 无关闭表达"的特判），且此时保留 temperature、不发 output_config。
+    """
     p = _provider(anthropic=True, provider="kimi", completionOptions={"thinkingEnabled": True})
     body = p._build_anthropic_body(
         ChatRequest(messages=[], model="kimi-k3", thinking=False), [],
     )
-    assert "thinking" not in body
+    assert body.get("thinking") == {"type": "disabled"}
     assert "output_config" not in body
 
 
-def test_unspecified_thinking_leaves_body_untouched():
-    """未指定档位时不注入任何思考字段（保持网关默认）。"""
+def test_unspecified_thinking_sends_disabled():
+    """plan-598-2482：对齐官方——未指定档位归一到 'none'，目录开启思考时发 disabled。
+
+    官方 openAiAdapter 只看 completionOptions.thinkingEnabled 与 thinkingIntensity，
+    档位为 none（含未指定）时发 thinking {type:'disabled'}，不会"什么都不发"。
+    """
     p = _provider(anthropic=False, provider="glm", _model="glm-4.6",
                   completionOptions={"thinkingEnabled": True})
     body = p._build_openai_body(ChatRequest(messages=[], model="glm-4.6"), [])
-    assert "thinking" not in body
+    assert body.get("thinking") == {"type": "disabled"}
     assert "enable_thinking" not in body
+    # 档位 none 时不发 reasoning_effort
     assert "reasoning_effort" not in body
 
 

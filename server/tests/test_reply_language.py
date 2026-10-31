@@ -145,13 +145,28 @@ def test_continuation_prompt_language():
 
 
 def test_ta3_prompt_zh_and_en():
+    """plan-598-2482：ta3 提示词已对齐官方客户端，只保留平台主体 + 任务列表。
+
+    官方 ta3DefaultPersonas 的内容段里没有「工具使用纪律」「runtime 快照」
+    「子代理使用」，也没有语言首尾双锚；语言由平台下发的 baseAgentSystemMessage
+    本身承载（本机下发文本里已含 "responding in Chinese"）。
+    """
     p_zh = build_ta3_system_prompt({}, language="zh")
-    _assert_head_tail(p_zh)
-    assert "回复用简体中文" in p_zh
+    # 自造段与双锚均已移除
+    assert "## Reply Language — MANDATORY" not in p_zh
+    assert not p_zh.startswith("## Reply Language")
+    assert "## 工具使用纪律" not in p_zh
+    assert "<runtime-context>" not in p_zh
+    assert "## 子代理使用" not in p_zh
+    # 官方唯一的固定内容段是任务列表
+    assert "## 任务列表" in p_zh
+    # 语言参数不再改变 ta3 主体
     p_en = build_ta3_system_prompt({}, language="en")
-    assert "回复用English" in p_en
-    # 不再写死中文（英文锚定时流程规范句也随语言切换）
-    assert "回复用简体中文" not in p_en
+    assert p_en.count("## Reply Language — MANDATORY") == 0
+    # plan-601-2495：语言约束经 <project-context> 用户级块（设置中心全局规则）承载，
+    # ta3 主体只随执行模式变化：chat 模式不注入任务列表
+    assert p_zh == p_en
+    assert "## 任务列表" not in build_ta3_system_prompt({}, execution_mode="chat", language="zh")
 
 
 # ── 4. 压缩摘要提示词按语言生成 ──────────────────────────────────────────

@@ -164,20 +164,30 @@ def test_goal_tool_hidden_by_default():
 
 
 def test_goal_tool_hidden_in_ta3_disguise_by_default():
-    """ta3 伪装层：未激活目标时 CompleteGoal 同样不可见；激活时以伪装名下发。"""
+    """ta3 伪装层：未激活目标时 goal_complete 同样不可见；激活时以拓展 MCP 名下发。
+
+    plan-598-2482: 出站名不再是自造的 `CompleteGoal`，而是拓展通道的
+    `mcp__workspace-tools__goal_complete`（官方无对应内置工具）。
+    """
+    from app.models.providers.ta3_mcp import EXTENSION_SERVER_ID, ta3_mcp_name
     from app.models.providers.ta3_tool_schemas import disguise_tools
 
+    alias = ta3_mcp_name(EXTENSION_SERVER_ID, "goal_complete")
     reg = get_tool_registry()
-    assert "CompleteGoal" not in _schema_names(disguise_tools(reg.all_schemas()))
-    assert "CompleteGoal" in _schema_names(disguise_tools(reg.all_schemas(include_scoped=True)))
+    assert alias not in _schema_names(disguise_tools(reg.all_schemas()))
+    assert alias in _schema_names(disguise_tools(reg.all_schemas(include_scoped=True)))
+    # 旧的自造伪装名必须消失
+    assert "CompleteGoal" not in _schema_names(disguise_tools(reg.all_schemas(include_scoped=True)))
 
 
 def test_visible_goal_tool_name_follows_ta3_alias():
-    """提示词引用的工具名必须与模型实际看到的一致（ta3 会话为 CompleteGoal）。"""
+    """提示词引用的工具名必须与模型实际看到的一致（plan-598-2482：拓展 MCP 名）。"""
+    from app.models.providers.ta3_mcp import EXTENSION_SERVER_ID, ta3_mcp_name
     from app.models.providers.ta3_tool_aliases import visible_tool_name
 
     assert visible_tool_name("goal_complete", ta3=False) == "goal_complete"
-    assert visible_tool_name("goal_complete", ta3=True) == "CompleteGoal"
+    assert visible_tool_name("goal_complete", ta3=True) == ta3_mcp_name(
+        EXTENSION_SERVER_ID, "goal_complete")
     assert visible_tool_name("not_mapped_tool", ta3=True) == "not_mapped_tool"
 
 

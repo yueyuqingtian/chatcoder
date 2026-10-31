@@ -1,298 +1,582 @@
-"""ta3 原生工具 schema 移植（OpenAI function 格式，中文 description 原文保留）。
+"""ta3 内置工具的 schema 快照 + 出站伪装分派（plan-598-2482 重写，plan-601 逐字对齐）。
 
-来源：参考项目 resources/app-extracted/src/tools/toolDefinitions/
-- core.ts：Read/List/Search/Diff/ReadSkill/get_project_memory/generate_project_memory/
-          read_file_range/get_file_outline
-- edit.ts：Write/Edit/Bash/RevertFile/single_find_and_replace
-- task.ts：TodoWrite/SubAgent/SubAgentAsync/TaskQuery/TaskCancel
-- webSearch.ts：WebSearch
-- attachment（plan-147-674）：ReadAttachment/ViewImage 为当前项目补充（参考项目
-  无对应工具），用于附件与图片读取，伪装名对齐 ta3 PascalCase 风格
+分派规则（三条路径）：
+1. **官方内置工具**（`TO_TA3` 命中）→ 用本文件的快照 `TA3_NATIVE_SCHEMAS` 下发。
+   快照逐字取自官方客户端 Ta+3 牛码 0.7.5 的 `plugins/tools/*.js`（description、
+   parameters 的 properties / required / enum / minimum / maximum / minItems 全部原样），
+   由 tests/test_ta3_tools_parity_601.py 用官方定义的规范化哈希守护。
+   参数键按官方形态（filepath / dirPath / oldString 等），由 `ta3_tool_aliases` 双向换算。
+2. **本项目独有的拓展工具**（`TO_TA3_EXTENSION` 命中）→ 从真实 schema 派生，挂到拓展
+   MCP 服务（见 `ta3_mcp.build_extension_tool`）。
+3. **真实 MCP 工具**（registry 里 `mcp_` 开头的）→ 官方 MCP 形态（`ta3_mcp.disguise_schema`）。
 
-只取发给模型的 {type, function:{name, description, parameters}} 字段。
+输出顺序与序列化对齐官方 `chat/toolOrder.js` + `tools/index.js:225-238`：
+内置工具按 function.name 字典序、MCP 工具按 `serverId\\0toolName` 排序且整体排在内置之后；
+每个工具的 parameters 递归按键排序（只排 parameters，name/description 不动，数组元素顺序不动）。
+
+为什么快照必须逐字对齐：上行 schema 就是模型看到的能力面，与官方偏差既是可识别的体系
+特征，又会让模型按错误的参数面调用。官方没有、但真实工具需要的能力（分页、cwd、超时……）
+不在 schema 里暴露，由入站还原层补合理默认值（见 `ta3_tool_aliases.restore_args`）。
 """
 from __future__ import annotations
+
+import sys
 
 
 def _f(name: str, description: str, parameters: dict) -> dict:
     return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
 
 
-# ── core ──
-_CORE: list[dict] = [
-    _f("Read", "读取工作区内指定文件内容。适合查看现有代码和配置文件。", {
-        "type": "object", "required": ["filepath"],
-        "properties": {
-            "filepath": {"type": "string", "description": "文件路径，可以是相对工作区根目录的路径或工作区内绝对路径。"},
-            "offset": {"type": "integer", "description": "从第几行开始读取(1-based, 默认1)"},
-            "limit": {"type": "integer", "description": "最多读取多少行(默认200, 单次最多400行, 大文件可分段读取)"},
-        },
-    }),
-    _f("List", "列出工作区内目录下的文件和文件夹。", {
-        "type": "object",
-        "properties": {
-            "dirPath": {"type": "string", "description": "目录路径，默认为工作区根目录。"},
-            "recursive": {"type": "boolean", "description": "是否递归列出。大型项目中请谨慎使用。"},
-            "max_depth": {"type": "integer", "description": "递归最大深度（默认 2，仅 recursive=true 时有效）。"},
-        },
-    }),
-    _f("Search", "使用 ripgrep 在工作区中搜索正则表达式，自动跳过常见构建和依赖目录。", {
-        "type": "object", "required": ["query"],
-        "properties": {
-            "query": {"type": "string", "description": "要搜索的正则表达式。"},
-            "path": {"type": "string", "description": "可选的搜索目录或文件路径。"},
-            "include": {"type": "string", "description": "只搜索匹配此 glob 模式的文件（如 '*.py'、'*.java'、'*.ts'）。默认搜索所有文本文件。"},
-            "case_sensitive": {"type": "boolean", "description": "是否区分大小写。默认 false。"},
-            "context_lines": {"type": "integer", "description": "每个匹配项上下文行数（前后各显示多少行）。默认 0，最大 5。"},
-        },
-    }),
-    _f("Diff", "查看 git 仓库中未提交的代码变更。多 git 仓库场景（工作根含多个独立仓库）必须用 repo 指定仓库目录。", {
-        "type": "object",
-        "properties": {
-            "repo": {"type": "string", "description": "git 仓库目录名（相对工作根，如 'clinic'）。多仓库场景必须指定。"},
-            "tracked_only": {"type": "boolean", "description": "True=仅已跟踪文件的变更(默认);False=包含未跟踪新文件。"},
-            "stat_only": {"type": "boolean", "description": "True=只返回文件统计(文件名+增删行数),不返回完整 diff(默认);False=返回完整 diff。"},
-        },
-    }),
-    _f("ReadSkill", "按技能名称读取完整技能说明。可用技能会出现在系统提示词的 <available_skills> 中。", {
-        "type": "object", "required": ["skillName"],
-        "properties": {"skillName": {"type": "string", "description": "技能名称，必须匹配 available_skills 中的 name。"}},
-    }),
-    _f("get_project_memory", "在当前会话的历史消息中按关键词检索（包括已被摘要压缩的早期消息）。用于回忆之前讨论过的细节、决策、任务安排。", {
-        "type": "object", "required": ["query"],
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词（如任务名、人名、技术名词）。"},
-            "limit": {"type": "integer", "description": "最多返回条数（默认 10）。"},
-        },
-    }),
-    _f("generate_project_memory", "将记忆保存为持久化文件。memories 参数直接传入结构化记忆数组；chatHistory 参数可触发自动提取。", {
-        "type": "object",
-        "properties": {
-            "memories": {"type": "array", "description": "要保存的记忆列表。每项包含 name、description、type、content。"},
-            "chatHistory": {"type": "array", "description": "聊天历史数组。仅在没有 memories 时用于自动提取。"},
-        },
-    }),
-    _f("read_file_range", "读取工作区内指定文件的特定行范围。仅支持正行号（从1开始）。用于大文件的部分读取。", {
-        "type": "object", "required": ["filepath", "startLine", "endLine"],
-        "properties": {
-            "filepath": {"type": "string", "description": "文件路径，可以是相对工作区根目录的路径或工作区内绝对路径。"},
-            "startLine": {"type": "number", "description": "起始行号（从1开始的整数）。"},
-            "endLine": {"type": "number", "description": "结束行号（从1开始的整数），必须大于或等于 startLine。"},
-        },
-    }),
-    _f("get_file_outline", "提取文件的符号骨架，按定义顺序返回 class、function、method 等符号及其行号区间。"
-        "适用于大文件的全局结构分析，先看骨架再用 Read 按行精读。"
-        "索引未开启时按返回提示引导用户开启索引。", {
-        "type": "object", "required": ["filepath"],
-        "properties": {"filepath": {"type": "string", "description": "要分析的文件路径。可以是相对工作区根目录的路径或工作区内绝对路径。"}},
-    }),
-]
-
-# ── edit ──
-_EDIT: list[dict] = [
-    _f("Write", "在工作区内创建或覆盖文件。此工具会修改文件，默认需要用户审批。", {
-        "type": "object", "required": ["filepath", "content"],
-        "properties": {
-            "filepath": {"type": "string", "description": "要写入的文件路径，必须位于当前工作区内。"},
-            "content": {"type": "string", "description": "完整文件内容。"},
-        },
-    }),
-    _f("Edit", "在工作区内对文件做精确字符串替换。此工具会修改文件，默认需要用户审批。", {
-        "type": "object", "required": ["filepath", "oldString", "newString"],
-        "properties": {
-            "filepath": {"type": "string", "description": "要编辑的文件路径，必须位于当前工作区内。"},
-            "oldString": {"type": "string", "description": "需要被替换的原始字符串，必须和文件内容精确匹配。"},
-            "newString": {"type": "string", "description": "替换后的字符串。"},
-            "replaceAll": {"type": "boolean", "description": "是否替换所有匹配项。默认 false（oldString 必须唯一匹配，多匹配报错）；true=替换文件内所有匹配。"},
-        },
-    }),
-    _f("Bash", "在工作区根目录运行终端命令。默认需要审批。启动 dev server、watch、后端服务等长驻进程时，将 waitForCompletion 设为 false，让命令进入后台运行并持续收集日志。会自己结束的耗时命令（构建、全量测试）也可以放后台，跑完后系统会主动回报，不必轮询；长驻服务用完后必须用 BashKill 主动停止。不要用它直接修改文件，文件编辑应由专门的编辑工具完成。", {
-        "type": "object", "required": ["command"],
-        "properties": {
-            "command": {"type": "string", "description": "要执行的命令。"},
-            "cwd": {"type": "string", "description": "执行命令的工作目录，相对工作根的路径（如 'clinic'）。多 git 仓库时必须指定。"},
-            "waitForCompletion": {"type": "boolean", "description": "是否等待命令完成。默认 true；启动 dev server、watch、后端服务等长驻进程时必须设为 false，命令会进入后台运行。"},
-            "timeout": {"type": "integer", "description": "同步等待超时(秒)，默认 120。长命令(安装/构建/测试)按需调大。"},
-        },
-    }),
-    _f("RevertFile", "撤销工作区内单个文件相对 Git HEAD 的未提交变更。此工具会修改文件，默认需要用户审批。", {
-        "type": "object", "required": ["filepath"],
-        "properties": {"filepath": {"type": "string", "description": "要撤销变更的文件路径，必须位于当前工作区内。"}},
-    }),
-    _f("single_find_and_replace", "在文件内执行精确的字符串查找和替换。此工具会修改文件，默认需要用户审批。适用于精确的小范围修改。", {
-        "type": "object", "required": ["filepath", "old_string", "new_string"],
-        "properties": {
-            "filepath": {"type": "string", "description": "要编辑的文件路径，必须位于当前工作区内。"},
-            "old_string": {"type": "string", "description": "需要被替换的原始字符串，必须和文件内容精确匹配（包括空格和缩进）。"},
-            "new_string": {"type": "string", "description": "替换后的字符串。"},
-            "replace_all": {"type": "boolean", "description": "是否替换所有匹配项。默认 false，只允许唯一匹配。用于重命名等跨文件替换场景。"},
-        },
-    }),
-]
-
-# ── task ──
-_TASK: list[dict] = [
-    _f("TodoWrite", "创建或更新当前会话的任务列表。处理需要跟踪多个步骤的复杂任务时使用。每次调用都会完整替换任务列表。", {
-        "type": "object", "required": ["todos"],
-        "properties": {
-            "todos": {"type": "array", "description": "完整任务列表，按执行顺序排列。",
-                      "items": {"type": "object", "required": ["content", "status"],
-                                "properties": {
-                                    "content": {"type": "string", "description": "任务简短描述。"},
-                                    "activeForm": {"type": "string", "description": "进行中描述。status 为 in_progress 时建议提供；未提供时会自动使用 content。"},
-                                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "任务状态。"},
-                                }}},
-        },
-    }),
-    # plan-541-2264: 同步派发整体下线后，SubAgent 已不在下发路径上（出站一律发 SubAgentAsync）。
-    # 该硬编码 schema 仍保留，用于历史会话入站还原与 TA3 schema 守护测试；描述同步去掉
-    # 「同步执行 / 会阻塞」的承诺，避免后续维护者误以为还留着同步派发能力。
-    _f("SubAgent",
-       "启动子代理处理独立子任务（subagent_type=Explore 表示只读探索）。子代理一律在后台派发，"
-       "不阻塞当前工作，完成时结果自动推送回来（无需轮询）。"
-       "适用：可拆分为互不依赖的子任务；需要跨多个文件调研（超过约 3 次搜索/读取才能回答）；"
-       "只需结论、不需要把原始输出灌进自己的上下文。"
-       "不适用：已知文件/符号/取值的单点查询（直接搜索更快）；简单或强串行的工作（自己直接用工具做）。"
-       "派发多个独立子任务时，请在一条消息里同时发起多个调用——它们会并行执行；"
-       "同一子任务不要重复派发，若不确定是否已有等价子任务在跑，先用 TaskQuery 查看。", {
-           "type": "object", "required": ["prompt"],
-           "properties": {
-               "subagent_type": {"type": "string",
-                                 "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                                 "description": "子代理类型：Explore=只读探索（不修改文件）；其他/缺省=可写子代理。"},
-               "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含：子代理看不到你的上下文）。"},
-               "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
-           },
-       }),
-    _f("SubAgentAsync",
-       "异步启动子代理任务，立即返回 taskId、不阻塞当前工作；任务完成时结果会自动推送回当前会话，"
-       "不要主动用 TaskQuery 轮询。只读调研的首选入口：subagent_type=Explore 时按只读探索后台执行，"
-       "适合「结论不急需、但需要跨文件调研」的课题；也适合耗时较长、可与当前工作并行的独立分析/实现任务。"
-       "多个独立任务请在一条消息里同时发起多个调用，它们会并行执行。", {
-           "type": "object", "required": ["prompt"],
-           "properties": {
-               "subagent_type": {"type": "string", "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
-                                 "description": "子代理类型：Explore=只读探索（后台执行、不阻塞）；其他/缺省=可写子代理。"},
-               "prompt": {"type": "string", "description": "传递给子代理的任务描述（必须自包含）。"},
-               "description": {"type": "string", "description": "5 个词以内的任务摘要。"},
-           },
-       }),
-    _f("TaskQuery",
-       "按 taskId 查询异步子代理任务的状态与结果，两种用法："
-       "wait=true 时阻塞等待子代理结束再返回（仍在运行的全部子代理都结束后才返回，"
-       "下一步强依赖它的结论时用这种）；"
-       "wait 缺省或 false 时立即返回当前状态，任务完成时结果同样会自动推送回来，无需反复轮询。", {
-        "type": "object", "required": ["taskId"],
-        "properties": {
-            "taskId": {"type": "string", "description": "SubAgentAsync 返回的 taskId。"},
-            # wait 此前只存在于内部 collect_results，ta3 会话里模型看不到它——提示词教它「阻塞等待」，
-            # 工具却没有该参数，只能拿到「仍在运行」就返回；这里补齐为模型可见参数。
-            "wait": {"type": "boolean",
-                     "description": "true = 阻塞等待子代理结束再返回；默认 false 立即查询当前状态。"},
-            # plan-156-620：长结论分段读取（结果末尾提示未读完时按给出的值续读）
-            "reportOffset": {"type": "integer", "description": "分段读取结论的起始字符位置；结果提示尚未读完时按提示的值再次查询，直到读完。"},
-        },
-    }),
-    _f("TaskCancel", "取消仍在运行的异步子代理任务（任务不再需要时及时取消，避免继续消耗额度）。", {
-        "type": "object", "required": ["taskId"],
-        "properties": {"taskId": {"type": "string", "description": "要取消的 taskId。"}},
-    }),
-]
-
-# ── webSearch ──
-_WEB_SEARCH: list[dict] = [
-    _f("WebSearch", "联网搜索获取实时信息，返回标题、链接与摘要。不支持按发布时间过滤。searchEngine 取值映射到实际搜索源：search_std=默认引擎（WorkBuddy 云端搜索，用已登录账号；未登录时自动回退 bing 抓取）、search_pro=google、search_pro_sogou/search_pro_quark=duckduckgo（后两者可能需要配置 HTTP 代理）。", {
-        "type": "object", "required": ["query"],
-        "properties": {
-            "query": {"type": "string", "description": "要搜索的问题或关键词。建议不超过 70 个字符。"},
-            "searchEngine": {"type": "string", "enum": ["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
-                             "description": "搜索源编码：search_std=默认引擎（WorkBuddy 云端，未登录时自动回退 bing）；search_pro=google；search_pro_sogou/search_pro_quark=duckduckgo（后两者需配置 HTTP 代理）。"},
-            "maxResults": {"type": "integer", "minimum": 1, "maximum": 50, "description": "最多返回多少条结果，范围 1-50。"},
-        },
-    }),
-]
-
-# ── background（plan-153-705：当前项目补充，非参考项目原生——后台进程管理）──
-_BACKGROUND: list[dict] = [
-    _f("BashStatus", "查询后台命令的运行状态与增量日志。shellId 来自 Bash 以 waitForCompletion=false "
-        "启动命令时的返回。offset 传上次返回的 next_offset 可增量读取新日志；首次查询传 0（或不传）。"
-        "会自己结束的后台命令不用反复查询，跑完后系统会主动回报；长驻服务只需看日志确认启动成功。", {
-        "type": "object", "required": ["shellId"],
-        "properties": {
-            "shellId": {"type": "string", "description": "后台命令标识（bg_ 开头）"},
-            "offset": {"type": "integer", "description": "日志起始字符偏移（默认 0，增量读取传上次 next_offset）"},
-        },
-    }),
-    _f("BashKill", "终止一个后台命令（及其全部子进程）。shellId 来自 Bash 以 waitForCompletion=false "
-        "启动命令时的返回。长驻服务（dev server、watch、后端服务）用完后必须主动停止，不要留在后台占着端口。", {
-        "type": "object", "required": ["shellId"],
-        "properties": {
-            "shellId": {"type": "string", "description": "后台命令标识（bg_ 开头）"},
-        },
-    }),
-]
-
-# ── 自造伪装工具的 schema 已改为动态派生（plan-365-1769 F1）──
-# 浏览器套件（BrowserXxx）、电脑操控（DesktopXxx）、子代理管理（SubAgentInspect 等）
-# 这些**自造伪装名**的 schema 一律从**真实工具 schema** 派生——只把 function.name
-# 改成伪装名，描述与参数原样沿用（见 ta3_tool_aliases.DYNAMIC_SCHEMA_ALIASES 与
-# disguise_tools 的实现）。
-#
-# 为什么删除这里的硬编码副本：硬编码快照是**漂移源头**——desktop_click 在
-# plan-365-1757 新增了 ref/image_x/image_y/text_target/expect 等参数，但伪装层仍在用
-# 旧快照整体替换真实 schema，导致 ta3 会话里模型只看到 x/y，只能「看图心算屏幕坐标」，
-# 直接造成点击准确率大幅下降（plan-365-1769）。改为派生后，真实工具演进 ta3 侧自动跟随。
+def sort_keys_deep(value):
+    """对齐官方 `sortObjectKeysDeep`：对象键按码点序递归排序，数组保持元素顺序。"""
+    if isinstance(value, list):
+        return [sort_keys_deep(v) for v in value]
+    if isinstance(value, dict):
+        return {k: sort_keys_deep(value[k]) for k in sorted(value)}
+    return value
 
 
-TA3_NATIVE_SCHEMAS: dict[str, dict] = {
-    s["function"]["name"]: s for s in [
-        # 仅保留 ta3 原生工具与「有参数适配器」的工具；
-        # 自造伪装工具（Desktop*/Browser*/附件读取等）已改走动态派生，不在此表。
-        *_CORE, *_EDIT, *_TASK, *_WEB_SEARCH, *_BACKGROUND,
-    ]
+def canonicalize_tool(tool: dict) -> dict:
+    """对齐官方 `canonicalizeTool`：只对 function.parameters 做深度键排序。"""
+    fn = dict(tool.get("function") or {})
+    if fn.get("parameters"):
+        fn["parameters"] = sort_keys_deep(fn["parameters"])
+    return {**tool, "function": fn}
+
+
+# ─────────────────────── 官方内置工具原文（15 项） ───────────────────────
+# 以下字面量逐字取自官方 plugins/tools/*.js 的 function 定义；改动任何一个字符都会让
+# test_ta3_tools_parity_601 的官方哈希断言失败。
+
+# ── Read（plugins/tools/read.js）──
+_READ_DESC = (
+    "读取工作区内指定文件内容。DOCX 小文档默认完整读取，大文档返回概要；概要只确认版本，不代表全文已读。"
+    "docx.mode=changes 由本地工具比较上次基线与最新正文、直接格式、样式定义及表格结构，返回变化摘要，"
+    "无需 AI 全文比较；首次/重启无历史基线会明确说明。search 用 query 查找并读取匹配段落，"
+    "paragraphs 读取目标段落，table 读取目标表格行，styles 读取样式，xml 读取原始 OOXML 部件。"
+    "返回 nextRead 时用其中的 docx.cursor 继续同一范围，直到 requestedComplete=true；"
+    "超长单段、表格行和 XML 也会分页。可直接读取目标段落或 XML 并取得版本，不必先单独读取概要。"
+    "同一会话已读的完全相同字节副本会复用读取记录；修改前读取目标范围，不要求读完无关文档。"
+    "保留用户已有样式。DOCUMENT_VERSION_CHANGED 表示分页/读取后版本已变，重新从概要和目标范围读取。"
+)
+_READ_PARAMS = {
+    "type": "object",
+    "required": ["filepath"],
+    "properties": {
+        "filepath": {
+            "type": "string",
+            "description": "文件路径，可以是相对工作区根目录的路径或工作区内绝对路径。",
+        },
+        "document": {
+            "type": "object",
+            "description": (
+                "XLSX/PPTX/PDF 的版本化分页读取。默认 overview；XLSX/PPTX 用 xml 读取目标部件，"
+                "PDF 用 pages 读取目标页；概要不代表全文已读。返回 nextRead 时原样续读，直至 requestedComplete=true。"
+            ),
+            "properties": {
+                "mode": {"type": "string", "enum": ["overview", "xml", "part", "pages"]},
+                "part": {"type": "string", "description": "包内 XML/.rels 路径，overview 列出可用部件。"},
+                "start": {"type": "integer", "minimum": 1, "description": "PDF 页码或包目录起始项，从 1 开始。"},
+                "count": {
+                    "type": "integer", "minimum": 1, "maximum": 200,
+                    "description": "PDF 最多 20 页，包目录最多 200 项。part 模式可读二进制部件的大小和摘要，不表示已查看图像。",
+                },
+                "documentVersion": {"type": "string"},
+                "cursor": {"type": "string"},
+            },
+        },
+        "docx": {
+            "type": "object",
+            "description": "仅 DOCX 使用；XLSX/PPTX/PDF 用 document 参数。start 从 1 开始；paragraphs 按段落、table 按行、styles 按样式。",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "overview", "changes", "search", "paragraphs", "table", "styles", "xml"],
+                },
+                "query": {
+                    "type": "string",
+                    "description": "search 模式按原文子串查找，返回匹配段落编号及内容；避免为定位某一句话读取整份文档。",
+                },
+                "part": {
+                    "type": "string",
+                    "description": (
+                        "默认 word/document.xml；xml 模式还支持 [Content_Types].xml、_rels/.rels、"
+                        "word/_rels/document.xml.rels 等包内 XML/关系部件，不允许路径跳转。"
+                    ),
+                },
+                "start": {"type": "integer", "minimum": 1},
+                "count": {"type": "integer", "minimum": 1, "maximum": 200},
+                "tableIndex": {"type": "integer", "minimum": 1, "description": "table 模式的表格编号，来自概要。"},
+                "styleIds": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "styles 模式指定样式编号；自动包含继承与关联样式。",
+                },
+                "documentVersion": {"type": "string", "description": "可提供概要版本，防止多次读取混用不同版本。"},
+                "cursor": {"type": "string", "description": "原样传入上次 nextRead.docx.cursor；包含版本及分页位置。"},
+            },
+        },
+    },
+}
+
+# ── List（plugins/tools/list.js）──
+_LIST_DESC = "列出工作区内目录下的文件和文件夹。"
+_LIST_PARAMS = {
+    "type": "object",
+    "properties": {
+        "dirPath": {"type": "string", "description": "目录路径，默认为工作区根目录。"},
+        "recursive": {"type": "boolean", "description": "是否递归列出。大型项目中请谨慎使用。"},
+    },
+}
+
+# ── Search（plugins/tools/search.js）──
+_SEARCH_DESC = "使用 ripgrep 在工作区中搜索正则表达式，自动跳过常见构建和依赖目录。"
+_SEARCH_PARAMS = {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+        "query": {"type": "string", "description": "要搜索的正则表达式。"},
+        "path": {"type": "string", "description": "可选的搜索目录或文件路径。"},
+    },
+}
+
+# ── Diff（plugins/tools/diff.js）──
+_DIFF_DESC = "查看当前工作区相对 Git HEAD 的未提交变更。"
+_DIFF_PARAMS = {"type": "object", "properties": {}}
+
+# ── ReadSkill（plugins/tools/readSkill.js）──
+_READ_SKILL_DESC = "按技能名称读取完整技能说明。可用技能会出现在系统提示词的 <available_skills> 中。"
+_READ_SKILL_PARAMS = {
+    "type": "object",
+    "required": ["skillName"],
+    "properties": {
+        "skillName": {"type": "string", "description": "技能名称，必须匹配 available_skills 中的 name。"},
+    },
+}
+
+# ── Write（plugins/tools/write.js）──
+_WRITE_DESC = (
+    '在工作区内创建或覆盖文件。mode="append" 时改为追加到文件末尾（文件不存在则创建；'
+    "追加前仍需先读取一次该文件；行尾会按文件现有风格适配）。此工具会修改文件，默认需要用户审批。"
+)
+_WRITE_PARAMS = {
+    "type": "object",
+    "required": ["filepath", "content"],
+    "properties": {
+        "filepath": {"type": "string", "description": "要写入的文件路径，必须位于当前工作区内。"},
+        "content": {"type": "string", "description": '要写入的内容；mode="append" 时为要追加到文件末尾的内容。'},
+        "mode": {
+            "type": "string",
+            "enum": ["overwrite", "append"],
+            "description": "可选。默认 overwrite（整体覆盖）；append 追加到文件末尾，适合大文件追加场景，无需整文件读入。",
+        },
+    },
+}
+
+# ── Edit（plugins/tools/edit.js）──
+_EDIT_DESC = "在工作区内对文件做精确字符串替换。此工具会修改文件，默认需要用户审批。"
+_EDIT_PARAMS = {
+    "type": "object",
+    "required": ["filepath", "oldString", "newString"],
+    "properties": {
+        "filepath": {"type": "string", "description": "要编辑的文件路径，必须位于当前工作区内。"},
+        "oldString": {"type": "string", "description": "需要被替换的原始字符串，必须和文件内容精确匹配。"},
+        "newString": {"type": "string", "description": "替换后的字符串。"},
+        "replaceAll": {"type": "boolean", "description": "是否替换所有匹配项。默认 false，只允许唯一匹配。"},
+    },
+}
+
+# ── get_file_outline（plugins/tools/getFileOutline.js）──
+_OUTLINE_DESC = "提取文件的结构骨架，返回所有 import、class、function、method 的定义及其行号。适用于大文件的全局结构分析。"
+_OUTLINE_PARAMS = {
+    "type": "object",
+    "required": ["filepath"],
+    "properties": {
+        "filepath": {"type": "string", "description": "要分析的文件路径。可以是相对工作区根目录的路径或工作区内绝对路径。"},
+    },
+}
+
+# ── get_project_memory（plugins/tools/getProjectMemory.js）──
+_GET_MEMORY_DESC = "获取已保存的项目记忆。传入 'all' 返回所有记忆完整内容；传入关键词进行搜索匹配。"
+_GET_MEMORY_PARAMS = {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+        "query": {"type": "string", "description": "查询关键词，或 'all' 返回所有记忆。"},
+    },
+}
+
+# ── generate_project_memory（plugins/tools/generateProjectMemory.js）──
+_GEN_MEMORY_DESC = "将记忆保存为持久化文件。memories 参数直接传入结构化记忆数组；chatHistory 参数可触发自动提取。"
+_GEN_MEMORY_PARAMS = {
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "description": "要保存的记忆列表。每项包含 name、description、type、content。",
+            "items": {
+                "type": "object",
+                "required": ["name", "type", "content"],
+                "properties": {
+                    "name": {"type": "string", "description": "记忆名称，例如 user_role、feedback_testing。"},
+                    "description": {"type": "string", "description": "一行描述，用于未来判断相关性。"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["user", "feedback", "project", "reference"],
+                        "description": "user/feedback 存全局，project/reference 存当前项目。",
+                    },
+                    "content": {"type": "string", "description": "记忆正文。feedback/project 建议包含 Why 和 How to apply。"},
+                },
+            },
+        },
+        "chatHistory": {
+            "type": "array",
+            "description": "聊天历史数组。仅在没有 memories 时用于自动提取。",
+            "items": {"type": "object"},
+        },
+    },
+}
+
+# ── WebSearch（plugins/tools/webSearch.js）──
+_WEB_SEARCH_DESC = "搜索互联网，获取最新网页、新闻、产品信息、文档和无法从当前代码库得知的外部事实。"
+_WEB_SEARCH_PARAMS = {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+        "query": {"type": "string", "description": "要搜索的问题或关键词。智谱搜索建议不超过 70 个字符。"},
+        "searchEngine": {
+            "type": "string",
+            "enum": ["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
+            "description": "仅智谱搜索生效：搜索引擎编码。search_std 为基础版，search_pro 为高阶版，search_pro_sogou/搜狗，search_pro_quark/夸克。",
+        },
+        "maxResults": {
+            "type": "integer", "minimum": 1, "maximum": 50,
+            "description": "仅智谱搜索生效：最多返回多少条结果，范围 1-50。",
+        },
+        "timeRange": {
+            "type": "string",
+            "enum": ["day", "week", "month", "year", "d", "w", "m", "y",
+                     "oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"],
+            "description": "仅智谱搜索生效：按发布时间过滤结果，例如 day/week/month/year；不填则不限时间。",
+        },
+        "domain": {"type": "string", "description": "仅智谱搜索生效：只搜索指定白名单域名，例如 www.example.com。"},
+        "includeDomains": {
+            "type": "array",
+            "description": "仅智谱搜索生效：只搜索这些域名。智谱接口只支持一个白名单域名，工具会使用第一个。",
+            "items": {"type": "string"},
+        },
+        "contentSize": {
+            "type": "string", "enum": ["medium", "high"],
+            "description": "仅智谱搜索生效：返回网页摘要长度。medium 适合常规问答，high 会返回更多细节。",
+        },
+        "searchIntent": {
+            "type": "boolean",
+            "description": "仅智谱搜索生效：是否启用搜索意图识别。默认关闭，开启后会先判断搜索意图再执行检索。",
+        },
+        "requestId": {"type": "string", "description": "仅智谱搜索生效：可选请求唯一标识，长度 6-64。"},
+        "userId": {"type": "string", "description": "仅智谱搜索生效：可选终端用户唯一标识，长度 6-128。"},
+    },
+}
+
+# ── Bash（plugins/tools/bash.js:14-29,46-63）──
+# 基础描述与参数是平台无关的官方原文；运行环境提示由 `bash_description` 按平台追加
+# （对齐 shellResolver.appendShellEnvironmentNote：`{描述}\n\n{提示}`）。
+_BASH_BASE_DESC = (
+    "在工作区根目录运行终端命令。默认需要审批。"
+    "删除、移动等不可恢复操作前，必须单独调用一次只读命令列出目标，等结果返回并确认后再执行；"
+    "不要在同一条命令里把列出和删除串起来——列出结果不会回到你的上下文，等于没有核对。"
+    "启动 dev server、watch、后端服务等长驻进程时，将 waitForCompletion 设为 false。"
+    "Word 表格样式用 EditWordDocument formatTable；DOCX/XLSX/PPTX/PDF 脚本修改优先用 EditDocument runScript"
+    " 一次完成副本、执行、校验和保存；交互修改可 prepare/commit。不要覆盖原文档或重跑旧生成脚本。"
+    "文件编辑应由专门的编辑工具完成。"
+)
+_BASH_PARAMS = {
+    "type": "object",
+    "required": ["purpose", "command"],
+    "properties": {
+        "purpose": {
+            "type": "string",
+            "description": (
+                '用一句中文说明这条命令做什么、会改动哪些文件或目录，例如"删除 dist 下的全部构建产物"。'
+                "必须与实际命令一致：声称的范围小于命令实际影响范围（例如说只删日志、命令却删除整个目录），"
+                "或笼统到看不出会改动什么，审核都会被拒绝。"
+            ),
+        },
+        "command": {"type": "string", "description": "要执行的命令。删除、移动类命令先用只读命令核对目标范围。"},
+        "waitForCompletion": {
+            "type": "boolean",
+            "description": "是否等待命令完成。默认 true；启动 dev server、watch、后端服务等长驻进程时必须设为 false，命令会进入后台运行。",
+        },
+    },
+}
+
+# 官方 shellResolver.js:102-106 的三段原文
+SHELL_ENVIRONMENT_NOTES: dict[str, str] = {
+    "git-bash": (
+        "当前 Windows 环境通过 bash（Git Bash 或同类）运行命令，支持 bash 语法：&&、管道、单引号、$VAR、"
+        "grep/head/sed 等。不要使用 cmd 专有语法（如 cd /d、%VAR%、type、dir /b）。"
+        '调用带 / 开头参数的 Windows 原生工具时，可加 MSYS_NO_PATHCONV=1 前缀，或用 cmd //c "..." 包一层。'
+        '删除前单独用 ls -d <pattern> 或 find <目录> -name "<pattern>" 列出目标，不要和删除写在同一条命令里。'
+    ),
+    "cmd": (
+        "当前 Windows 环境通过 cmd.exe 运行命令（不是 bash）：多命令串联用 &&；环境变量用 %VAR%；"
+        "空设备用 NUL（不是 /dev/null）；不要使用单引号（会被当作普通字符、命令可能静默失效），代码参数请改用双引号；"
+        "ls/cat/grep/head/sleep 等 UNIX 命令不可用（改用 dir/type/findstr/timeout）。"
+        "如需 bash 语法可安装 Git Bash，安装后重启应用自动启用。"
+        "删除前单独用 dir /b /s <pattern> 列出目标，不要和删除写在同一条命令里。"
+    ),
+    "posix": (
+        "当前环境通过 POSIX shell（zsh/sh）运行命令，支持 bash 语法与 UNIX 工具。"
+        '删除前单独用 ls -d <pattern> 或 find <目录> -name "<pattern>" 列出目标，不要和删除写在同一条命令里。'
+    ),
+}
+
+# plan-601：官方没有 PowerShell 分支（Windows 上只区分 Git Bash / cmd），而本项目的终端
+# 实际跑在 PowerShell 上。照搬官方探测会让描述写「bash 语法」或「cmd 方言」，与真实执行
+# 环境不符、命令必然出错，因此按官方句式补两段 PowerShell 文案——这是已知的非原文差异点。
+POWERSHELL_ENVIRONMENT_NOTES: dict[str, str] = {
+    "pwsh": (
+        "当前 Windows 环境通过 PowerShell 7（pwsh）运行命令（不是 bash，也不是 cmd.exe）：多命令串联用 ; 或 &&；"
+        "环境变量用 $env:VAR；空设备用 $null（不是 /dev/null）；单引号字符串不展开变量，需要插值时用双引号；"
+        "grep/sed/awk/head 等 UNIX 命令不可用（改用 Select-String/Get-Content/Get-ChildItem），ls -la 这类短横线参数不生效。"
+        "删除前单独用 Get-ChildItem <pattern> 列出目标，不要和删除写在同一条命令里。"
+    ),
+    "powershell": (
+        "当前 Windows 环境通过 Windows PowerShell 运行命令（不是 bash，也不是 cmd.exe）：多命令串联用 ;（不支持 &&）；"
+        "环境变量用 $env:VAR；空设备用 $null（不是 /dev/null）；单引号字符串不展开变量，需要插值时用双引号；"
+        "grep/sed/awk/head 等 UNIX 命令不可用（改用 Select-String/Get-Content/Get-ChildItem），ls -la 这类短横线参数不生效。"
+        "删除前单独用 Get-ChildItem <pattern> 列出目标，不要和删除写在同一条命令里。"
+    ),
 }
 
 
+def _current_shell_kind() -> str:
+    """真实终端的 shell 类别（与 terminal_exec 同一事实源）；非 Windows 恒为 posix。"""
+    if sys.platform != "win32":
+        return "posix"
+    try:
+        from app.orchestration.tools.shell_env import shell_kind
+
+        kind = shell_kind()
+    except Exception:  # pragma: no cover - 探测失败时按 Windows 默认（PowerShell 7）
+        return "pwsh"
+    return "posix" if kind == "unix" else kind
+
+
+def shell_environment_note(kind: str) -> str:
+    return SHELL_ENVIRONMENT_NOTES.get(kind) or POWERSHELL_ENVIRONMENT_NOTES.get(kind) or ""
+
+
+def bash_description(kind: str | None = None) -> str:
+    note = shell_environment_note(kind or _current_shell_kind())
+    return f"{_BASH_BASE_DESC}\n\n{note}" if note else _BASH_BASE_DESC
+
+
+def strip_shell_environment_notes(text: str) -> str:
+    """对齐官方 `stripShellEnvironmentNotes`：剥离任意一段运行环境提示（快照比对用）。"""
+    out = str(text or "")
+    for note in (*SHELL_ENVIRONMENT_NOTES.values(), *POWERSHELL_ENVIRONMENT_NOTES.values()):
+        out = out.replace(f"\n\n{note}", "")
+    return out
+
+
+# ── TodoWrite（plugins/tools/todoWrite.js）──
+_TODO_DESC = "创建或更新当前会话的任务列表。处理需要跟踪多个步骤的复杂任务时使用。每次调用都会完整替换任务列表。"
+_TODO_PARAMS = {
+    "type": "object",
+    "required": ["todos"],
+    "properties": {
+        "todos": {
+            "type": "array",
+            "description": "完整任务列表，按执行顺序排列。",
+            "items": {
+                "type": "object",
+                "required": ["content", "status"],
+                "properties": {
+                    "content": {"type": "string", "description": "任务简短描述。"},
+                    "activeForm": {
+                        "type": "string",
+                        "description": "进行中描述。status 为 in_progress 时建议提供；未提供时会自动使用 content。",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "任务状态。",
+                    },
+                },
+            },
+        },
+    },
+}
+
+# ── ask_user（plugins/tools/askUser.js:158-199）──
+_ASK_USER_DESC = (
+    "向用户发起一次性问卷以获取确认或决策。适用于：需要用户在多个方案间选择、需要补充业务细节、"
+    "执行有风险操作前需确认等场景。可一次问多个问题，每个问题可给选项（用户也可自由输入），用户可跳过任意问题。"
+    "工具会阻塞等待用户作答，问卷以卡片形式出现在当前会话里；提交后返回每个问题的回答"
+    "（选项或自定义文本；被跳过的问题标记为跳过）。不要用文本输出来询问用户，直接调用本工具。"
+)
+_ASK_USER_PARAMS = {
+    "type": "object",
+    "required": ["questions"],
+    "properties": {
+        "title": {"type": "string", "description": "问卷标题，简述这次提问的目的，例如「实现方案确认」"},
+        "questions": {
+            "type": "array",
+            "minItems": 1,
+            "description": "问题列表，按重要性排序",
+            "items": {
+                "type": "object",
+                "required": ["question"],
+                "properties": {
+                    "id": {"type": "string", "description": "问题唯一标识，缺省为 q1/q2…"},
+                    "question": {"type": "string", "description": "问题正文，用一句清晰的话提问"},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "给用户看的背景说明（可选）：为什么要问、各选项差别或影响。"
+                            "问题需要上下文才能答准时填写，写得越具体用户越答得准"
+                        ),
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "候选选项（推荐提供 2-4 个）",
+                        "items": {
+                            "type": "object",
+                            "required": ["label"],
+                            "properties": {
+                                "label": {"type": "string", "description": "选项展示文本"},
+                                "value": {"type": "string", "description": "选项值，缺省等于 label"},
+                                "description": {
+                                    "type": "string",
+                                    "description": (
+                                        "给用户看的选项说明（可选）：选它会产生什么结果、与其它选项的差别；"
+                                        "尽量每个选项都给或都不给，只有个别选项带说明会显得突兀"
+                                    ),
+                                },
+                            },
+                        },
+                    },
+                    "allowCustom": {"type": "boolean", "description": "是否允许自定义输入，默认 true"},
+                    "multiple": {
+                        "type": "boolean",
+                        "description": "是否允许多选（默认单选）。选项之间互相独立、可以同时成立时设为 true",
+                    },
+                },
+            },
+        },
+    },
+}
+
+# ── SubAgent（plugins/tools/subAgent.js）──
+# 描述里的 send_message / interrupt_agent 是官方原文，有意保持一致（不替换为本项目工具名）。
+_SUB_AGENT_DESC = (
+    "把任务委派给独立会话里的子代理：立即返回子代理ID，本轮不阻塞，每一轮完成后结果自动推送回当前对话。\n"
+    "适合拆出范围明确的独立工作（研究、限定范围的实现、分析），这样它不占用本对话的上下文；"
+    "你拿到的是它的结果，不是中间步骤。\n"
+    "默认（inherit_context=false）它只看得到 prompt 里的内容，"
+    "需要它知道的前提、结论、约束都要写进 prompt。\n"
+    "inherit_context=true 时它继承本对话已完成的轮次（截至最近一次完整回复，不含正在进行的这一轮），"
+    '适合"接着这个结论继续分析""复审刚才的改动"这类离不开上下文的活；'
+    "继承的是创建时的快照，之后本对话再推进它也看不到。\n"
+    "subagent_type 只是角色提示词，不改变子代理的工具面与权限。\n"
+    "需要追加指令用 send_message，打断它当前这一轮用 interrupt_agent；子代理本身会保留。"
+)
+_SUB_AGENT_PARAMS = {
+    "type": "object",
+    "required": ["prompt", "description"],
+    "properties": {
+        "inherit_context": {
+            "type": "boolean",
+            "description": "是否让子代理继承本对话已完成的轮次。默认 false（不继承，只看 prompt）。",
+        },
+        "subagent_type": {
+            "type": "string",
+            "enum": ["Explore", "Plan", "GeneralPurpose", "Verification"],
+            "description": (
+                "角色提示词：Explore（只读研究）、Plan（只读出计划）、Verification（审查挑错）、"
+                "GeneralPurpose（默认，独立分析给结论）。不改变工具面与权限。"
+            ),
+        },
+        "prompt": {"type": "string", "description": "传递给子代理的任务描述。"},
+        "description": {"type": "string", "description": "5 个词以内的任务摘要，必填：子会话面板用它当标题。"},
+    },
+}
+
+# 官方原文（未规范化、Bash 不含运行环境提示），供测试与官方定义逐字比对
+TA3_OFFICIAL_DEFINITIONS: dict[str, dict] = {
+    "Read": {"name": "Read", "description": _READ_DESC, "parameters": _READ_PARAMS},
+    "List": {"name": "List", "description": _LIST_DESC, "parameters": _LIST_PARAMS},
+    "Search": {"name": "Search", "description": _SEARCH_DESC, "parameters": _SEARCH_PARAMS},
+    "Diff": {"name": "Diff", "description": _DIFF_DESC, "parameters": _DIFF_PARAMS},
+    "ReadSkill": {"name": "ReadSkill", "description": _READ_SKILL_DESC, "parameters": _READ_SKILL_PARAMS},
+    "Write": {"name": "Write", "description": _WRITE_DESC, "parameters": _WRITE_PARAMS},
+    "Edit": {"name": "Edit", "description": _EDIT_DESC, "parameters": _EDIT_PARAMS},
+    "get_file_outline": {"name": "get_file_outline", "description": _OUTLINE_DESC, "parameters": _OUTLINE_PARAMS},
+    "get_project_memory": {"name": "get_project_memory", "description": _GET_MEMORY_DESC, "parameters": _GET_MEMORY_PARAMS},
+    "generate_project_memory": {
+        "name": "generate_project_memory", "description": _GEN_MEMORY_DESC, "parameters": _GEN_MEMORY_PARAMS,
+    },
+    "WebSearch": {"name": "WebSearch", "description": _WEB_SEARCH_DESC, "parameters": _WEB_SEARCH_PARAMS},
+    "Bash": {"name": "Bash", "description": _BASH_BASE_DESC, "parameters": _BASH_PARAMS},
+    "TodoWrite": {"name": "TodoWrite", "description": _TODO_DESC, "parameters": _TODO_PARAMS},
+    "ask_user": {"name": "ask_user", "description": _ASK_USER_DESC, "parameters": _ASK_USER_PARAMS},
+    "SubAgent": {"name": "SubAgent", "description": _SUB_AGENT_DESC, "parameters": _SUB_AGENT_PARAMS},
+}
+
+
+def _build_native(name: str, shell_kind: str | None = None) -> dict:
+    d = TA3_OFFICIAL_DEFINITIONS[name]
+    desc = bash_description(shell_kind) if name == "Bash" else d["description"]
+    return canonicalize_tool(_f(d["name"], desc, d["parameters"]))
+
+
+# 上行快照（已规范化）。同一快照对象跨请求复用：字节稳定，利于网关前缀缓存。
+TA3_NATIVE_SCHEMAS: dict[str, dict] = {name: _build_native(name) for name in TA3_OFFICIAL_DEFINITIONS}
+_BASH_BY_KIND: dict[str, dict] = {}
+
+
+def native_schema(alias: str) -> dict | None:
+    """内置快照；Bash 按当前 shell 类别取（用户切换终端后无需重启也能跟上）。"""
+    if alias != "Bash":
+        return TA3_NATIVE_SCHEMAS.get(alias)
+    kind = _current_shell_kind()
+    cached = _BASH_BY_KIND.get(kind)
+    if cached is None:
+        cached = _build_native("Bash", kind)
+        _BASH_BY_KIND[kind] = cached
+    return cached
+
+
 def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
-    """当前项目工具 schema → ta3 伪装 schema（无映射的工具剔除）。
+    """当前项目工具 schema → ta3 上行 schema（未映射的工具剔除），按官方顺序输出。"""
+    from app.models.providers.ta3_mcp import (
+        EXTENSION_SERVER_ID, build_extension_tool, disguise_schema, is_mcp_tool, mcp_parts,
+    )
+    from app.models.providers.ta3_tool_aliases import TO_TA3, TO_TA3_EXTENSION
 
-    plan-365-1769 F1：**自造伪装工具**（Desktop*、Browser*、附件读取、子代理管理等，
-    见 `DYNAMIC_SCHEMA_ALIASES`）的 schema **从真实工具 schema 派生**——只把
-    `function.name` 换成伪装名，描述与参数原样沿用。这样真实工具新增/调整参数时
-    ta3 侧自动跟随，不会再出现「真实工具有、ta3 侧看不到」的漂移（这正是
-    desktop_click 的 ref/image_x 在 ta3 会话不可见、只能手算坐标导致点错的原因）。
-
-    其余工具走两条既有路径：
-    - ta3 原生工具与有参数适配器的工具 → `TA3_NATIVE_SCHEMAS` 的硬编码快照；
-    - MCP 工具名字动态、无法预先枚举 → 改名为 ta3 风格伪装名（见 `ta3_mcp`），不剔除。
-    """
-    import copy
-
-    from app.models.providers.ta3_mcp import disguise_schema, is_mcp_tool
-    from app.models.providers.ta3_tool_aliases import DYNAMIC_SCHEMA_ALIASES, TO_TA3
-
-    out: list[dict] = []
+    builtins: list[dict] = []
+    mcp: list[tuple[str, str, dict]] = []
+    seen: set[str] = set()
     for schema in tool_schemas:
         function = schema.get("function") or {}
         real_name = function.get("name") or ""
         alias = TO_TA3.get(real_name)
-        if alias is None:
-            if is_mcp_tool(real_name):
-                out.append(disguise_schema(schema))
+        if alias is not None:
+            native = native_schema(alias)
+            if native is not None and alias not in seen:
+                seen.add(alias)
+                builtins.append(native)
             continue
-
-        # 自造工具：动态派生（单一事实来源，杜绝硬编码漂移）
-        if alias in DYNAMIC_SCHEMA_ALIASES:
-            derived = copy.deepcopy(schema)
-            derived.setdefault("function", {})["name"] = alias
-            out.append(derived)
+        # 本项目独有工具 → 拓展 MCP 通道（形态与官方 MCP 工具一致）
+        if real_name in TO_TA3_EXTENSION:
+            mcp.append((EXTENSION_SERVER_ID, real_name, canonicalize_tool(build_extension_tool(schema))))
             continue
-
-        native = TA3_NATIVE_SCHEMAS.get(alias)
-        if native is None:
+        # 真实 MCP 工具 → 官方 MCP 形态；排序键用 serverId + MCP 原始工具名（同官方 _mcpToolName）
+        if is_mcp_tool(real_name):
+            _alias, sid, tool, _server = mcp_parts(real_name, str(function.get("description") or ""))
+            mcp.append((sid, tool, canonicalize_tool(disguise_schema(schema))))
             continue
-        # plan-541-2264: 原「一对多下发」（spawn_subagent → SubAgent + SubAgentAsync）
-        # 已删除——TO_TA3 现在直接指向 SubAgentAsync，一个真实工具对应一个伪装工具；
-        # 同步派发下线后不再需要额外追加异步入口，命中 TA3_NATIVE_SCHEMAS 即产出。
-        out.append(native)
-    return out
+        # 其余无映射：剔除（模型不可见，提示词也不会引导）
+    builtins.sort(key=lambda s: s["function"]["name"])
+    mcp.sort(key=lambda t: f"{t[0]}\u0000{t[1]}")
+    return [*builtins, *(t[2] for t in mcp)]
