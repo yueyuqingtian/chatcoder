@@ -23,6 +23,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         pet: "pet.html",
+        ...(process.env.CHATCODER_PERF_FIXTURE === "1" ? { performance: "performance.html" } : {}),
       },
     },
   },

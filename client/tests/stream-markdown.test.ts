@@ -106,3 +106,16 @@ eq(tail(""), { text: "", kind: "text" }, "空文本");
 
 if (failures > 0) { console.error(`\n${failures} 项失败`); process.exit(1); }
 console.log("\n全部通过");
+
+// plan-20261101-performance：扫描量必须随输入线性增长，而不是每次重扫长围栏。
+{
+  const source = "```ts\n" + "const value = 1;\n".repeat(15000);
+  let state: SplitState | null = null;
+  for (let end = 256; end < source.length; end += 256) state = advanceSplit(state, source.slice(0, end));
+  state = advanceSplit(state, source);
+  if (state.scanChars !== source.length) throw new Error(`长围栏重复扫描：${state.scanChars}/${source.length}`);
+  const sealed = state.sealed;
+  state = advanceSplit(state, source + "tail");
+  if (sealed !== state.sealed) throw new Error("未封块时不应复制 sealed");
+  console.log(`长围栏扫描：${state.scanChars} 字符，输入 ${state.src.length} 字符`);
+}

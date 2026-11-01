@@ -33,6 +33,15 @@ export interface SplitState {
   pending: string;
   /** 尾块第一个字符处的围栏状态（重扫尾块时的起点） */
   pendingFence: Fence | null;
+  /** plan-20261101-performance：保留扫描游标，长围栏不能每帧从头扫。 */
+  scanned: number;
+  blockStart: number;
+  lineStart: number;
+  fence: Fence | null;
+  scanChars: number;
+  tableRows: number;
+  tableColumns: number;
+  tableValid: boolean;
 }
 
 export type TailKind = "text" | "fence" | "table";
@@ -69,12 +78,15 @@ function trimBlock(s: string): string {
 
 /** 对「尾块原文 + 新增」重新扫描：已完成的行才参与判定，封好的块推入 sealed，其余留作新尾块。 */
 function rescan(state: SplitState, text: string): void {
-  let fence = state.pendingFence;
-  let blockStart = 0;
-  let pos = 0;
-  for (;;) {
-    const nl = text.indexOf("\n", pos);
-    if (nl < 0) break; // 其后是尚未换行的最后一行：不参与封块判定
+  let fence = state.fence;
+  let blockStart = state.blockStart;
+  let pos = state.lineStart;
+  let changed = false;
+  // plan-20261101-performance：查找从新增字符开始，未完成行只在换行到达时解析一次。
+  for (let cursor = state.scanned; cursor < text.length;) {
+    const nl = text.indexOf("\n", cursor);
+    state.scanChars += (nl < 0 ? text.length : nl + 1) - cursor;
+    if (nl < 0) break;
     const line = text.slice(pos, nl);
     const lineEnd = nl + 1;
     if (fence) {
@@ -83,41 +95,68 @@ function rescan(state: SplitState, text: string): void {
         fence = null;
         // 顶层围栏闭合即封块：代码块立刻获得完整插件渲染，闭合后紧跟的文字也不会拖着它不封
         if (seal) {
+          if (!changed) { state.sealed = state.sealed.slice(); changed = true; }
           state.sealed.push(trimBlock(text.slice(blockStart, nl)));
           blockStart = lineEnd;
         }
       }
     } else {
+      if (line.trimStart().startsWith("|")) {
+        if (state.tableRows === 0) state.tableColumns = cellsOf(line).length;
+        else if (state.tableRows === 1) state.tableValid = isDelimiterRow(line, state.tableColumns);
+        state.tableRows += 1;
+      } else { state.tableRows = 0; state.tableValid = false; }
       const f = openFence(line);
       if (f) {
         fence = f;
       } else if (line.trim() === "") {
-        if (blockStart < pos) state.sealed.push(trimBlock(text.slice(blockStart, pos)));
+        if (blockStart < pos) {
+          if (!changed) { state.sealed = state.sealed.slice(); changed = true; }
+          state.sealed.push(trimBlock(text.slice(blockStart, pos)));
+        }
         blockStart = lineEnd;
       }
     }
     pos = lineEnd;
+    cursor = lineEnd;
   }
-  // 起点仍在原尾块开头 → 沿用原起点围栏状态；否则新块必然起于围栏之外
-  state.pendingFence = blockStart === 0 ? state.pendingFence : null;
+  state.fence = fence;
+  state.blockStart = blockStart;
+  state.lineStart = pos;
+  state.scanned = text.length;
   state.pending = text.slice(blockStart);
 }
 
 export function createSplitState(src = ""): SplitState {
-  const st: SplitState = { src, sealed: [], pending: "", pendingFence: null };
+  const st: SplitState = { src, sealed: [], pending: "", pendingFence: null,
+    scanned: 0, blockStart: 0, lineStart: 0, fence: null, scanChars: 0,
+    tableRows: 0, tableColumns: 0, tableValid: false };
   rescan(st, src);
   return st;
 }
 
-/** 增量切块入口：追加场景只扫「尾块 + 新增」（O(新增)）；文本不再以上次为前缀时全量重算。 */
+/** plan-20261101-performance：追加只扫新增字符，改写时重建边界状态。 */
 export function advanceSplit(prev: SplitState | null, src: string): SplitState {
   if (!prev || !src.startsWith(prev.src)) return createSplitState(src);
   if (src !== prev.src) {
-    const delta = src.slice(prev.src.length);
     prev.src = src;
-    rescan(prev, prev.pending + delta);
+    rescan(prev, src);
   }
   return prev;
+}
+
+/** plan-20261101-performance：围栏状态已由扫描器维护，不再为长代码重扫尾块。 */
+export function prepareSplitTail(state: SplitState): PreparedTail {
+  const partial = state.src.slice(state.lineStart);
+  if (state.fence) {
+    return { text: FENCE_PREFIX.test(partial)
+      ? state.src.slice(state.blockStart, state.lineStart) : state.pending, kind: "fence" };
+  }
+  if (state.tableValid && state.tableRows >= 2 && (!partial || partial.trimStart().startsWith("|"))) {
+    return { text: state.tableRows >= 2 && /^\s*\|\s*$/.test(partial)
+      ? state.src.slice(state.blockStart, state.lineStart - 1) : state.pending, kind: "table" };
+  }
+  return prepareTail(state.pending, state.pendingFence);
 }
 
 /** 表格行：去首尾竖线后按未转义竖线切分 */

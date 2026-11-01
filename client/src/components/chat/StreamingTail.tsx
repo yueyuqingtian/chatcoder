@@ -58,6 +58,7 @@ const MainTail = memo(function MainTail({ active, statusLabel, persistedText }: 
   statusLabel?: string;
   persistedText?: string;
 }) {
+  recordComponentRender("streamingTail");
   const text = useMergedStreamText();
   const thinking = useMergedThinkingText();
   return (
@@ -78,6 +79,7 @@ const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel,
   statusLabel?: string;
   persistedText?: string;
 }) {
+  recordComponentRender("streamingTail");
   const text = useChatStore((s) => s.subagentStreams[threadId] || "");
   const thinking = useChatStore((s) => s.subagentThinking[threadId] || "");
   return (
@@ -94,7 +96,8 @@ const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel,
 
 export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel, persistedText }: StreamingTailProps) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
-  recordComponentRender("streamingTail");
+  // plan-20261101-performance：隐藏时卸载订阅者，后台缓冲继续接收，恢复时读最新快照。
+  if (!active) return null;
   
   // plan-334-1661 S3：按数据源分流订阅——主会话不订阅子代理桶、子代理不订阅主会话合并文本，
   // 两边互不牵动重渲染（子代理面板在未就绪时传 -1，按单桶读取自然得到空串）。

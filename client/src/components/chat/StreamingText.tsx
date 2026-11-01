@@ -111,7 +111,8 @@ function useSmoothText(target: string): string {
         const backlog = t.length - cur.length;
         // 窗口几何运动期间流式更新会暂停，结束后可能积累了较大 backlog；
         // 超过 240 字直接一次追平，避免动画结束后又占据多个帧造成二次掉帧。
-        const step = backlog > 240 ? backlog : Math.min(backlog, Math.max(3, Math.ceil(backlog * 0.18)));
+        const step = backlog > 240 ? Math.min(backlog, Math.max(240, Math.ceil(backlog * 0.5)))
+          : Math.min(backlog, Math.max(3, Math.ceil(backlog * 0.18)));
         cur = t.slice(0, cur.length + step);
       }
       if (cur !== shownRef.current) {

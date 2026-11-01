@@ -16,6 +16,7 @@ function parseGrepLines(output: string): Array<{ path: string; line: number; res
   return out;
 }
 import { memo, useEffect, useMemo, useState } from "react";
+import { ViewportBlock } from "../ui/ViewportBlock";
 import { useRunningTicker } from "./useRunningTicker";
 import type { ToolLeaf, ToolNode } from "./timeline";
 import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
@@ -887,7 +888,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
       </div>
       <ChatCollapse open={expanded}>
         <div className="tc-explore-detail">
-          {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
+          <WindowedToolLeaves leaves={leaves} />
         </div>
       </ChatCollapse>
     </div>
@@ -940,11 +941,24 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
       </div>
       <ChatCollapse open={expanded}>
         <div className="tc-explore-detail">
-          {leaves.map((leaf, j) => <LeafRow key={j} leaf={leaf} />)}
+          <WindowedToolLeaves leaves={leaves} />
         </div>
       </ChatCollapse>
     </div>
   );
+});
+
+/** plan-20261101-performance：聚合工具展开后也按小组挂载，整轮虚拟化覆盖不到簇内上千行。 */
+const WindowedToolLeaves = memo(function WindowedToolLeaves({ leaves }: { leaves: ToolLeaf[] }) {
+  if (leaves.length <= 40) return <>{leaves.map((leaf) => <LeafRow key={leaf.callKey} leaf={leaf} />)}</>;
+  const groups = [];
+  for (let start = 0; start < leaves.length; start += 20) {
+    const group = leaves.slice(start, start + 20);
+    groups.push(<ViewportBlock key={group[0].callKey} estimate={group.length * 28}>
+      <div className="tc-leaf-window">{group.map((leaf) => <LeafRow key={leaf.callKey} leaf={leaf} />)}</div>
+    </ViewportBlock>);
+  }
+  return <>{groups}</>;
 });
 
 export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] }) {
@@ -957,7 +971,7 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
           : n.kind === "write-merged"
             ? <WriteMergedRow key={`w${i}`} leaves={n.leaves} />
             : n.kind === "group"
-              ? n.leaves.map((leaf, j) => <LeafRow key={`g${i}-${j}`} leaf={leaf} />)
+              ? <WindowedToolLeaves key={`g${i}`} leaves={n.leaves} />
               // plan-20261021-subq-row：子会话提问是单叶子条目（时间线单独生成，不会并入聚合行）；
               // plan-20261022-release-ci：子会话汇报 / 结论同一行版式
               // plan-549-2281：子代理的提问 / 进度上报也走这一行（它已接替子会话的通知角色）

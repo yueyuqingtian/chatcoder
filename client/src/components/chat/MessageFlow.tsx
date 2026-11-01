@@ -24,13 +24,17 @@ import { SuggestionCard } from "./SuggestionCard";
 import { useTextHighlight } from "../../hooks/useTextHighlight";
 import { MarkdownContent } from "../MarkdownContent";
 import { MsgType } from "@chatcoder/shared";
-import { useChatStore } from "../../store/chat";
+import { useChatStore, mergeHistoryIntoChat } from "../../store/chat";
+import { useVisibleChat } from "../../store/visibleChat";
+import { refreshMessageWindow, olderMessages, aroundMessages, aroundTurnMessages, useMessageHistory } from "../../store/messageHistory";
 import { useUiStore } from "../../store/ui";
 import { useScoped, useScopedGetter, ConvoScopeContext } from "./convoScope";
 import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { api } from "../../api/client";
-import { Empty } from "../ui";
+import { Button, Empty, Tooltip } from "../ui";
 import { StickyBottom } from "./stickyBottom";
+import { FlowVisibilityContext } from "./useRunningTicker";
+import { advanceUserSendSignal, type UserSendSignal } from "../../utils/userSendSignal";
 
 /** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
  *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
@@ -121,6 +125,7 @@ function shouldSkipMeasurement(
 /** plan-75-334 阶段1：子代理面板不消费「turn 错误抑制列表」——固定传空数组，
  *  避免每次渲染新建 [] 破坏 TurnGroup 的 memo 命中。 */
 const EMPTY_TURN_ERRORS: number[] = [];
+const EMPTY_SUBAGENT_MESSAGES: ReturnType<typeof useChatStore.getState>["messages"] = [];
 
 /** plan-308-1542 需求1：任务执行类错误的**唯一**棂位——消息流末尾错误卡。
  *  此前这类错误会同时写入 store.error（右上角 Toast）与消息流，造成重复报错；
@@ -239,6 +244,8 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Timeli
 /** v20: 消息流共享内核——虚拟化 + 贴底滚动跟随 + 跳底按钮 + 入场动画 + 搜索 + JumpDots。
  * 主会话与子代理面板共用；宿主差异（数据源/功能开关/空态文案）经 props 注入。 */
 interface MessageFlowCoreProps {
+  historySessionId?: number | null;
+  historyThreadId?: number;
   entries: TimelineEntry[];
   /** 是否运行中（决定流式占位与贴底策略） */
   running: boolean;
@@ -284,6 +291,8 @@ const HighlightedItem = memo(function HighlightedItem({ keyword, active, childre
 });
 
 function MessageFlowCore({
+  historySessionId,
+  historyThreadId,
   entries,
   running,
   renderEntry,
@@ -309,6 +318,9 @@ function MessageFlowCore({
   const instanceId = useId();
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const history = useMessageHistory(historySessionId ?? null, historyThreadId);
+  const prependAnchor = useRef<{ key: string | number | bigint; offset: number; messageId?: string; messageOffset?: number } | null>(null);
+  const loadingOlder = useRef(false);
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -331,6 +343,11 @@ function MessageFlowCore({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [remoteMatches, setRemoteMatches] = useState<Array<{ id: number; turn_id: number | null }>>([]);
+  const [remoteMore, setRemoteMore] = useState(false);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const searchController = useRef<AbortController | null>(null);
+  const [pendingMatch, setPendingMatch] = useState<{ id: number; turn_id: number | null; loaded?: boolean } | null>(null);
   /** 问题12: scrollspy——当前视口焦点 entry 下标，用于 JumpDots 自动聚焦对应小横条 */
   const [activeEntryIndex, setActiveEntryIndex] = useState(0);
 
@@ -416,6 +433,13 @@ function MessageFlowCore({
   );
 
   const virtualizer = useVirtualizer({
+    getItemKey: (index) => {
+      const entry = entries[index];
+      if (!entry) return index === entries.length && hasStreaming ? "stream" : "trailing";
+      if (entry.kind !== "turn") return `message:${entry.msg.id}`;
+      const first = entry.items[0];
+      return `turn:${entry.turnId ?? (first && "msg" in first ? first.msg.id : index)}`;
+    },
     count: totalCount,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => heightEstRef.current[estBucketOf(index)],
@@ -668,6 +692,42 @@ function MessageFlowCore({
   }, [updateActiveEntry]);
 
 
+  const loadOlder = useCallback(async () => {
+    const el = parentRef.current;
+    if (!el || historySessionId == null || loadingOlder.current || !history.hasBefore) return;
+    loadingOlder.current = true;
+    sticky.release();
+    try {
+      const messages = await olderMessages(historySessionId, historyThreadId);
+      // 数据到达时才捕获锚点，等待期间用户继续滚动或新输出落地不应使旧锚点抢位。
+      if (!sticky.isFollowing()) {
+        const anchor = virtualizer.getVirtualItems().find((item) => item.end > el.scrollTop);
+        if (anchor) {
+          const top = el.getBoundingClientRect().top;
+          const node = Array.from(el.querySelectorAll<HTMLElement>("[data-message-id]")).find((element) => element.getBoundingClientRect().bottom > top);
+          prependAnchor.current = { key: anchor.key, offset: el.scrollTop - anchor.start,
+            messageId: node?.dataset.messageId, messageOffset: node ? node.getBoundingClientRect().top - top : undefined };
+        }
+      }
+      mergeHistoryIntoChat(historySessionId, messages, historyThreadId);
+    }
+    catch { prependAnchor.current = null; }
+    finally { loadingOlder.current = false; }
+  }, [historySessionId, historyThreadId, history.hasBefore, sticky, virtualizer]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    if (!anchor) return;
+    const item = virtualizer.measurementsCache.find((value) => value.key === anchor.key);
+    if (item) virtualizer.scrollToOffset(item.start + anchor.offset);
+    const el = parentRef.current;
+    if (el && anchor.messageId && anchor.messageOffset != null) {
+      const node = el.querySelector<HTMLElement>(`[data-message-id="${anchor.messageId}"]`);
+      if (node) el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.messageOffset;
+    }
+    prependAnchor.current = null;
+  }, [entries, virtualizer]);
+
   /** 滚动中显示滚动条 + scrollspy。跟随判定不在这里（由贴底内核按用户意图维护）。 */
   const onScroll = useCallback(() => {
     const el = parentRef.current;
@@ -679,7 +739,8 @@ function MessageFlowCore({
     }, 700);
     scheduleSpy();
     scheduleVisibleRefresh();
-  }, [scheduleSpy, scheduleVisibleRefresh]);
+    if (positioned && el.scrollTop < 400 && !sticky.isFollowing()) void loadOlder();
+  }, [scheduleSpy, scheduleVisibleRefresh, positioned, sticky, loadOlder]);
 
   // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
   useEffect(() => () => {
@@ -1070,17 +1131,7 @@ function MessageFlowCore({
     prevRunningRef.current = running;
   }, [running, sticky]);
 
-  // 用户发送消息（时间线末尾新增"以用户消息开头"的新 turn）→ 无条件滚底并恢复跟随
-  const prevEntryLenRef = useRef(entries.length);
-  useEffect(() => {
-    const grew = entries.length > prevEntryLenRef.current;
-    prevEntryLenRef.current = entries.length;
-    if (!grew) return;
-    const last = entries[entries.length - 1];
-    const lastStartsUser = last != null && last.kind === "turn"
-      && last.items.length > 0 && last.items[0].kind === "user";
-    if (lastStartsUser) sticky.stick();
-  }, [entries, sticky]);
+  // plan-20261101-performance：发消息只由 forceBottomKey 识别，向前补历史不能触发贴底。
 
   /* plan-20261020-pts：原「订阅流式缓冲长度 → 补滚」已移除。流式文本长在尾项里，
      由贴底内核对尾项的尺寸观察当帧贴底；在订阅回调里读写滚动位置反而发生在
@@ -1140,7 +1191,8 @@ function MessageFlowCore({
 
   /** plan-156-619 S2：搜索入口按钮是否显示（默认关闭，可在「设置 → 常规」打开）。
    *  只隐藏**入口按钮**：Ctrl+F 仍然可用——关闭一个可视化入口不应连带夺走搜索能力。 */
-  const searchEntryVisible = useUiStore((s) => s.showMessageSearch);
+  const configuredSearchEntry = useUiStore((s) => s.showMessageSearch);
+  const searchEntryVisible = configuredSearchEntry || historyThreadId != null;
 
   /** plan-156-619 S2：Ctrl+F / Cmd+F 唤起搜索条。
    *  此前按钮 title 写着「Ctrl+F」但全项目没有绑定该快捷键（点按钮才能开），
@@ -1152,6 +1204,11 @@ function MessageFlowCore({
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       if (e.key !== "f" && e.key !== "F") return;
+      const focused = document.activeElement;
+      const focusedFlow = focused?.closest(".message-flow-outer");
+      if (focusedFlow && !focusedFlow.contains(parentRef.current)) return;
+      const subPanel = focused?.closest(".subagent-panel");
+      if (historyThreadId != null ? !focusedFlow && !subPanel : subPanel != null) return;
       e.preventDefault();
       setSearchOpen(true);
       // 搜索条已展开时输入框已挂载：直接交出焦点并全选；未展开时由输入框的 autoFocus 完成
@@ -1160,7 +1217,7 @@ function MessageFlowCore({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [search]);
+  }, [search, historyThreadId]);
 
   /** plan-20261020-pts：主动跳到某条消息（搜索命中 / JumpDots / 任务卡定位）是用户意图，
    *  先解除跟随——否则下一次内容增长会把视图拉回底部，跳转白做。
@@ -1304,11 +1361,53 @@ function MessageFlowCore({
   }, [sticky, virtualizer, scheduleSpy]);
 
   useEffect(() => {
+    if (historySessionId != null) return;
     setActiveMatchIndex(0);
     if (matchedIndices.length > 0) jumpToIndex(matchedIndices[0], "center");
-  }, [matchedIndices, jumpToIndex]);
+  }, [matchedIndices, jumpToIndex, historySessionId]);
+
+  useEffect(() => {
+    if (historySessionId == null || !searchOpen || !searchKeyword.trim()) {
+      setRemoteMatches([]); setRemoteMore(false); return;
+    }
+    const controller = new AbortController();
+    searchController.current = controller;
+    setRemoteLoading(true);
+    const timer = window.setTimeout(() => {
+      void api.searchMessages(historySessionId, searchKeyword.trim(), historyThreadId, controller.signal).then((result) => {
+        if (controller.signal.aborted) return;
+        setRemoteMatches(result.items); setRemoteMore(result.has_more); setActiveMatchIndex(0);
+        setPendingMatch(result.items[0] ?? null);
+      }).catch(() => { if (!controller.signal.aborted) setRemoteMatches([]); })
+        .finally(() => { if (!controller.signal.aborted) setRemoteLoading(false); });
+    }, 200);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [historySessionId, historyThreadId, searchKeyword, searchOpen]);
+
+  useEffect(() => {
+    if (!pendingMatch || historySessionId == null) return;
+    const index = entries.findIndex((entry) => entry.kind === "turn"
+      ? (pendingMatch.turn_id != null && (entry.turnId === pendingMatch.turn_id || entry.turnIds?.includes(pendingMatch.turn_id)))
+        || entry.items.some((item) => "msg" in item && item.msg.id === pendingMatch.id)
+      : entry.msg.id === pendingMatch.id);
+    if (index >= 0 && pendingMatch.loaded) { jumpToIndex(index, "center"); setPendingMatch(null); return; }
+    if (pendingMatch.loaded) { setPendingMatch(null); return; }
+    let cancelled = false;
+    void aroundMessages(historySessionId, pendingMatch.id, historyThreadId).then((messages) => {
+      if (!cancelled) {
+        mergeHistoryIntoChat(historySessionId, messages, historyThreadId);
+        setPendingMatch({ ...pendingMatch, loaded: true });
+      }
+    }).catch(() => { if (!cancelled) setPendingMatch(null); });
+    return () => { cancelled = true; };
+  }, [pendingMatch, entries, historySessionId, historyThreadId, jumpToIndex]);
 
   const jumpMatch = (dir: 1 | -1) => {
+    if (historySessionId != null) {
+      if (!remoteMatches.length) return;
+      const next = (activeMatchIndex + dir + remoteMatches.length) % remoteMatches.length;
+      setActiveMatchIndex(next); setPendingMatch(remoteMatches[next]); return;
+    }
     if (matchedIndices.length === 0) return;
     const next = (activeMatchIndex + dir + matchedIndices.length) % matchedIndices.length;
     setActiveMatchIndex(next);
@@ -1329,26 +1428,45 @@ function MessageFlowCore({
       return;
     }
     const idx = entries.findIndex((e) => e.kind === "turn" && (e.turnId === scrollTarget.turnId || (e.turnIds?.includes(scrollTarget.turnId!) ?? false)));
+    if (idx < 0 && historySessionId != null && scrollTarget.turnId != null) {
+      let cancelled = false;
+      void aroundTurnMessages(historySessionId, scrollTarget.turnId, historyThreadId).then((messages) => {
+        if (!cancelled) mergeHistoryIntoChat(historySessionId, messages, historyThreadId);
+      }).catch(() => { if (!cancelled) clearScrollTarget?.(); });
+      return () => { cancelled = true; };
+    }
     if (idx >= 0) jumpToIndex(idx, "start");
     clearScrollTarget?.();
-  }, [scrollTarget, entries, jumpToIndex, clearScrollTarget]);
+  }, [scrollTarget, entries, jumpToIndex, clearScrollTarget, historySessionId, historyThreadId]);
 
+  const activeHighlightIndex = historySessionId == null ? matchedIndices[activeMatchIndex] : entries.findIndex((entry) => {
+    const match = remoteMatches[activeMatchIndex];
+    if (!match) return false;
+    return entry.kind === "turn" ? (match.turn_id != null && (entry.turnId === match.turn_id || entry.turnIds?.includes(match.turn_id)))
+      || entry.items.some((item) => "msg" in item && item.msg.id === match.id) : entry.msg.id === match.id;
+  });
   return (
     <div className={`message-flow-outer ${className || ""}`}>
+      {historySessionId != null && history.hasBefore && <div className="flow-history-control">
+        <Button size="xs" variant="subtle" loading={history.loading} onClick={() => void loadOlder()}>
+          {history.error ? "重试加载历史" : "加载更早消息"}
+        </Button>
+      </div>}
       {/* plan-156-619 S2：入口按钮受「设置 → 常规 → 消息搜索按钮」控制；
           搜索条一旦打开则始终显示（否则 Ctrl+F 唤起后看不到输入框）。 */}
       {search && (searchOpen || searchEntryVisible) && (
         <div className="flow-search-toggle">
           {!searchOpen ? (
-            <button
-              type="button"
-              className="flow-search-btn"
-              onClick={() => setSearchOpen(true)}
-              title="搜索消息 (Ctrl+F)"
-              aria-label="搜索消息"
-            >
-              <IconSearch size={14} />
-            </button>
+            <Tooltip content="搜索消息 (Ctrl+F)">
+              <button
+                type="button"
+                className="flow-search-btn"
+                onClick={() => setSearchOpen(true)}
+                aria-label="搜索消息"
+              >
+                <IconSearch size={14} />
+              </button>
+            </Tooltip>
           ) : (
             <div className="flow-search-bar">
               <IconSearch size={13} />
@@ -1359,27 +1477,42 @@ function MessageFlowCore({
                 onChange={(e) => setSearchKeyword(e.target.value)}
                 placeholder="搜索消息内容…"
               />
-              {matchedIndices.length > 0 && (
+              {(historySessionId != null ? remoteMatches.length > 0 : matchedIndices.length > 0) && (
                 <span className="flow-search-count">
-                  {activeMatchIndex + 1}/{matchedIndices.length}
+                  {remoteLoading ? "查找中…" : `${activeMatchIndex + 1}/${historySessionId != null ? remoteMatches.length : matchedIndices.length}${remoteMore ? "+" : ""}`}
                 </span>
               )}
-              <button type="button" onClick={() => jumpMatch(-1)} disabled={matchedIndices.length === 0} title="上一个">
-                <IconChevronUp size={12} />
-              </button>
-              <button type="button" onClick={() => jumpMatch(1)} disabled={matchedIndices.length === 0} title="下一个">
-                <IconChevronDown size={12} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchOpen(false);
-                  setSearchKeyword("");
-                }}
-                title="关闭搜索"
-              >
-                <IconX size={12} />
-              </button>
+              <Tooltip content="上一个">
+                <button type="button" onClick={() => jumpMatch(-1)} disabled={historySessionId != null ? !remoteMatches.length : !matchedIndices.length} aria-label="上一个">
+                  <IconChevronUp size={12} />
+                </button>
+              </Tooltip>
+              <Tooltip content="下一个">
+                <button type="button" onClick={() => jumpMatch(1)} disabled={historySessionId != null ? !remoteMatches.length : !matchedIndices.length} aria-label="下一个">
+                  <IconChevronDown size={12} />
+                </button>
+              </Tooltip>
+              <Tooltip content="关闭搜索">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    setSearchKeyword("");
+                  }}
+                  aria-label="关闭搜索"
+                >
+                  <IconX size={12} />
+                </button>
+              </Tooltip>
+              {remoteMore && historySessionId != null && <Button size="xs" loading={remoteLoading} onClick={() => {
+                const sid = historySessionId, keyword = searchKeyword.trim();
+                const signal = searchController.current?.signal;
+                setRemoteLoading(true);
+                void api.searchMessages(sid, keyword, historyThreadId, signal, remoteMatches.at(-1)?.id).then((result) => {
+                  if (signal?.aborted) return;
+                  setRemoteMatches((values) => [...values, ...result.items]); setRemoteMore(result.has_more);
+                }).catch(() => {}).finally(() => { if (!signal?.aborted) setRemoteLoading(false); });
+              }}>更多结果</Button>}
             </div>
           )}
         </div>
@@ -1390,11 +1523,18 @@ function MessageFlowCore({
       {/* plan-282-1434（B6）：首次填充贴底完成前隐藏内容，避免看到"从顶部滚下来"的过程 */}
       <div
         ref={parentRef}
+        tabIndex={0}
+        aria-label={historyThreadId != null ? "子代理消息流" : "消息流"}
         className={"message-flow" + (positioned || totalCount === 0 ? "" : " is-positioning")}
         onScroll={onScroll}
       >
         {totalCount === 0 ? (
-          <Empty size="lg" title={emptyText} />
+          /* plan-621-2572：会话消息为空时补充温和的操作引导副标题 */
+          <Empty
+            size="lg"
+            title={emptyText}
+            desc={search ? "在下方输入任务目标，或输入 @ 引用项目文件、/ 调用技能" : undefined}
+          />
         ) : (
           // plan-282-1444：高度改由 `virtualizer.containerRef` 直接写（directDomUpdates），
           // 故 style 里**不得**再声明 height——否则两处写同一属性会互相抖动。
@@ -1439,7 +1579,7 @@ function MessageFlowCore({
                       不侵入 Markdown 结构；当前命中项用更强的 is-active 配色）。 */}
                   <HighlightedItem
                     keyword={searchKeyword}
-                    active={isSearching && item.index === matchedIndices[activeMatchIndex]}
+                    active={isSearching && item.index === activeHighlightIndex}
                   >
                     {node}
                   </HighlightedItem>
@@ -1493,6 +1633,7 @@ function MainMessageFlow({
   // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
   const pendingSubagents = useScoped("pendingSubagents");
   const currentSessionId = useScoped("currentSessionId");
+  const sideScope = useContext(ConvoScopeContext);
   /* plan-20261020-suggestion-gate：会话首次加载期间消息还没渲染出来。
    * 建议卡属于「已收口的一轮」，先于消息出现会让人以为任务只剩这一步，因此等消息落地后再展示。
    * 侧边对话（ConvoScopeProvider）不消费主仓库的加载态——它本身也关闭了建议卡。 */
@@ -1605,10 +1746,11 @@ function MainMessageFlow({
    *  触发，点了「立即发送」或发新消息后视图不会跟到底。
    *  这里用"用户消息条数"作信号：每新增一条用户消息（含注入与乐观占位）即 +1，
    *  核心层据此无条件贴底——语义精确且不会因流式内容变化而误触发。 */
-  const userMsgSeq = useMemo(
-    () => messages.reduce((n, m) => (m.sender_type === "user" ? n + 1 : n), 0),
-    [messages],
-  );
+  const sendSignal = useRef<UserSendSignal>({ sessionId: null, confirmed: 0, optimistic: 0, sequence: 0 });
+  const userMsgSeq = useMemo(() => {
+    sendSignal.current = advanceUserSendSignal(sendSignal.current, currentSessionId, messages);
+    return sendSignal.current.sequence;
+  }, [messages, currentSessionId]);
 
   const plansByTurn = useScoped("plansByTurn");
 
@@ -1701,6 +1843,7 @@ function MainMessageFlow({
   return (
     <MessageFlowCore
       key={currentSessionId}
+      historySessionId={sideScope == null ? currentSessionId : undefined}
       entries={entries}
       // 主代理未跑但工作流在跑时同样开启流式槽位（否则尾部「等待响应…」不渲染）
       running={isRunning || workflowBusy}
@@ -1766,9 +1909,9 @@ function SubagentMessageFlow({
   className?: string;
 }) {
   const currentSessionId = useScoped("currentSessionId");
-  const storeMessages = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId] || [] : []));
+  const storeMessages = useVisibleChat((s) => (threadId != null ? s.subagentMessages[threadId] : undefined) ?? EMPTY_SUBAGENT_MESSAGES, visible);
   // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
-  const subagentMeta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  const subagentMeta = useVisibleChat((s) => (threadId != null ? s.subagentMeta[threadId] : undefined), visible);
   // plan-75-334 阶段1：turn 行状态改由本层统一查询（与改造前每个 TurnGroup 各自查询语义一致）
   const turns = useScoped("turns");
 
@@ -1780,28 +1923,18 @@ function SubagentMessageFlow({
   // 重开面板/断线/切会话后会有缺口（用户反馈：面板内容不完整）。这里按 threadId 拉一次历史，
   // 与事件桶按 id 去重后并入（升序），不覆盖已有流式状态。
   useEffect(() => {
-    if (threadId == null || currentSessionId == null) return;
+    if (!visible || threadId == null || currentSessionId == null) return;
     const requestedSid = currentSessionId;
     let cancelled = false;
     void (async () => {
       try {
-        const fetched = await api.listSessionMessages(requestedSid, threadId);
-        if (cancelled || fetched.length === 0) return;
-        useChatStore.setState((s) => {
-          // plan-560-2311 E5：请求期间可能已切走会话——迟到的历史不得写进新会话的
-          // 同号线程桶（agent id 跨会话会复用），否则切回新会话说看到上一个会话的执行过程。
-          if (s.currentSessionId !== requestedSid) return {};
-          const bucket = s.subagentMessages[threadId] ?? [];
-          const known = new Set(bucket.map((m) => m.id));
-          const merged = [...bucket, ...fetched.filter((m) => !known.has(m.id))];
-          if (merged.length === bucket.length) return {};
-          merged.sort((a, b) => a.id - b.id);
-          return { subagentMessages: { ...s.subagentMessages, [threadId]: merged } };
-        });
+        const result = await refreshMessageWindow(requestedSid, useChatStore.getState().subagentMessages[threadId] ?? [], threadId);
+        if (cancelled) return;
+        mergeHistoryIntoChat(requestedSid, result.items, threadId, result.checkedIds);
       } catch { /* 非阻塞：拉取失败就只用事件桶 */ }
     })();
     return () => { cancelled = true; };
-  }, [threadId, currentSessionId]);
+  }, [threadId, currentSessionId, visible]);
 
   // 将子代理消息按 timeline 构建（子代理消息通常是平铺的 tool/text/thinking）
   // S8b：同样走增量构建器（与主会话同一套引用复用语义）。
@@ -1839,8 +1972,10 @@ function SubagentMessageFlow({
 
 
   return (
-    <MessageFlowCore
+    <FlowVisibilityContext.Provider value={visible}><MessageFlowCore
       key={threadId ?? "subagent-default"}
+      historySessionId={currentSessionId}
+      historyThreadId={threadId}
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}
@@ -1856,10 +1991,10 @@ function SubagentMessageFlow({
       }
       sessionKey={`${currentSessionId ?? 0}:${threadId ?? 0}`}
       jumpDots={false}
-      search={false}
+      search={visible}
       className={className}
       emptyText="子代理尚未产生输出"
-    />
+    /></FlowVisibilityContext.Provider>
   );
 }
 

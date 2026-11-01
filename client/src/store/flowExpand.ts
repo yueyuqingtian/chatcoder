@@ -94,6 +94,11 @@ export function turnCollapseKey(turnId: number): string {
   return `turn-collapse:t${turnId}`;
 }
 
+/** 子代理线程专属的工作过程折叠键（与主会话同一 turnId 彻底隔离，防止主会话折叠污染子代理面板）。 */
+export function subagentCollapseKey(agentId: number, turnId?: number | null): string {
+  return `subagent-collapse:a${agentId}:t${turnId ?? 0}`;
+}
+
 /** turn 级工作过程的折叠态（plan-586-2374）。
  *
  *  沿用上面 open 表（true = 展开），与工具行 / 思考块的展开态共用同一份存储：

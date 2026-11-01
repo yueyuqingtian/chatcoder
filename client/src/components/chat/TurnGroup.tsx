@@ -30,12 +30,13 @@ import {
   splitFlowSegments,
 } from "./timeline";
 import { useChatStore } from "../../store/chat";
-import { dropFlowExpand, turnCollapseKey, useTurnCollapse } from "../../store/flowExpand";
+import { dropFlowExpand, subagentCollapseKey, turnCollapseKey, useTurnCollapse } from "../../store/flowExpand";
 import { TurnChangesCard } from "./TurnChangesCard";
 import { parseUtc } from "../../utils/time";
 import { MessageImageGrid, attachmentsOf } from "./AttachmentCard";
 import { UserBubble } from "./UserBubble";
 import { recordComponentRender } from "../../perf/metrics";
+import { ViewportBlock } from "../ui/ViewportBlock";
 
 /** plan-586-2374：无最终汇报时前两段不参与渲染，用同一个空数组占位。
  *  共用常量而不是 `[]` 字面量：字面量每次新建会让下游依赖引用比较失效，也白分配。 */
@@ -444,19 +445,23 @@ export const TurnGroup = memo(function TurnGroup({
   const defaultProcessCollapsed = hasProcess && !isAwaitingConfirmation && !hasInjectedUser;
   /** plan-586-2374：手动折叠态从本地 useState 迁到 flowExpand store。
    *
-   *  消息流按 turn 虚拟化，TurnGroup 滚出可视区即被卸载，本地 state 会让用户刚做的展开 / 折叠
-   *  在滚回时丢失。key 的稳定身份见 turnCollapseKey：用 turn_id（全局自增主键，跨会话唯一）。
+   * 消息流按 turn 虚拟化，TurnGroup 滚出可视区即被卸载，本地 state 会让用户刚做的展开 / 折叠
+   * 在滚回时丢失。key 的稳定身份见 turnCollapseKey：用 turn_id（全局自增主键，跨会话唯一）。
    *
-   *  `turnId == null`（还没有 turn 行的独立用户消息）**不落 store**：
-   *  这类条目只有一条用户消息，没有可折叠的工作过程；更关键的是它的兜底身份只能取消息 id，
-   *  而乐观消息落库后 id 会变（临时 id → 真实 id），key 随之漂移，旧 key 会永久残留在
-   *  store 的 open 表里（该表没有按会话回收机制）。用一个「不写入」的 key 反而更干净——
-   *  key 仍必须是稳定字符串（hook 依赖它），但永远不会被 set。 */
-  const persistCollapse = turnId != null;
-  const collapseKey = useMemo(
-    () => (persistCollapse ? turnCollapseKey(turnId) : "turn-collapse:transient"),
-    [persistCollapse, turnId],
-  );
+   * 子代理线程（flow === "subagent"）必须使用专属 subagentCollapseKey(agentId, turnId)，
+   * 绝不能和主会话共用同一个 turnCollapseKey，否则主会话该轮折叠后，子代理面板会被直接串扰折叠。
+   *
+   * `turnId == null`（还没有 turn 行的独立用户消息）**不落 store**：
+   * 这类条目只有一条用户消息，没有可折叠的工作过程；更关键的是它的兜底身份只能取消息 id，
+   * 而乐观消息落库后 id 会变（临时 id → 真实 id），key 随之漂移，旧 key 会永久残留在
+   * store 的 open 表里（该表没有按会话回收机制）。用一个「不写入」的 key 反而更干净——
+   * key 仍必须是稳定字符串（hook 依赖它），但永远不会被 set。 */
+  const isSubagentFlow = flow === "subagent";
+  const persistCollapse = isSubagentFlow ? (agentId != null || turnId != null) : turnId != null;
+  const collapseKey = useMemo(() => {
+    if (isSubagentFlow && agentId != null) return subagentCollapseKey(agentId, turnId);
+    return persistCollapse ? turnCollapseKey(turnId!) : "turn-collapse:transient";
+  }, [isSubagentFlow, agentId, persistCollapse, turnId]);
   const [storedCollapsed, setStoredCollapsed] = useTurnCollapse(collapseKey, defaultProcessCollapsed);
   /** plan-20261014-fix4（用户反馈「运行中也可以折叠」）：运行中强制展开、不可折叠；
    *  每次进入运行都清掉手动折叠记录——本轮（含并入的续跑轮）完成后按默认规则自动折叠，之后才可手动切换。 */
@@ -765,7 +770,7 @@ export const TurnGroup = memo(function TurnGroup({
         // plan-156-619 S5d：子会话按普通会话渲染——不再把最终汇报换成六节结构化橙卡。
         // 子会话本身就是完整会话，它的输出应当与主会话同排版，否则用户会看到两套视觉语言。
         return (
-          <div key={i} className="turn-item turn-item-text">
+          <div key={i} className="turn-item turn-item-text" data-message-id={item.msg.id}>
             <div className="turn-agent-text">
               <MarkdownContent>{msgText(item.msg.content)}</MarkdownContent>
             </div>
@@ -777,7 +782,7 @@ export const TurnGroup = memo(function TurnGroup({
           return <PluginSlot key={i} slot="compact-card" msg={item.msg} />;
         }
         return (
-          <div key={i} className="turn-item turn-item-summary">
+          <div key={i} className="turn-item turn-item-summary" data-message-id={item.msg.id}>
             {/* v36 (plan-321-1600 M2): 补上 .turn-agent-text 包裹——与 case "text" 同结构。
                 否则 summary 消息拿不到 .turn-agent-text .md-body 下的完整 markdown 排版
                 （标题/列表/代码块样式全丢，退化为浏览器默认样式）。 */}
@@ -875,7 +880,9 @@ export const TurnGroup = memo(function TurnGroup({
         >
           {() => (
             <>
-              {seg.indices.map((index) => renderSegmentItem(index))}
+              {seg.indices.map((index) => seg.indices.length > 40
+                ? <ViewportBlock key={index} estimate={40}>{renderSegmentItem(index)}</ViewportBlock>
+                : renderSegmentItem(index))}
               {isLast && hasPlan && !hasPlanMsg && <PluginSlot slot="plan-card" turnId={turnId} embedded />}
               {isLast && subagentFallbackInContainer ? subagentNode : null}
             </>
@@ -947,7 +954,7 @@ export const TurnGroup = memo(function TurnGroup({
           {hasProcess ? (
             <>
               {renderFlowSegments(processSegments, {
-                collapsed: processCollapsed,
+                collapsed: !roundActive && processCollapsed,
                 wrap: true,
               })}
               {/* 3. 最终汇报（最终 text）与其后的确认/分割线等：有过程时直显在折叠条下方（不进入折叠容器） */}
@@ -955,7 +962,7 @@ export const TurnGroup = memo(function TurnGroup({
             </>
           ) : (
             renderFlowSegments(allSegments, {
-              collapsed: flow === "subagent" && processCollapsed,
+              collapsed: flow === "subagent" && !roundActive && processCollapsed,
               wrap: true,
             })
           )}

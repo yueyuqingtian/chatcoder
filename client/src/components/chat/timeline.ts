@@ -16,6 +16,7 @@ import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
+import { isMessageAppend } from "../../utils/messageChanges";
 import { formatBgElapsed } from "../../utils/bgFormat";
 import {
   SUBSESSION_QUESTION_TOOL, SUBSESSION_REPORT_TOOL, SUBSESSION_RESULT_TOOL,
@@ -706,7 +707,8 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
     if (lastMessages && lastSlots && lastResult && messages.length >= lastMessages.length) {
       const oldLen = lastMessages.length;
       let prefixSame = true;
-      for (let i = 0; i < oldLen; i++) {
+      const trustedAppend = isMessageAppend(lastMessages, messages);
+      for (let i = 0; !trustedAppend && i < oldLen; i++) {
         if (messages[i] !== lastMessages[i]) { prefixSame = false; break; }
       }
       if (prefixSame) {

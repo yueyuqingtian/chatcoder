@@ -57,7 +57,7 @@ export interface PanelBucket {
 }
 
 const STORAGE_KEY = "chatcoder.panel";
-const DEFAULT_WIDTH = 420;
+const DEFAULT_WIDTH = 400;
 /** 只做数值兜底：真实上限由可用空间决定（ResizeHandle 拖拽钳制 + .app-pane-right 渲染期钳制，plan-20261016-ux） */
 const MAX_WIDTH = 4096;
 

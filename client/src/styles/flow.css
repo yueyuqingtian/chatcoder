@@ -1,5 +1,28 @@
 /* plan-91-393：消息流（工具调用展开、代码视图、文件链接、等待标记） */
 
+/* plan-20261101-performance：轮内窗口保留高度，不建立新的纵向滚动容器。 */
+.viewport-block { display: block; min-width: 0; overflow-anchor: none; }
+tbody.viewport-block { display: table-row-group; }
+.tc-leaf-window { display: flex; flex-direction: column; gap: var(--flow-gap, 4px); }
+.md-long-code { display: block; white-space: pre; line-height: 20px; }
+.md-long-code > .viewport-block { white-space: pre; line-height: inherit; }
+.md-table-windowed { table-layout: fixed; width: 100%; }
+.flow-history-control { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 3; }
+/* plan-20261115-history-center：按钮的居中基准必须是**消息内容列**，不是中间面板。
+   .mf-list 在主聊天面板里是按 --content-col-left + --content-col-w 定宽定位的
+   （见 global.css「内容列定宽」段），面板居中与列居中会差出「列右侧留白 − 左侧留白」的一半，
+   表现为按钮压在正文右侧、与下方工具卡/表格错位。这里复用同一组几何变量求列中心：
+   .flow-history-control 的包含块 .message-flow-outer 与 .chat-panel 左缘重合，
+   --content-col-left 也是相对该左缘求得，两者基准一致。
+   其它宿主（子代理面板 / 侧边对话 / 首页）不在 .chat-panel 下，保持上面的 50% 兜底
+   ——它们的 .mf-list 本就是 margin:0 auto 居中，差异只有滚动条 gutter 的一半。 */
+.chat-panel .flow-history-control {
+  left: calc(var(--content-col-left) + var(--content-col-w) / 2);
+}
+.flow-history-control .btn { background: var(--bg-panel); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+::highlight(chatcoder-search) { background-color: var(--color-find-highlight); }
+::highlight(chatcoder-search-active) { background-color: var(--color-find-highlight-active); }
+
 /* ── 统一进行态：所有转圈 = 左侧会话运行指示同款（轨道 25% + 实色弧，线性匀速） ── */
 svg.ic-spinner { animation: none; }
 svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px 12px; animation: session-spin var(--dur-spin) linear infinite; }
@@ -290,21 +313,27 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
    不改字号令牌（--fs-md / --chat-line-height 仍由外观设置控制）。 */
 
 /* 标题：行高收紧到 1.5（正文 2.2 的行距用在标题上显得松散），层级靠字号与上方留白区分，去掉 h1 下划线 */
+/* plan-621-2572：补齐 md-h5 与 md-h6 阶梯定义，字号与上边距依次递减，保证深层级标题清晰排版 */
 .turn-agent-text .md-body .md-h1,
 .turn-agent-text .md-body .md-h2,
 .turn-agent-text .md-body .md-h3,
-.turn-agent-text .md-body .md-h4 { line-height: 1.5; color: var(--text-1); font-weight: 600; }
+.turn-agent-text .md-body .md-h4,
+.turn-agent-text .md-body .md-h5,
+.turn-agent-text .md-body .md-h6 { line-height: 1.5; color: var(--text-1); font-weight: 600; }
 .turn-agent-text .md-body .md-h1 { font-size: 1.3em; margin: 1.15em 0 0.5em; padding-bottom: 0; border-bottom: none; }
 .turn-agent-text .md-body .md-h2 { font-size: 1.15em; margin: 1.05em 0 0.45em; }
 .turn-agent-text .md-body .md-h3 { font-size: 1.05em; margin: 0.95em 0 0.4em; }
 .turn-agent-text .md-body .md-h4 { font-size: 1em; margin: 0.85em 0 0.35em; }
+.turn-agent-text .md-body .md-h5 { font-size: 0.95em; margin: 0.8em 0 0.3em; color: var(--text-2); }
+.turn-agent-text .md-body .md-h6 { font-size: 0.9em; margin: 0.75em 0 0.25em; color: var(--text-3); }
 /* 列表：项距收紧，宽松列表里的段落不再额外撑开；嵌套列表贴紧父项；序号 / 圆点用三级文字色 */
+/* plan-621-2572：优化列表垂直节奏，ul/ol 设为 6px 0，li 设为 3px 0，避免文字与项目符号紧贴或过散 */
 .turn-agent-text .md-body .md-ul,
-.turn-agent-text .md-body .md-ol { margin: 4px 0; padding-left: 1.5em; }
-.turn-agent-text .md-body .md-li { margin: 1px 0; }
+.turn-agent-text .md-body .md-ol { margin: 6px 0; padding-left: 1.5em; }
+.turn-agent-text .md-body .md-li { margin: 3px 0; }
 .turn-agent-text .md-body .md-li > .md-p { margin: 0; }
 .turn-agent-text .md-body .md-li > .md-ul,
-.turn-agent-text .md-body .md-li > .md-ol { margin: 1px 0; }
+.turn-agent-text .md-body .md-li > .md-ol { margin: 3px 0; }
 .turn-agent-text .md-body .md-li::marker { color: var(--text-3); }
 /* 引用与分隔线 */
 .turn-agent-text .md-body .md-blockquote { margin: 10px 0; padding: 8px 14px; border-radius: var(--r-lg); }
@@ -313,21 +342,23 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .turn-agent-text .md-body .md-hr { margin: 16px 0; border: none; border-top: 1px solid var(--border); }
 
 /* 代码块：与工具展开区同一卡片语言（同底色、同边框、12px 卡片圆角），头部去底色、复制按钮去描边 */
+/* plan-621-2572：代码块头部与正文底色形成明度差（头部 4.5% 对比正文 2%），强化窗口层级感与边界清晰度 */
 .turn-agent-text .md-body .md-code-block {
   margin: 12px 0;
   border: 1px solid var(--surface-inset-border);
   border-radius: var(--r-lg);
-  background: var(--surface-inset);
+  overflow: hidden;
+  background: color-mix(in oklab, var(--text-1) 2%, var(--bg-panel));
   box-shadow: none;
 }
 .turn-agent-text .md-body .md-code-head {
-  min-height: 32px; padding: 0 6px 0 14px;
-  background: transparent;
+  min-height: 34px; padding: 0 8px 0 14px;
+  background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
   border-bottom: 1px solid var(--surface-inset-border);
 }
 .turn-agent-text .md-body .md-code-lang {
-  font-family: var(--font-mono); font-size: 11.5px; font-weight: 500;
-  text-transform: none; letter-spacing: 0; color: var(--text-3);
+  font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+  text-transform: none; letter-spacing: 0; color: var(--text-2);
 }
 .turn-agent-text .md-body .md-code-copy-btn {
   justify-content: center; width: 26px; height: 26px; min-height: 26px; padding: 0;
@@ -339,11 +370,14 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 
 /* 表格（对齐参考图 5 / 图 6）：卡片容器 + 右上角工具条（复制 Markdown / 下载 CSV / 展开浮窗）。
    工具条槽位固定（不随悬停增减高度），平时半透明、悬停或键盘聚焦时完全显示。 */
+/* 表格（对齐参考图 5 / 图 6）：卡片容器 + 右上角工具条（复制 Markdown / 下载 CSV / 展开浮窗）。
+   plan-621-2572：表格工具条置于卡片上方紧凑行，常态保持 0.72 清晰可见，悬停/聚焦至 1，彻底避免遮挡表头文字 */
 .md-table-block { margin: 12px 0; }
 .md-table-tools {
   display: flex; align-items: center; justify-content: flex-end; gap: 2px;
   height: 26px; margin-bottom: 4px;
-  opacity: 0.55;
+  background: transparent;
+  opacity: 0.72;
   transition: opacity var(--dur-2) var(--ease-standard);
 }
 .md-table-block:hover > .md-table-tools,
@@ -372,14 +406,17 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 .md-body .md-table-card .md-th,
 .md-body .md-table-card .md-td {
-  padding: 9px 14px;
+  padding: 10px 14px;
   border: none; border-bottom: 1px solid var(--border);
   text-align: left; vertical-align: top;
   white-space: normal;
 }
-.md-body .md-table-card .md-th {
-  background: color-mix(in oklab, var(--text-1) 2.5%, var(--bg-panel));
-  color: var(--text-3); font-weight: 500; white-space: nowrap;
+/* plan-621-2572：表头统一使用纯色不透明底色（避免 sticky 吸顶透字），字重 600、文字主色与底边线 */
+.md-body .md-table-card .md-th,
+.md-table-modal .md-th {
+  background: color-mix(in oklab, var(--text-1) 5%, var(--bg-panel));
+  color: var(--text-1); font-weight: 600; white-space: nowrap;
+  border-bottom: 1px solid var(--divider, var(--border));
 }
 .md-body .md-table-card .md-td { color: var(--text-1); }
 .md-body .md-table-card tbody tr:last-child > .md-td { border-bottom: none; }
@@ -390,8 +427,11 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .md-table-modal .md-table-scroll { max-height: min(68vh, 720px); overflow: auto; }
 .md-table-modal .md-table { font-size: 13px; }
 .md-table-modal .md-th { position: sticky; top: 0; z-index: 1; }
+/* plan-621-2572：浮窗内行内代码与正文统一为中性灰底与细描边，去除旧版蓝字 */
 .md-table-modal .md-inline-code {
-  color: var(--info); background: var(--bg-hover); padding: 1px 5px; border-radius: var(--r-xs);
+  color: var(--text-1); background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
+  padding: 0 5px; border-radius: var(--r-sm);
   font-family: var(--font-mono); font-size: 0.88em;
 }
 .md-table-modal .md-strong { font-weight: 600; }
@@ -405,6 +445,9 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .turn-agent-text .md-body .md-h2 { font-size: 1.16em; margin: 1.25em 0 0.5em; }
 .turn-agent-text .md-body .md-h3 { font-size: 1.04em; margin: 1.05em 0 0.4em; }
 .turn-agent-text .md-body .md-h4 { font-size: 1em; margin: 0.9em 0 0.35em; color: var(--text-2); }
+/* plan-621-2572：补齐 md-h5 与 md-h6 阶梯定义，字号与上边距依次递减 */
+.turn-agent-text .md-body .md-h5 { font-size: 0.95em; margin: 0.8em 0 0.3em; color: var(--text-2); }
+.turn-agent-text .md-body .md-h6 { font-size: 0.9em; margin: 0.75em 0 0.25em; color: var(--text-3); }
 .turn-agent-text .md-body > :first-child { margin-top: 0; }
 .turn-agent-text .md-body > :last-child { margin-bottom: 0; }
 .turn-agent-text .md-body strong,
@@ -420,8 +463,12 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   padding: 0 5px; border-radius: var(--r-sm);
   font-size: 0.86em;
 }
-/* 代码块：头部语言标签与复制按钮固定 32px 槽位；正文行高与字号令牌化，长行横向滚动不换行 */
-.turn-agent-text .md-body .md-code-head { gap: 8px; }
+/* 代码块：头部语言标签与复制按钮固定 34px 槽位；正文行高与字号令牌化，长行横向滚动不换行 */
+/* plan-621-2572：头部与代码块底色明度差保持一致，去除多余覆盖 */
+.turn-agent-text .md-body .md-code-head {
+  gap: 8px; min-height: 34px; padding: 0 8px 0 14px;
+  background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
+}
 .turn-agent-text .md-body .md-code-pre {
   padding: 12px 16px 14px;
   font-size: calc(var(--fs-md, 13px) - 0.5px); line-height: 1.7;
@@ -429,23 +476,24 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 
 /* 表格 */
+/* plan-621-2572：彻底取消 .md-table-tools 的 absolute 覆盖，工具栏置于卡片上方，不遮挡表头文字且清晰易发现 */
 .md-table-block { position: relative; }
 .md-table-tools {
-  position: absolute; top: 4px; right: 4px; z-index: 2;
-  height: 26px; margin: 0; padding: 0 2px;
-  border-radius: var(--r-md);
-  /* 浮在表头之上：底色与表头（.md-th）完全一致，融进表头而不是叠出一块异色；
-     表头文字过长延伸到右上角时，同色底也能把文字干净地盖住 */
-  background: color-mix(in oklab, var(--text-1) 3.5%, var(--bg-panel));
-  opacity: 0;
+  display: flex; align-items: center; justify-content: flex-end; gap: 2px;
+  height: 26px; margin: 0 0 4px 0; padding: 0;
+  background: transparent;
+  opacity: 0.72;
 }
-.md-table-dialog .md-table-tools { position: static; background: none; }
+.md-table-block:hover > .md-table-tools,
+.md-table-tools:focus-within,
+.md-table-dialog .md-table-tools { opacity: 1; }
 .md-body .md-table-card .md-th {
-  color: var(--text-2); font-weight: 600;
-  background: color-mix(in oklab, var(--text-1) 3.5%, var(--bg-panel));
+  color: var(--text-1); font-weight: 600;
+  background: color-mix(in oklab, var(--text-1) 5%, var(--bg-panel));
+  border-bottom: 1px solid var(--divider, var(--border));
 }
 .md-body .md-table-card .md-td,
-.md-body .md-table-card .md-th { font-variant-numeric: tabular-nums; }
+.md-body .md-table-card .md-th { font-variant-numeric: tabular-nums; padding: 10px 14px; }
 .md-body .md-table-card tbody tr:nth-child(even) > .md-td { background: none; }
 .md-body .md-table-card tbody tr { transition: background var(--dur-1) var(--ease-standard); }
 .md-body .md-table-card tbody tr:hover > .md-td { background: color-mix(in oklab, var(--text-1) 3%, transparent); }

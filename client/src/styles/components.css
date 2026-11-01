@@ -651,7 +651,7 @@
   max-height: 86vh;
   width: min(var(--ui-dialog-w, 720px), 92vw);
   border: 1px solid var(--border);
-  border-radius: var(--r-xl);
+  border-radius: var(--r-pop);
   background: var(--color-popover);
   box-shadow: var(--shadow-xl);
   overflow: hidden;

@@ -14,6 +14,16 @@ from app.services.rollback_service import _CHECKPOINT_DIR
 router = APIRouter(tags=["diagnostics"])
 
 
+@router.get("/diagnostics/performance", response_model=dict)
+async def performance_snapshot():
+    """plan-20261101-performance：按需诊断，不建立常驻采集任务或记录正文。"""
+    from app.gateway.ws import manager
+    from app.services.message_window import stats
+    from app.persistence.write_behind import queue
+    return {"websocket": manager.snapshot(), "message_window": dict(stats),
+            "write_queue_pending": queue.pending_count}
+
+
 @router.get("/diagnostics", response_model=dict)
 async def diagnostics():
     """环境诊断：git、后端、模型连通、目录权限和数据库实例归属。"""

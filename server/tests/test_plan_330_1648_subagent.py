@@ -291,3 +291,45 @@ async def test_failed_broadcast_event_registered():
     text = (_ORCH / "subagent.py").read_text(encoding="utf-8")
     assert '"subagent.failed"' in text
     assert "_broadcast_subagent_failed(" in text
+
+
+async def test_turn_alive_allows_completed_and_running(monkeypatch):
+    """所属轮次正常结束（completed）或运行中（running）时，后台子代理均允许继续运行。"""
+    from app.orchestration.subagent import _turn_alive
+
+    class _FakeResult:
+        def __init__(self, val):
+            self._val = val
+        def scalar_one_or_none(self):
+            return self._val
+
+    class _FakeSession:
+        def __init__(self, status):
+            self.status = status
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def execute(self, stmt):
+            return _FakeResult(self.status)
+
+    # 1. running 与 completed 必须存活
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("running"))
+    assert await _turn_alive(101) is True
+
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("completed"))
+    assert await _turn_alive(101) is True
+
+    # 2. 中断 / 取消 / 回滚 / 失败 必须判定失活
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("interrupted"))
+    assert await _turn_alive(101) is False
+
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("cancelled"))
+    assert await _turn_alive(101) is False
+
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("rolled_back"))
+    assert await _turn_alive(101) is False
+
+    monkeypatch.setattr("app.orchestration.subagent.async_session_factory", lambda: _FakeSession("failed"))
+    assert await _turn_alive(101) is False
+

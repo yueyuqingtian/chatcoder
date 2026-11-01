@@ -6,6 +6,17 @@
 
 /* ── ① 头部：标签条 + 操作按钮 ───────────────────────────── */
 .right-panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; overflow: hidden; background: var(--bg-panel); color: var(--text-1); }
+/* plan-20261101-performance：宽度变化只影响内容节奏，状态和标题始终可读。 */
+.subagent-panel { container-type: inline-size; width: 100%; }
+.subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 12px 16px; }
+.subagent-panel .subagent-panel-title { align-items: flex-start; }
+.subagent-panel .subagent-panel-icon { padding-top: 3px; }
+.subagent-panel .subagent-panel-facts { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.subagent-panel .subagent-panel-meta { font-variant-numeric: tabular-nums; }
+.subagent-panel .subagent-panel-facts .subagent-panel-stop { margin-left: auto; }
+.subagent-panel-details { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; line-height: 18px; color: var(--text-2); }
+.subagent-panel-facts > .btn::before { content: none; }
+.subagent-panel-facts > .btn { margin-left: 8px; }
 .rp-head {
   position: relative;
   display: flex;
@@ -88,7 +99,7 @@
 .rp-tab-close::after { content: ""; position: absolute; inset: -3px; }
 .rp-tab-close:hover { opacity: 1; background: color-mix(in oklab, var(--text-1) 12%, transparent); color: var(--text-1); }
 .rp-tabs-empty { padding: 0 6px; font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
-.rp-head-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.rp-head-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 /* plan-128-518：菜单以整条标签头（.rp-head）为定位基准而不是按钮——窄面板里 252px 的菜单
  * 锚在按钮右缘会向左溢出，被面板 overflow:hidden 裁掉；这里改为贴头部右缘、宽度不超过面板 */
 .rp-anchor { position: static; display: inline-flex; }
@@ -164,7 +175,8 @@
 .ts-card-head {
   display: flex; align-items: center; gap: 8px;
   width: 100%; height: 40px; padding: 0 12px;
-  border: 0; border-radius: calc(var(--r-lg) - 1px);
+  /* plan-621-2572：清理非令牌圆角计算值，统一采用 var(--r-lg) */
+  border: 0; border-radius: var(--r-lg);
   background: transparent; color: var(--text-1);
   font: inherit; text-align: left; cursor: pointer;
 }
@@ -312,7 +324,8 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 .ft-tree:focus-visible .ft-row.is-cursor { box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--info) 65%, transparent); }
 .ft-chev { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 12px; color: var(--text-3); }
 .ft-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ft-mark { padding: 0 1px; border-radius: 3px; background: color-mix(in oklab, var(--warning) 30%, transparent); color: inherit; }
+/* plan-621-2572：清理 3px 硬编码圆角，统一采用 var(--r-xs) 令牌 */
+.ft-mark { padding: 0 1px; border-radius: var(--r-xs); background: color-mix(in oklab, var(--warning) 30%, transparent); color: inherit; }
 .ft-empty { padding: 28px 16px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 
 .ft-preview { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; animation: ft-preview-in var(--dur-4) var(--ease-emphasized-decel) both; }
@@ -352,7 +365,8 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 .ft-md-preview .md-body h4 { font-size: 13.5px; color: var(--text-2); }
 .ft-md-preview .md-body p { margin: .75em 0; }
 .ft-md-preview .md-body ul, .ft-md-preview .md-body ol { padding-left: 1.6em; margin: .6em 0; }
-.ft-md-preview .md-body li + li { margin-top: .2em; }
+/* plan-621-2572：提升列表项垂直间距至 4px，与消息流节奏一致 */
+.ft-md-preview .md-body li + li { margin-top: 4px; }
 .ft-md-preview .md-body blockquote { margin: .9em 0; padding: 10px 14px; border-radius: var(--r-md); color: var(--text-2); background: var(--sidebar-hover); }
 .ft-md-preview .md-body blockquote > :first-child { margin-top: 0; }
 .ft-md-preview .md-body blockquote > :last-child { margin-bottom: 0; }
@@ -372,17 +386,19 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
   padding: 0 4px; border-radius: var(--r-sm);
   overflow-wrap: anywhere;
 }
+/* plan-621-2572：保持 border 与圆角令牌，底色设为 2% 纯净浅底，头部 4.5% 明度差，形成清晰层次 */
 .ft-md-preview .md-body .md-code-block {
   position: relative; margin: 1em 0;
-  border: 1px solid var(--border); border-radius: var(--r-lg);
-  background: transparent; overflow: hidden;
+  border: 1px solid var(--surface-inset-border); border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--text-1) 2%, var(--bg-panel)); overflow: hidden;
 }
 .ft-md-preview .md-body .md-code-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-height: 32px; padding: 0 6px 0 14px;
-  border-bottom: 1px solid var(--border); background: transparent;
+  min-height: 34px; padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--surface-inset-border);
+  background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
 }
-.ft-md-preview .md-body .md-code-lang { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--text-3); }
+.ft-md-preview .md-body .md-code-lang { font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--text-2); }
 .ft-md-preview .md-body .md-code-copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: var(--r-md); background: transparent; color: var(--text-3); cursor: pointer; transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard); }
 .ft-md-preview .md-body .md-code-copy-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 .ft-md-preview .md-body .md-code-copy-btn.copied { color: var(--success); }

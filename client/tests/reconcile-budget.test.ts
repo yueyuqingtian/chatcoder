@@ -1,0 +1,24 @@
+import assert from "node:assert/strict";
+import { registerReconcileTask, runReconcile, isReconcilePending } from "../src/perf/reconcile.ts";
+import { acquire, release } from "../src/perf/bus.ts";
+
+const frames = new Map<number, FrameRequestCallback>();
+let id = 0;
+let clock = 0;
+Object.defineProperty(globalThis, "requestAnimationFrame", { value: (fn: FrameRequestCallback) => { frames.set(++id, fn); return id; }, configurable: true });
+Object.defineProperty(globalThis, "cancelAnimationFrame", { value: (key: number) => { frames.delete(key); }, configurable: true });
+Object.defineProperty(performance, "now", { value: () => clock, configurable: true });
+const calls: number[] = [];
+const cleanups = [20, 30, 50, 60, 80].map((order) => registerReconcileTask(String(order), order, "测试", () => { calls.push(order); clock += 3; }));
+const frame = () => { const [key, callback] = frames.entries().next().value!; frames.delete(key); callback(clock); };
+runReconcile(); frame();
+assert.deepEqual(calls, [20]);
+frame(); assert.deepEqual(calls, [20, 30, 50]);
+assert.equal(isReconcilePending(), true);
+acquire("panel-drag"); assert.equal(isReconcilePending(), false); assert.equal(frames.size, 0);
+release("panel-drag");
+runReconcile();
+cleanups.forEach((cleanup) => cleanup());
+frame();
+assert.deepEqual(calls, [20, 30, 50]);
+console.log("分帧预算、运动取消与卸载闭包回归通过");

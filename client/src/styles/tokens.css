@@ -102,14 +102,16 @@
   --color-input-border-hover: var(--color-border-hover);
   /* plan-238-1210: 已删除 --color-input-border-focused（品牌色聚焦边框）——
      用户要求清理所有蓝色边框装饰，聚焦态统一由 focus.css 的中性色承担。 */
-  --color-hover: var(--color-neutral-200);
+  /* plan-621-2572: 调整浅色悬停底色为更柔和的 6% 混合 */
+  --color-hover: color-mix(in oklab, var(--color-neutral-950) 6%, transparent);
   --color-selected: color-mix(in oklab, var(--color-neutral-950) 10%, transparent);
   --color-surface: color-mix(in oklab, var(--color-neutral-950) 3%, transparent);
   --color-surface-hover: color-mix(in oklab, var(--color-neutral-950) 5%, transparent);
 
   --color-foreground: var(--color-neutral-700);
-  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-700) 60%, transparent);
-  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-700) 40%, transparent);
+  /* plan-621-2572: 浅色次级前景色对比度提升至 72% 与 56% */
+  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-700) 72%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-700) 56%, transparent);
   --color-foreground-inverse: var(--color-white);
 
   --color-success: var(--color-green-600);
@@ -197,8 +199,9 @@
   --color-surface-hover: color-mix(in oklab, var(--color-white) 10%, transparent);
 
   --color-foreground: var(--color-neutral-200);
-  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-200) 60%, transparent);
-  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-200) 30%, transparent);
+  /* plan-621-2572: 深色次级前景色对比度提升至 72% 与 50% */
+  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-200) 72%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-200) 50%, transparent);
   --color-foreground-inverse: var(--color-white);
 
   --color-success: var(--color-green-500);
@@ -487,6 +490,8 @@
   --dur-load: calc(1800ms * var(--motion-scale));
   --dur-hop: calc(900ms * var(--motion-scale));
   /* 向后兼容别名（旧类名仍引用；下一版本清理） */
+  /* plan-621-2572: 补齐旧样式中引用的 --dur-base 别名 */
+  --dur-base: var(--dur-3);
   --dur-fast: var(--dur-2);
   --dur-med: var(--dur-3);
   --dur-normal: var(--dur-3);
@@ -662,7 +667,8 @@
 /* 表面层与图标色（深色） */
 :root[data-theme="dark"] {
   --surface-dialog: oklch(22% 0.004 260);
-  --surface-inset: oklch(27% 0.004 260);
+  /* plan-621-2572: 深色内嵌表面层调整为柔和实色混合梯度，增强内嵌代码块与卡片层次 */
+  --surface-inset: color-mix(in oklab, var(--color-neutral-800) 45%, var(--color-neutral-900));
   --surface-inset-border: color-mix(in oklab, var(--color-neutral-50) 8%, transparent);
   --surface-tray: color-mix(in oklab, var(--color-neutral-50) 4%, var(--color-background));
   --ic-fill-hover: 0.18;

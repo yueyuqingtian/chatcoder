@@ -15,6 +15,7 @@ import {
   IconX,
 } from "../icons";
 import { useGalleryStore } from "../../store/gallery";
+import { Tooltip } from "../ui";
 
 const ZOOM_MIN = 25;
 const ZOOM_MAX = 400;
@@ -182,51 +183,61 @@ export function ImageGallery() {
       </div>
 
       {multi && (
-        <button
-          className="gallery-nav prev"
-          onClick={(e) => { e.stopPropagation(); setIndex(index - 1); }}
-          title="上一张 (←)"
-          type="button"
-        >
-          <IconChevronLeft size={18} />
-        </button>
+        <Tooltip content="上一张 (←)">
+          <button
+            className="gallery-nav prev"
+            onClick={(e) => { e.stopPropagation(); setIndex(index - 1); }}
+            aria-label="上一张"
+            type="button"
+          >
+            <IconChevronLeft size={18} />
+          </button>
+        </Tooltip>
       )}
       {multi && (
-        <button
-          className="gallery-nav next"
-          onClick={(e) => { e.stopPropagation(); setIndex(index + 1); }}
-          title="下一张 (→)"
-          type="button"
-        >
-          <IconChevronRight size={18} />
-        </button>
+        <Tooltip content="下一张 (→)">
+          <button
+            className="gallery-nav next"
+            onClick={(e) => { e.stopPropagation(); setIndex(index + 1); }}
+            aria-label="下一张"
+            type="button"
+          >
+            <IconChevronRight size={18} />
+          </button>
+        </Tooltip>
       )}
 
       <div className="gallery-zoom-bar" onClick={(e) => e.stopPropagation()}>
-        <button
-          className="gallery-zoom-btn"
-          onClick={() => setZoom((z) => Math.max(ZOOM_MIN, z - ZOOM_STEP))}
-          title="缩小"
-          type="button"
-        >
-          <IconMinus size={14} />
-        </button>
-        <button
-          className="gallery-zoom-pct"
-          onClick={() => setZoom(100)}
-          title="恢复 100%"
-          type="button"
-        >
-          {zoom}%
-        </button>
-        <button
-          className="gallery-zoom-btn"
-          onClick={() => setZoom((z) => Math.min(ZOOM_MAX, z + ZOOM_STEP))}
-          title="放大"
-          type="button"
-        >
-          <IconPlus size={14} />
-        </button>
+        <Tooltip content="缩小">
+          <button
+            className="gallery-zoom-btn"
+            onClick={() => setZoom((z) => Math.max(ZOOM_MIN, z - ZOOM_STEP))}
+            aria-label="缩小"
+            type="button"
+          >
+            <IconMinus size={14} />
+          </button>
+        </Tooltip>
+        <Tooltip content="恢复 100%">
+          <button
+            className="gallery-zoom-pct"
+            onClick={() => setZoom(100)}
+            aria-label="恢复 100%"
+            type="button"
+          >
+            {zoom}%
+          </button>
+        </Tooltip>
+        <Tooltip content="放大">
+          <button
+            className="gallery-zoom-btn"
+            onClick={() => setZoom((z) => Math.min(ZOOM_MAX, z + ZOOM_STEP))}
+            aria-label="放大"
+            type="button"
+          >
+            <IconPlus size={14} />
+          </button>
+        </Tooltip>
       </div>
 
     </div>,

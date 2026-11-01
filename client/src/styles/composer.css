@@ -197,6 +197,14 @@
 .cc-prov-list { max-height: min(300px, 50vh); }
 
 /* ── 引用 / 附件 chips：胶囊 + 按类型着色 ──────────────── */
+/* plan-621-2572：当引用或附件芯片超过两行时限制最大高度并支持内部平滑滚动，避免挤窄输入框 */
+.composer-refs,
+.composer-attachments,
+.composer-browser-refs {
+  max-height: 84px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
 .composer-refs { gap: 6px; padding: 0 0 8px; }
 .composer-ref-chip {
   --ref-c: var(--text-2);

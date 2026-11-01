@@ -18,6 +18,8 @@ class Session(Base):
     title_source: Mapped[str] = mapped_column(
         String(10), default="auto", server_default="auto", nullable=False,
     )
+    # plan-20261101-performance：只记录历史改写，追加消息由 ID 游标追踪。
+    message_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))  # 会话级模型
     status: Mapped[str] = mapped_column(String(20), default="active")  # active / archived
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -76,6 +78,7 @@ class Message(Base):
     created_at: Mapped[str] = mapped_column(server_default=func.now())
 
     __table_args__ = (
+        Index("idx_messages_window", "session_id", "thread_id", "deleted", "id"),
         Index("idx_messages_session_turn", "session_id", "turn_id"),
         Index("idx_messages_thread", "thread_id", postgresql_where="thread_id IS NOT NULL"),
     )

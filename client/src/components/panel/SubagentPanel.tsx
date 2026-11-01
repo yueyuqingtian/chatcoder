@@ -15,10 +15,13 @@ import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
-import { IconCheck, IconChevronDown, IconCpu, IconSpinner, IconStop, IconX } from "../icons";
+import { IconCheck, IconChevronDown, IconPause, IconSpinner, IconStop, IconX } from "../icons";
+import { IxBot } from "../iconkit/StackIcons";
+import { useVisibleChat } from "../../store/visibleChat";
 import { Button, Collapse, Dialog, Empty, Tooltip, usePresence } from "../ui";
 import { IconSendStop } from "../iconkit/MorphIcons";
 import type { WorkflowNodeBrief } from "../../api/client";
+import { subagentState } from "../chat/subagentStatus";
 
 /** 评估结论的展示文案（颜色由 data-verdict 决定） */
 const VERDICT_LABEL: Record<string, string> = {
@@ -221,18 +224,21 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
    *  线程数据、消息与滚动位置全部保留（恢复可见时补算一次）。 */
   visible?: boolean;
 }) {
-  const meta = useChatStore((s) => (threadId != null ? s.subagentMeta[threadId] : undefined));
+  const meta = useVisibleChat((s) => (threadId != null ? s.subagentMeta[threadId] : undefined), visible);
   const sessionId = useChatStore((s) => s.currentSessionId);
-  const liveCount = useChatStore((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0));
-  const running = meta?.status === "running" || meta?.status === "in_progress";
-  const failed = meta?.status === "failed" || meta?.status === "cancelled";
-  const done = meta?.status === "done";
+  const liveCount = useVisibleChat((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0), visible);
+  const state = subagentState(meta?.status);
+  const running = state === "running";
+  const failed = state === "failed";
+  const stopped = state === "stopped";
+  const done = state === "done";
 
   // plan-565-2323 G8：终止单个子代理。此前界面没有任何终止入口——子代理因永久性错误
   // 卡在运行时，用户只能重启应用，而重启后库里残留的 in_progress 仍把会话锁成 busy。
   const [stopOpen, setStopOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  const [factsOpen, setFactsOpen] = useState(false);
 
   const doStop = async () => {
     if (sessionId == null || threadId == null) return;
@@ -287,7 +293,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
         <div className="subagent-panel-top">
           <div className="subagent-panel-head">
             <div className="subagent-panel-title">
-              <span className="subagent-panel-icon"><IconCpu size={13} /></span>
+              <span className="subagent-panel-icon"><IxBot size={14} /></span>
               <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
               <span className="subagent-panel-count">无记录</span>
             </div>
@@ -313,20 +319,22 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
       <div className="subagent-panel-top">
         <div className="subagent-panel-head">
           <div className="subagent-panel-title">
-            <span className="subagent-panel-icon"><IconCpu size={13} /></span>
+            <span className="subagent-panel-icon"><IxBot size={14} /></span>
             <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
             <span className="subagent-panel-count">{liveCount} 条消息</span>
           </div>
           {/* 第二行：状态与元信息。图标与状态文字同包一组、不换行；窄面板下按项省略，不把图标拆到另一行 */}
           <div className="subagent-panel-facts">
-            <span className="subagent-panel-status" data-state={running ? "wait" : done ? "ok" : failed ? "fail" : "idle"}>
+            <span className="subagent-panel-status" data-state={running ? "wait" : done ? "ok" : failed ? "fail" : stopped ? "stop" : "idle"}>
               {running && <IconSpinner size={11} />}
               {done && <IconCheck size={11} />}
               {failed && <IconX size={11} />}
+              {stopped && <IconPause size={11} />}
               {/* 失败原因已写在状态文案里，不再用原生 title 重复提示 */}
               <span className="subagent-panel-status-text">
                 {running ? "执行中…" : done ? "已完成"
                   : failed ? (meta?.error ? `失败：${meta.error}` : "失败")
+                  : stopped ? (meta?.error ? `已停止：${meta.error}` : "已停止")
                   : meta?.status ?? ""}
               </span>
             </span>
@@ -334,8 +342,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
             {elapsedLabel && (
               <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
             )}
-            {meta?.filesCount ? <span className="subagent-panel-meta">{meta.filesCount} 个文件</span> : null}
-            {meta?.tokens ? <span className="subagent-panel-meta">{meta.tokens} tokens</span> : null}
+            <Button size="xs" variant="ghost" onClick={() => setFactsOpen((value) => !value)} aria-expanded={factsOpen}>详情</Button>
             {/* plan-565-2323 G8：运行中才给终止入口；与状态/元信息同组右对齐，不挤占标题行 */}
             {running && (
               <Tooltip content="终止这个子代理（不影响主会话）">
@@ -351,6 +358,13 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
               </Tooltip>
             )}
           </div>
+          <Collapse open={factsOpen} lazy className="in-gap">
+            <div className="subagent-panel-details">
+              <span>{liveCount} 条消息</span>
+              <span>{meta?.filesCount ?? 0} 个变更文件</span>
+              <span>{(meta?.tokens ?? 0).toLocaleString()} tokens</span>
+            </div>
+          </Collapse>
         </div>
         {wf && <WorkflowNodeHead wf={wf} />}
       </div>

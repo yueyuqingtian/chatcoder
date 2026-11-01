@@ -1,0 +1,15 @@
+import assert from "node:assert/strict";
+import { advanceUserSendSignal } from "../src/utils/userSendSignal.ts";
+let signal = advanceUserSendSignal({ sessionId: null, confirmed: 0, optimistic: 0, sequence: 0 }, 1, [{ id: 100, sender_type: "agent" }]);
+signal = advanceUserSendSignal(signal, 1, [{ id: 1, sender_type: "user" }, { id: 100, sender_type: "agent" }]);
+assert.equal(signal.sequence, 0);
+signal = advanceUserSendSignal(signal, 1, [{ id: 100, sender_type: "agent" }, { id: 101, sender_type: "user" }]);
+assert.equal(signal.sequence, 1);
+signal = advanceUserSendSignal(signal, 1, [{ id: 101, sender_type: "user" }, { id: 1e12 + 1, sender_type: "user" }]);
+assert.equal(signal.sequence, 2);
+signal = advanceUserSendSignal(signal, 1, [{ id: 101, sender_type: "user" }, { id: 102, sender_type: "user" }]);
+signal = advanceUserSendSignal(signal, 1, [{ id: 102, sender_type: "user" }, { id: 1e12 + 2, sender_type: "user" }]);
+assert.equal(signal.sequence, 4);
+signal = advanceUserSendSignal(signal, 2, [{ id: 200, sender_type: "user" }]);
+assert.equal(signal.sequence, 0);
+console.log("历史回填不贴底、新用户消息恢复跟随回归通过");

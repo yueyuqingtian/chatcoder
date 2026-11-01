@@ -17,15 +17,16 @@
  * ── 现在 ──
  * 各消费者把收尾函数**注册**到本模块（带显式顺序 order），运动结束时由
  * `ResizeHandle`（拖拽收尾）或 `PerfBus` 订阅者调用一次 `runReconcile()`：
- * 所有任务在**同一帧内**按 order 串行执行，不各自排队、不互相等待。
+ * plan-20261101-performance：任务按 order 保序，以 4ms 预算分帧；几何提交后留出布局帧。
  *
  * ── 约束 ──
- * · 任务必须**幂等**且尽量快：同一帧内串行跑完，任一任务超预算都会拖慢整次收敛。
+ * · 任务必须**幂等**且尽量快：同步任务不能被抢占，预算在任务之间生效。
  * · 单个任务抛异常不会影响其它任务（逐个 try/catch）。
  * · 重复调用 `runReconcile()` 会合并为一次（取消上一帧的排队）。
  */
 
 import { recordReconcile } from "./metrics";
+import { isBusy, subscribe } from "./bus";
 
 export interface ReconcileEntry {
   order: number;
@@ -35,6 +36,17 @@ export interface ReconcileEntry {
 
 const entries = new Map<string, ReconcileEntry>();
 let raf = 0;
+let generation = 0;
+const FRAME_BUDGET_MS = 4;
+
+/** plan-20261101-performance：新运动使旧布局任务失效，不能在下一次拖拽中继续追平。 */
+export function cancelReconcile(): void {
+  generation += 1;
+  if (raf) cancelAnimationFrame(raf);
+  raf = 0;
+}
+
+subscribe((busy) => { if (busy) cancelReconcile(); });
 
 /** 注册一个收尾任务。返回注销函数（组件卸载时调用）。 */
 export function registerReconcileTask(
@@ -57,26 +69,38 @@ export function hasReconcileTask(id: string): boolean {
 }
 
 /**
- * 触发一次收敛：下一帧内按 order 串行执行全部已注册任务。
+ * 触发一次收敛：按顺序分帧执行已注册任务，运动开始时取消旧代次。
  * 重复调用合并为一次。
  */
 export function runReconcile(): void {
   if (typeof requestAnimationFrame !== "function") return;
-  if (raf) cancelAnimationFrame(raf);
-  raf = requestAnimationFrame(() => {
+  cancelReconcile();
+  const token = generation;
+  const list = Array.from(entries.entries()).sort((a, b) => a[1].order - b[1].order);
+  let cursor = 0;
+  const step = () => {
     raf = 0;
+    if (token !== generation || isBusy()) return;
     const t0 = performance.now();
-    const list = Array.from(entries.values()).sort((a, b) => a.order - b.order);
-    for (const e of list) {
+    while (cursor < list.length) {
+      const [id, e] = list[cursor++];
+      // 已卸载或被新实例覆盖的任务不得执行旧闭包。
+      if (entries.get(id) !== e) continue;
       try {
         e.fn();
       } catch {
         /* 单个任务异常不影响其它任务 */
       }
+      if (token !== generation) return;
+      // 几何提交后留一帧给 ResizeObserver，再做锚点和重型面板恢复。
+      const next = list[cursor]?.[1];
+      if (next && (performance.now() - t0 >= FRAME_BUDGET_MS
+        || (e.order < RECONCILE_ORDER.scrollAnchor && next.order >= RECONCILE_ORDER.scrollAnchor))) break;
     }
-    // S12：一次收敛的耗时交给度量护栏（未采集时近似零开销）
     recordReconcile(performance.now() - t0);
-  });
+    if (cursor < list.length) raf = requestAnimationFrame(step);
+  };
+  raf = requestAnimationFrame(step);
 }
 
 /** 是否有一次收敛已排队（诊断用）。 */

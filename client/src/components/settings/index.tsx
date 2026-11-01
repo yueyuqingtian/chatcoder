@@ -3,31 +3,31 @@
  * 三组：基础设置 / Agent 能力 / 数据与统计。
  */
 import { SettingsGlyph } from "../iconkit/SettingsGlyphs";
-import { useEffect, useState } from "react";
-import { AppearancePanel } from "./AppearancePanel";
-import { GeneralPanel } from "./GeneralPanel";
-import { ModelsPanel } from "./ModelsPanel";
-import { InstalledPanel } from "./InstalledPanel";
-import { SubagentsPanel } from "./SubagentsPanel";
-import { WorkflowSettingsPanel } from "./WorkflowSettingsPanel";
-import { RulesPanel } from "./RulesPanel";
-import { ScheduledPanel } from "./ScheduledPanel";
-import { PolicyPanel } from "./PolicyPanel";
-import { HooksPanel } from "./HooksPanel";
-import { MemoryPanel } from "./MemoryPanel";
-import { UsagePanel } from "./UsagePanel";
-import { DiagnosticsPanel } from "./DiagnosticsPanel";
-import { IndexLibraryPanel } from "./IndexLibraryPanel";
-import { ArchivedPanel } from "./ArchivedPanel";
-import { WorktreesPanel } from "./WorktreesPanel";
-import { PetsPanel } from "./PetsPanel";
+import { lazy, Suspense, useEffect, useState } from "react";
+const AppearancePanel = lazy(() => import("./AppearancePanel").then((module) => ({ default: module.AppearancePanel })));
+const GeneralPanel = lazy(() => import("./GeneralPanel").then((module) => ({ default: module.GeneralPanel })));
+const ModelsPanel = lazy(() => import("./ModelsPanel").then((module) => ({ default: module.ModelsPanel })));
+const InstalledPanel = lazy(() => import("./InstalledPanel").then((module) => ({ default: module.InstalledPanel })));
+const SubagentsPanel = lazy(() => import("./SubagentsPanel").then((module) => ({ default: module.SubagentsPanel })));
+const WorkflowSettingsPanel = lazy(() => import("./WorkflowSettingsPanel").then((module) => ({ default: module.WorkflowSettingsPanel })));
+const RulesPanel = lazy(() => import("./RulesPanel").then((module) => ({ default: module.RulesPanel })));
+const ScheduledPanel = lazy(() => import("./ScheduledPanel").then((module) => ({ default: module.ScheduledPanel })));
+const PolicyPanel = lazy(() => import("./PolicyPanel").then((module) => ({ default: module.PolicyPanel })));
+const HooksPanel = lazy(() => import("./HooksPanel").then((module) => ({ default: module.HooksPanel })));
+const MemoryPanel = lazy(() => import("./MemoryPanel").then((module) => ({ default: module.MemoryPanel })));
+const UsagePanel = lazy(() => import("./UsagePanel").then((module) => ({ default: module.UsagePanel })));
+const DiagnosticsPanel = lazy(() => import("./DiagnosticsPanel").then((module) => ({ default: module.DiagnosticsPanel })));
+const IndexLibraryPanel = lazy(() => import("./IndexLibraryPanel").then((module) => ({ default: module.IndexLibraryPanel })));
+const ArchivedPanel = lazy(() => import("./ArchivedPanel").then((module) => ({ default: module.ArchivedPanel })));
+const WorktreesPanel = lazy(() => import("./WorktreesPanel").then((module) => ({ default: module.WorktreesPanel })));
+const PetsPanel = lazy(() => import("./PetsPanel").then((module) => ({ default: module.PetsPanel })));
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
-import { DesktopPanel } from "./DesktopPanel";
+const DesktopPanel = lazy(() => import("./DesktopPanel").then((module) => ({ default: module.DesktopPanel })));
 import { IconAlertCircle, IconArrowDown, IconCheck, IconCopy, IconRefresh, IconSpinner } from "../icons";
 import { Button, Card, Collapse, PageShell, PageTransition, Switch } from "../ui";
 import { AppLogo } from "../AppLogo";
 import { ReleaseNotesView, UpdateProgress, countReleaseItems } from "../update/ReleaseNotes";
-import { PlaygroundPanel } from "./PlaygroundPanel";
+const PlaygroundPanel = lazy(() => import("./PlaygroundPanel").then((module) => ({ default: module.PlaygroundPanel })));
 import { useUpdaterStore, type UpdateStatus } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import { IconChevronDown } from "../icons";
@@ -368,5 +368,5 @@ function Panel({ tab }: { tab: SettingsTab }) {
  * `.settings-content`（flex+padding）语义冲突，造成滚动容器与限宽容器分层、
  * 滚动条出现/消失时内容盒宽度跳变。现由 PageShell 独占滚动并恒定预留 gutter。 */
 export function SettingsContent({ tab }: { tab: SettingsTab }) {
-  return <Panel tab={tab} />;
+  return <Suspense fallback={<div className="settings-loading" role="status">正在加载设置…</div>}><Panel tab={tab} /></Suspense>;
 }

@@ -86,11 +86,13 @@ def _stall_verdict(handle: "SubagentHandle", timeout: float) -> str:
 
 
 async def _turn_alive(turn_id: int | None, *, allow_missing: bool = False) -> bool:
-    """plan-565-2323 G6：只读确认所属 turn 仍存活（turn 行存在且状态仍为 running）。
+    """只读确认所属 turn 仍有效（未被中断/取消/回滚/失败）。
 
+    注意：子代理是后台异步运行的，主代理所属轮次正常结束（completed）是预期的正常场景，
+    后台子代理应照常执行完毕并唤醒主会话；只有当所属 turn 被显式中断（interrupted）、
+    取消（cancelled）、回滚（rolled_back）或失败时，子代理才应停止。
     allow_missing：首轮允许“查不到”。spawn 与 turn 落库并发时该行可能尚不可见，
-    此时不能把子代理误判为失活。查询本身失败一律按存活处理——读不到状态
-    不能成为误杀子代理的理由。
+    此时不能把子代理误判为失活。查询本身失败一律按存活处理——读不到状态不能成为误杀子代理的理由。
     """
     if turn_id is None:
         return True
@@ -111,7 +113,8 @@ async def _turn_alive(turn_id: int | None, *, allow_missing: bool = False) -> bo
             logger.debug("[subagent] turn %s 暂未查到，首轮不判定失活", turn_id)
             return True
         return False
-    return str(status) == "running"
+    # 中断 / 取消 / 回滚 / 失败等异常终态才判定为失活；running 与 completed（主代理已正常收工）均允许后台子代理继续
+    return str(status) not in ("interrupted", "cancelled", "rolled_back", "failed")
 
 
 @dataclass
@@ -291,8 +294,8 @@ class SubagentManager:
                 if not handle.internal and not await _turn_alive(
                     turn_id, allow_missing=round_index == 0
                 ):
-                    # 所属轮次已结束：与主代理收尾同语义——暂停可续跑，不把子代理单独留在运行中
-                    handle.pause_reason = "所属轮次已结束"
+                    # 所属轮次已被用户中断或回滚：暂停可续跑，不把子代理单独留在运行中
+                    handle.pause_reason = "所属轮次已中断"
                     await self._finalize_unfinished(handle, agent_id=agent_id, task_id=task_id, spec=spec)
                     return
                 round_index += 1

@@ -56,7 +56,8 @@
 /* 索引库：覆盖旧 idx-item 布局，进度条走强调色 */
 .idx-list.sc-list .idx-item.sc-row { margin: 0; }
 .idx-item.sc-row .idx-progress-bar { height: 6px; border-radius: 999px; background: var(--bg-main); overflow: hidden; }
-.idx-item.sc-row .idx-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-base) var(--ease-standard); }
+/* plan-621-2572: 统一使用标准动效令牌 --dur-3 取代旧别名 --dur-base */
+.idx-item.sc-row .idx-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-3) var(--ease-standard); }
 
 /* 归档 / 自动化 / 常规 / 电脑操控 */
 .archive-toolbar.sc-toolbar { margin-bottom: 4px; }
@@ -93,7 +94,8 @@
 .sc-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
 .sc-td-total { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--text-1); font-weight: 600; }
 .sc-bar { flex: 0 0 64px; height: 6px; border-radius: 999px; background: var(--bg-main); overflow: hidden; }
-.sc-bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-base) var(--ease-standard); }
+/* plan-621-2572: 使用 --dur-3 统一动画时长 */
+.sc-bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-3) var(--ease-standard); }
 .sc-pct { width: 44px; color: var(--text-3); font-weight: 500; }
 
 /* ── 日期范围浮层 ── */
@@ -105,7 +107,7 @@
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; width: 288px; padding: 12px;
   background: var(--color-popover); border: 1px solid var(--border-light); border-radius: var(--r-pop);
   box-shadow: var(--shadow-pop);
-  transform-origin: top left; animation: usage-drp-in var(--dur-base) var(--spring-soft) both;
+  transform-origin: top left; animation: usage-drp-in var(--dur-3) var(--spring-soft) both;
 }
 @keyframes usage-drp-in { from { opacity: 0; transform: translateY(-4px) scale(0.97); } to { opacity: 1; transform: none; } }
 .usage-drp-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--border-light); }
@@ -166,3 +168,5 @@
 
 /* ③ 归档工具条：底线全宽（与列表行分隔线同宽，避免"半截线"观感） */
 .ui-card .archive-toolbar { margin-inline: calc(var(--sp-5) * -1); padding-inline: var(--sp-5); }
+/* plan-20261101-performance：异步设置页的占位保持同一内容区域，不挤动侧栏。 */
+.settings-loading { min-height: 160px; padding: 24px; color: var(--text-2); font-size: 13px; line-height: 20px; }

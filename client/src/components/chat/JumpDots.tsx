@@ -104,7 +104,7 @@ export function JumpDots({ entries, onJump, activeIndex }: {
         onPointerMove={(e) => hoverNearest(e.clientY)}
       >
         {turns.map((t, i) => {
-          const preview = turnPreview(t.entry);
+          const preview = hovered === i ? turnPreview(t.entry) : "";
           const isActive = i === activeDot;
           const diff = hovered !== null ? Math.abs(hovered - i) : null;
 

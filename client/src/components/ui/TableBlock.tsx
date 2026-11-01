@@ -6,10 +6,12 @@
  *  - 展开：「表格预览」浮窗，大视图可横纵滚动，浮窗里同样可以复制与下载。
  * 数据从渲染后的 DOM 读取——流式与落库共用同一个组件，不需要另外解析 Markdown 源文。
  */
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { IconCheck, IconCopy, IconDownload, IconMaximize } from "../icons";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
+import { tableRows, tableMarkdown } from "./markdownData";
+import { ViewportBlock } from "./ViewportBlock";
 
 /** 单元格 → Markdown 行内文本 */
 function cellMarkdown(el: Element): string {
@@ -83,16 +85,19 @@ function downloadCsv(csv: string) {
 }
 
 /** 工具条（行内与浮窗共用）：复制 / 下载 /（行内才有的）展开 */
-function TableTools({ getTable, onExpand }: { getTable: () => HTMLTableElement | null; onExpand?: () => void }) {
+function TableTools({ getTable, onExpand, data }: { getTable: () => HTMLTableElement | null; onExpand?: () => void; data?: { markdown: string; csv: string } }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(() => {
-    const md = tableToMarkdown(getTable());
+    const md = data?.markdown ?? tableToMarkdown(getTable());
     if (!md) return;
+    // plan-621-2572：捕获剪贴板权限或环境异常，避免未处理 Promise rejection
     void navigator.clipboard?.writeText(md).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
+    }).catch(() => {
+      /* 忽略剪贴板权限拒绝，避免未捕获异常 */
     });
-  }, [getTable]);
+  }, [getTable, data]);
   return (
     <div className="md-table-tools" role="toolbar" aria-label="表格操作">
       <Tooltip content={copied ? "已复制" : "复制为 Markdown"} side="top">
@@ -101,7 +106,7 @@ function TableTools({ getTable, onExpand }: { getTable: () => HTMLTableElement |
         </button>
       </Tooltip>
       <Tooltip content="下载 CSV" side="top">
-        <button type="button" className="md-table-tool" aria-label="下载 CSV" onClick={() => downloadCsv(tableToCsv(getTable()))}>
+        <button type="button" className="md-table-tool" aria-label="下载 CSV" onClick={() => downloadCsv(data?.csv ?? tableToCsv(getTable()))}>
           <IconDownload size={14} />
         </button>
       </Tooltip>
@@ -122,12 +127,26 @@ export function TableBlock({ children }: { children?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const getTable = useCallback(() => tableRef.current, []);
   const getModalTable = useCallback(() => modalTableRef.current ?? tableRef.current, []);
+  const rows = useMemo(() => tableRows(children), [children]);
+  const long = rows.length > 80;
+  const data = useMemo(() => long ? { markdown: tableMarkdown(children), csv: "\uFEFF" + rows.map((row) => row.map((cell) =>
+    /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell).join(",")).join("\r\n") } : undefined, [children, rows, long]);
+  const body = useMemo(() => !long ? children : Children.map(children, (child) => {
+    if (!isValidElement<{ children?: ReactNode }>(child) || child.type !== "tbody") return child;
+    const bodyRows = Children.toArray(child.props.children);
+    const groups: ReactNode[] = [];
+    for (let start = 0; start < bodyRows.length; start += 40) groups.push(
+      <ViewportBlock key={start} tableColumns={rows[0]?.length || 1} estimate={Math.min(40, bodyRows.length - start) * 36}>
+        {bodyRows.slice(start, start + 40)}
+      </ViewportBlock>);
+    return groups;
+  }), [children, rows, long]);
   return (
     <div className="md-table-block">
-      <TableTools getTable={getTable} onExpand={() => setOpen(true)} />
+      <TableTools getTable={getTable} data={data} onExpand={() => setOpen(true)} />
       <div className="md-table-card">
         <div className="md-table-scroll">
-          <table className="md-table" ref={tableRef}>{children}</table>
+          <table className={`md-table${long ? " md-table-windowed" : ""}`} ref={tableRef}>{body}</table>
         </div>
       </div>
       {/* 弹窗常驻挂载（内容只在打开时渲染）：关闭时能播放退场动画 */}
@@ -137,7 +156,7 @@ export function TableBlock({ children }: { children?: ReactNode }) {
         title="表格预览"
         subtitle="在更大的可滚动视图中查看表格。"
         width={1080}
-        actions={<TableTools getTable={getModalTable} />}
+        actions={<TableTools getTable={getModalTable} data={data} />}
         className="md-table-dialog"
         bodyClassName="md-table-dialog-body"
       >

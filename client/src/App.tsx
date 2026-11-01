@@ -48,6 +48,13 @@ export default function App() {
   // 用户要求只保留主进程 loading.html 那一个带加载指示的启动界面——
   // 两个开屏叠在一起会先看到「加载中」再闪一个「无加载图标的 logo」，观感割裂。
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    let timer = 0;
+    const resize = () => { window.clearTimeout(timer); timer = window.setTimeout(() => setViewportWidth(window.innerWidth), 100); };
+    window.addEventListener("resize", resize);
+    return () => { window.removeEventListener("resize", resize); window.clearTimeout(timer); };
+  }, []);
   const [nav, setNav] = useState<NavKey | null>(null);
   // plan-41-233：右面板状态按会话分桶，这里跟随会话切换同步「当前桶」。
   const currentSessionId = useChatStore((s) => s.currentSessionId);
@@ -71,7 +78,11 @@ export default function App() {
    *  只派生显示态、不改面板桶状态，进入会话后按原先的展开与否恢复。 */
   const homePage = !pageMode && currentSessionId == null;
   const rightAvailable = !pageMode && !homePage;
-  const rightShown = rightExpanded && rightAvailable;
+  // plan-20261101-performance：空间不足只折叠显示态，保留用户宽度和展开偏好。
+  const panelFits = viewportWidth >= MAIN_MIN_W + (sidebarCollapsed ? 0 : leftPanelWidth) + 280 + 24;
+  const rightShown = rightExpanded && rightAvailable && (rightFullscreen || panelFits);
+  const panelFitsRef = useRef(panelFits);
+  panelFitsRef.current = panelFits;
   const rightFull = rightShown && rightFullscreen;
   const rightAvailableRef = useRef(rightAvailable);
   rightAvailableRef.current = rightAvailable;
@@ -104,6 +115,10 @@ export default function App() {
   const toggleRightPanelFromTitlebar = useCallback(() => {
     if (usePanelStore.getState().fullscreen) {
       usePanelStore.getState().closePanel();
+      return;
+    }
+    if (!panelFitsRef.current) {
+      usePanelStore.setState({ expanded: true, fullscreen: true });
       return;
     }
     usePanelStore.getState().togglePanel();
@@ -399,7 +414,7 @@ export default function App() {
           <div ref={rightPanelElRef} className={`app-pane app-pane-right${rightShown ? "" : " collapsed"}${rightFull ? " fullscreen" : ""}`} style={{ width: rightShown ? (rightFull ? "auto" : `${rightPanelWidth}px`) : "0px", flexBasis: rightShown ? (rightFull ? "auto" : `${rightPanelWidth}px`) : "0px" }}>
             {/* plan-41-233：内容常驻挂载——折叠只变几何（width:0 + visibility:hidden），
                 终端 PTY 与浏览器页面不再因折叠被卸载重建（用户诉求：折叠再展开保留状态）。 */}
-            <PluginSlot slot="right-panel" />
+            <PluginSlot slot="right-panel" visible={rightShown} />
           </div>
         </div>
         {/* plan-20261016-ux（问题 10）：右面板全屏时右下角的主对话小窗（隐藏 / 打开 / 常驻） */}

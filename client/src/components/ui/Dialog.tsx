@@ -114,7 +114,9 @@ interface DialogProps {
   actions?: ReactNode;
   /** 底部操作区（表单提交/确认按钮） */
   footer?: ReactNode;
-  /** 最大宽度（px），默认 720 */
+  /** plan-20261101-performance：三档尺寸复用同一弹窗，复合表单仍可显式指定宽度。 */
+  size?: "compact" | "form" | "wide";
+  /** 最大宽度（px），优先于 size */
   width?: number;
   /** 是否显示右上角关闭按钮，默认 true */
   closable?: boolean;
@@ -132,7 +134,8 @@ export function Dialog({
   subtitle,
   actions,
   footer,
-  width = 720,
+  width,
+  size = "form",
   closable = true,
   dismissOnOverlay = true,
   bodyClassName = "",
@@ -141,7 +144,7 @@ export function Dialog({
 }: DialogProps) {
   // 关闭时保留「最后一次打开时」的内容快照：退场动画播放期间，调用方往往已在 onClose 之后清空表单状态，
   // 若直接渲染新 props，弹窗会先变成空白的小框再消失（跳变）。快照只在 open 为真时更新。
-  const liveView: DialogView = { title, subtitle, actions, footer, width, closable, bodyClassName, className, children };
+  const liveView: DialogView = { title, subtitle, actions, footer, width: width ?? { compact: 400, form: 640, wide: 1080 }[size], closable, bodyClassName, className, children };
   const frozenRef = useRef<DialogView | null>(null);
   if (open) frozenRef.current = liveView;
   const view = open || !frozenRef.current ? liveView : frozenRef.current;

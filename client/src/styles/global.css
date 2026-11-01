@@ -1145,7 +1145,20 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 /* 文件名优先完整展示；目录在空间不足时先省略（flex-shrink 更大） */
 .tc-filename { font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tc-dir { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 12px; }
-.tc-status { font-size: 11px; flex-shrink: 0; display: inline-flex; align-items: center; }
+/* plan-621-2572: 为 .tc-status 增加固定槽位宽度（18px）并居中，为状态耗时设置 tabular-nums，防止状态切换时水平微抖 */
+.tc-status {
+  font-size: 11px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.tc-meta {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
 .tc-status.wait { color: var(--text-3); }
 .tc-status.ok { color: var(--success); }
 .tc-status.fail { color: var(--error); }
@@ -1197,8 +1210,9 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .tc-output::-webkit-scrollbar-thumb:hover,
 .tc-error-output::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 /* 工具调用展开区（对齐 zcode 3.14.2） */
-.tc-code { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-1); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
-.tc-plain { margin: 0; font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
+/* plan-621-2572: 工具输出区字号由 11px 提升为 12px、行高由 1.4 提升为 1.55，长日志阅读更舒适 */
+.tc-code { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-1); white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+.tc-plain { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
 /* v7: 运行中命令行/工具输出的实时区——略浅前景 + 首帧上边距，避免与图标行贴死 */
 .tc-live { color: var(--text-3); padding-top: 2px; }
 /* plan-334-1661 S2: 尾部截断提示行已由 plan-522-2209 R10 的 ClampBlock 接管
@@ -1381,8 +1395,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    过渡只在用户点过按钮之后（.is-animating）才挂上，避免长消息一出现就从全高缩到 6 行。 */
 .turn-user-bubble .ub-text.is-overflow { overflow: hidden; interpolate-size: allow-keywords; }
 .turn-user-bubble .ub-text.is-animating { transition: height var(--dur-3) var(--ease-emphasized-decel); }
-.turn-user-bubble .ub-text.is-collapsed { height: calc(var(--chat-line-height, 2.2) * 1em * 6); -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent); mask-image: linear-gradient(to bottom, #000 62%, transparent); }
-.ub-toggle { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: 4px auto 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-pill); background: var(--bg-main); color: var(--text-2); cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+.turn-user-bubble .ub-text.is-collapsed { height: calc(var(--chat-line-height, 2.2) * 1em * 6); -webkit-mask-image: linear-gradient(to bottom, #000 86%, transparent); mask-image: linear-gradient(to bottom, #000 86%, transparent); }
+.ub-toggle { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 8px auto 0; }
 .ub-toggle:hover { background: var(--bg-hover); color: var(--text-1); }
 .ub-toggle:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
 .ub-toggle svg { transition: rotate var(--dur-3) var(--ease-standard); }
@@ -2534,7 +2548,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   position: fixed;
   z-index: 3000;
   padding: 7px 10px;
-  border-radius: var(--r-sm, 6px);
+  /* plan-621-2572: 清理非令牌 6px fallback，统一走 --r-sm */
+  border-radius: var(--r-sm);
   background: var(--bg-elevated, var(--bg));
   border: 1px solid var(--border);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
@@ -3788,7 +3803,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   pointer-events: none;
   isolation: isolate;
   /* 展开时等左栏到位后再淡入，避免接缝线跟着面板一路扫过顶部导航区 */
-  transition: opacity var(--dur-fast) var(--dur-pane);
+  /* plan-621-2572: 补齐缺失的过渡缓动函数，修复为标准 transition 语法 */
+  transition: opacity var(--dur-fast) var(--ease-standard) var(--dur-pane);
 }
 /* plan-128-518：折叠中的分隔条只承载边框，不接收指针。
    接缝线在折叠瞬间直接隐藏、不随左栏收窄：收窄时它以亚像素位置扫过导航按钮，
@@ -4275,7 +4291,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
   border: none;
   font-size: 12.5px;
   line-height: 1.6;
-  font-family: "JetBrains Mono", "Fira Code", Consolas, Menlo, monospace;
+  /* plan-621-2572: 统一等宽代码字体栈至设计令牌 var(--font-mono) */
+  font-family: var(--font-mono);
   overflow-x: auto;
 }
 .turn-agent-text .md-body .md-code-pre code {
@@ -4625,14 +4642,15 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .question-text { font-size: 13px; color: var(--text-1, #e6e6e6); margin-bottom: 6px; line-height: 1.5; }
 .question-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .question-option {
-  padding: 5px 12px; border-radius: var(--radius-sm, 6px); font-size: 12px;
+  /* plan-621-2572: 清理非令牌 6px fallback，统一走 --r-sm */
+  padding: 5px 12px; border-radius: var(--r-sm); font-size: 12px;
   border: 1px solid var(--border, #333); background: transparent; color: var(--text-2, #aaa); cursor: pointer;
 }
 .question-option.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .question-option:hover { border-color: var(--accent); }
 .question-custom {
   margin-top: 6px; width: 100%; padding: 6px 10px; font-size: 12px;
-  border: 1px solid var(--border, #333); border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border, #333); border-radius: var(--r-sm);
   background: var(--bg-elevated, #1e1e1e); color: var(--text-1, #e6e6e6); outline: none;
 }
 /* plan-230-1144 M5.2: focus 统一至 focus.css */
@@ -5022,7 +5040,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .subagent-panel-head { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px 8px; flex-shrink: 0; min-width: 0; }
 .subagent-panel-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .subagent-panel-icon { display: inline-flex; flex-shrink: 0; color: var(--text-2); }
-.subagent-panel-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-panel-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--text-1); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 .subagent-panel-count { flex-shrink: 0; font-size: 11px; line-height: 20px; color: var(--text-3); white-space: nowrap; }
 .subagent-panel-facts { display: flex; align-items: center; min-width: 0; font-size: 11px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; }
 .subagent-panel-facts > * { flex-shrink: 0; }
@@ -5058,7 +5076,7 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* v20: 子代理面板窄版消息流适配（共享插件容器） */
 /* v36 (plan-321-1600 M2): 内容列与主消息流同口径（max-width + 居中 + 同左右留白）。
    此前 max-width: none + 12px 内边距 → 文本全宽贴边、行长过长，观感与主流明显不一致。 */
-.subagent-panel-body .mf-list { max-width: var(--content-max-w); margin: 0 auto; padding: 0 32px 4px; }
+.subagent-panel-body .mf-list { max-width: var(--content-max-w); margin: 0 auto; padding: 0 clamp(16px, 4cqi, 24px) 4px; }
 .subagent-panel-body .turn-user-bubble { max-width: 85%; }
 .subagent-panel-body { --msg-gap: 8px; }
 .subagent-panel-body .mf-jump-bottom { right: 16px; bottom: 16px; }
@@ -5144,7 +5162,8 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .compact-card-actions { margin: 6px 0 2px; }
 .compact-card-restore-btn {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: 11px; padding: 3px 10px; border-radius: var(--r-sm, 6px);
+  /* plan-621-2572: 清理非令牌 6px fallback，统一走 --r-sm */
+  font-size: 11px; padding: 3px 10px; border-radius: var(--r-sm);
   border: 1px solid var(--border-strong); background: var(--bg-hover); color: var(--text-2);
   cursor: pointer;
 }

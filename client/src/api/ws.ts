@@ -111,6 +111,10 @@ export class WsClient {
       if (this.ws !== sock || this.currentSessionId !== sessionId) return;
       try {
         const data = JSON.parse(e.data) as ServerEvent;
+        // plan-20261101-performance：服务端重启后 seq 从零开始，重同步时重建本地基线。
+        if (data.event === "sync.response" && data.payload.reset_required && typeof data.payload.current_seq === "number") {
+          this.lastSeq = data.payload.current_seq;
+        }
         // v2.1: 推进事件序号（sync.response 的 seq=0 不参与推进）
         if (typeof data.seq === "number" && data.seq > this.lastSeq) {
           this.lastSeq = data.seq;

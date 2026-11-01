@@ -13,6 +13,7 @@ import { usePanelStore, bucketSessionId, panelTabKey } from "../../store/panel";
 import { sessionKey, useBrowserStore } from "../../store/browser";
 import type { PanelTab, PanelTabId } from "../../store/panel";
 import { useI18n } from "../../store/i18n";
+import { useChatStore } from "../../store/chat";
 import {
   IconCheck, IconChevronDown, IconGitBranch, IconMessageSquare, IconPlus, IconRotateCcw, IconX,
 } from "../icons";
@@ -91,13 +92,14 @@ function tabIcon(id: PanelTabId, size: number) {
   }
 }
 
-export function RightPanel() {
+export function RightPanel({ visible = true }: { visible?: boolean }) {
   const { t } = useI18n();
   // tabs/activeKey 为「当前会话桶」的投影（见 store/panel.ts）；buckets 用于跨会话保活渲染
   const tabs = usePanelStore((s) => s.tabs);
   const activeKey = usePanelStore((s) => s.activeKey);
   const buckets = usePanelStore((s) => s.buckets);
   const activeBucket = usePanelStore((s) => s.activeBucket);
+  const hotSessions = useChatStore((s) => Object.keys(s.sessionState).join(","));
   const openTab = usePanelStore((s) => s.openTab);
   const openNewTab = usePanelStore((s) => s.openNewTab);
   const closeTab = usePanelStore((s) => s.closeTab);
@@ -312,7 +314,8 @@ export function RightPanel() {
         {Object.entries(buckets).flatMap(([bKey, bucket]) =>
           bucket.tabs.map((tTab) => {
             const key = panelTabKey(tTab);
-            const isActive = bKey === activeBucket && key === activeKey;
+            const isActive = visible && bKey === activeBucket && key === activeKey;
+            const keepMessageView = bKey === activeBucket || hotSessions.split(",").includes(String(bucketSessionId(bKey)));
             // plan-20261015-browser-agent：浏览器标签不能 display:none（网页视口会变 0×0，AI 无法在后台操作），
             // 改为不可见但保留布局；其中的 webview 由 BrowserPanel 停泊在视口内继续渲染
             const keepAlive = !isActive && tTab.id === "browser";
@@ -323,7 +326,7 @@ export function RightPanel() {
                 style={{ display: isActive || keepAlive ? "block" : "none", height: "100%" }}
                 aria-hidden={!isActive || undefined}
               >
-                <GuardedPanelContent tabKey={`${bKey}:${key}`} tab={tTab} sessionId={bucketSessionId(bKey)} visible={isActive} />
+                {(tTab.id !== "subagent" || keepMessageView) && <GuardedPanelContent tabKey={`${bKey}:${key}`} tab={tTab} sessionId={bucketSessionId(bKey)} visible={isActive} />}
               </div>
             );
           })

@@ -3,6 +3,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -612,6 +613,44 @@ async def get_snapshot(turn_id: int, db: AsyncSession = Depends(get_db)):
 
 
 # ── 会话数据查询（挂 turns 下便于前端一次获取）──
+
+@router.get("/sessions/{session_id}/messages/page")
+async def message_page(session_id: int, thread_id: int | None = None,
+                       before_id: int | None = Query(None, gt=0),
+                       after_id: int | None = Query(None, ge=0),
+                       around_id: int | None = Query(None, gt=0),
+                       turn_id: int | None = Query(None, gt=0),
+                       limit: int = Query(100, ge=1, le=200), db: AsyncSession = Depends(get_db)):
+    from app.services.message_window import page
+    try:
+        if turn_id is not None:
+            if around_id is not None or before_id is not None or after_id is not None:
+                raise ValueError("turn_id 不能与消息游标同时提供")
+            from app.persistence.models.message import Message
+            from app.services.message_window import scope
+            around_id = (await db.execute(select(Message.id).where(*scope(session_id, thread_id), Message.turn_id == turn_id).order_by(Message.id.asc()).limit(1))).scalar_one_or_none()
+            if around_id is None:
+                raise LookupError("轮次消息不存在")
+        import time
+        from app.services.message_window import stats
+        result = await page(db, session_id, thread_id, before_id, after_id, around_id, limit)
+        started = time.monotonic()
+        response = JSONResponse(result)
+        stats["last_serialize_ms"] = round((time.monotonic() - started) * 1000, 2)
+        stats["last_response_bytes"] = len(response.body)
+        return response
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/messages/search")
+async def search_messages(session_id: int, q: str = Query(..., min_length=1, max_length=200),
+                          thread_id: int | None = None, before_id: int | None = Query(None, gt=0),
+                          limit: int = Query(100, ge=1, le=200), db: AsyncSession = Depends(get_db)):
+    from app.services.message_window import search
+    return await search(db, session_id, q, thread_id, before_id, limit)
 
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
 async def list_messages(session_id: int, thread_id: int | None = None,

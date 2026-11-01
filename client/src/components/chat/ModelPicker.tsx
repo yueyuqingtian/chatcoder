@@ -75,7 +75,7 @@ export function ModelPicker({
     ? activeModel.provider_name
       ? `${activeModel.provider_name}/${activeModel.name}`
       : activeModel.name
-    : inheritLabel || "模型";
+    : inheritLabel || (groups.length === 0 ? "配置模型" : "选择模型");
 
   return (
     <div className="composer-model-wrap is-field">

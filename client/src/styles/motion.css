@@ -234,13 +234,26 @@
   --motion-dist: 0;
 }
 /* 减弱档：停止呼吸/脉冲/旋转类持续动画（spinner 保留，否则用户无法感知"进行中"） */
+/* plan-621-2572: 补齐对 .mo-shimmer、pets-thumb-pulse、微光与脉冲等持续型循环动画的禁用规则 */
 :root[data-motion="reduced"] .mo-loop,
 :root[data-motion="reduced"] .anim-breath,
 :root[data-motion="reduced"] .anim-pulse,
-:root[data-motion="reduced"] .text-shine {
+:root[data-motion="reduced"] .text-shine,
+:root[data-motion="reduced"] .mo-shimmer,
+:root[data-motion="reduced"] .cc-queue-item.is-flushing,
+:root[data-motion="reduced"] .pets-thumb[data-state="loading"]::after,
+:root[data-motion="reduced"] .pets-thumb-pulse,
+:root[data-motion="reduced"] .mkt-sk,
+:root[data-motion="reduced"] .mkt-twinkle,
+:root[data-motion="reduced"] .mkt-dot {
   animation: none !important;
 }
 /* 关闭档：与系统 reduced-motion 同等降级 */
+:root[data-motion="off"] .pets-thumb[data-state="loading"]::after,
+:root[data-motion="off"] .cc-queue-item.is-flushing,
+:root[data-motion="off"] .mo-shimmer {
+  animation: none !important;
+}
 :root[data-motion="off"] *,
 :root[data-motion="off"] *::before,
 :root[data-motion="off"] *::after {

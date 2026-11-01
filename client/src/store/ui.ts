@@ -62,8 +62,8 @@ const STORAGE_KEY = "chatcoder.ui-prefs";
 const SAVED_AT_KEY = "chatcoder.ui-prefs.saved-at";
 
 const DEFAULTS: UiPrefs = {
-  leftPanelWidth: 264,
-  rightPanelWidth: 420,
+  leftPanelWidth: 260,
+  rightPanelWidth: 400,
   glassmorphism: false,
   glassStrength: 1,
   glassGradientC1: "",

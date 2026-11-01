@@ -114,19 +114,29 @@ async function fetchWithRetry(
   let lastErr: unknown;
   for (let i = 0; i <= retries; i++) {
     const controller = new AbortController();
+    const abort = () => controller.abort(init?.signal?.reason);
+    if (init?.signal?.aborted) abort();
+    else init?.signal?.addEventListener("abort", abort, { once: true });
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       return await fetch(input, { ...init, signal: controller.signal });
     } catch (err) {
+      if (init?.signal?.aborted) throw err;
       lastErr = err;
       if (i < retries) {
-        await new Promise((r) => setTimeout(r, 300 * Math.pow(2, i)));
+        await new Promise<void>((resolve, reject) => {
+          const abortWait = () => { clearTimeout(wait); init?.signal?.removeEventListener("abort", abortWait); reject(new DOMException("请求已取消", "AbortError")); };
+          const wait = setTimeout(() => { init?.signal?.removeEventListener("abort", abortWait); resolve(); }, 300 * Math.pow(2, i));
+          if (init?.signal?.aborted) abortWait();
+          else init?.signal?.addEventListener("abort", abortWait, { once: true });
+        });
       }
     } finally {
       /* plan-549-2281 复盘：旧实现只在成功路径 clearTimeout——抛错（含 10s 超时 abort）
        * 时定时器要一直挂到触发为止，请求失败越多泄漏越多；重试循环里每次都新建一个，
        * 于是 N 次失败留下 N 个待触发定时器。清理必须放进 finally。 */
       clearTimeout(timeoutId);
+      init?.signal?.removeEventListener("abort", abort);
     }
   }
   throw lastErr;
@@ -215,8 +225,8 @@ async function postCancel<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetchWithRetry(`${await baseForFetch()}${path}`);
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetchWithRetry(`${await baseForFetch()}${path}`, { signal });
   if (!res.ok) {
     const detail = await res.text();
     throw toApiError(res, detail);
@@ -745,6 +755,22 @@ function turnIdsQs(extraTurnIds?: readonly number[]): string {
   return ids.length > 0 ? `turn_ids=${ids.join(",")}` : "";
 }
 
+export interface MessagePage {
+  items: MessageOut[];
+  context: MessageOut[];
+  before_id: number | null;
+  after_id: number | null;
+  has_before: boolean;
+  has_after: boolean;
+  revision: number;
+  boundary_turn_ids: number[];
+}
+export interface MessageSearch {
+  items: Array<{ id: number; turn_id: number | null; snippet: string }>;
+  has_more: boolean;
+  before_id: number | null;
+}
+
 export const api = {
   // ── 项目 ──
   listProjects: (params?: { include_archived?: boolean }) =>
@@ -1106,6 +1132,13 @@ export const api = {
   // ── 会话数据查询 ──
   listSessionMessages: (sessionId: number, threadId?: number) =>
     get<MessageOut[]>(`/turns/sessions/${sessionId}/messages${threadId != null ? `?thread_id=${threadId}` : ""}`),
+  messagePage: (sessionId: number, options: { thread_id?: number; before_id?: number; after_id?: number; around_id?: number; turn_id?: number; limit?: number } = {}, signal?: AbortSignal) => {
+    const params = new URLSearchParams(Object.entries(options).filter(([, value]) => value != null).map(([key, value]) => [key, String(value)]));
+    return get<MessagePage>(`/turns/sessions/${sessionId}/messages/page?${params}`, signal);
+  },
+  searchMessages: (sessionId: number, q: string, threadId?: number, signal?: AbortSignal, beforeId?: number) =>
+    get<MessageSearch>(`/turns/sessions/${sessionId}/messages/search?${new URLSearchParams({ q,
+      ...(threadId != null ? { thread_id: String(threadId) } : {}), ...(beforeId != null ? { before_id: String(beforeId) } : {}) })}`, signal),
   // v30.1: 压缩块索引 / 原文还原（AI 与前端按索引查看压缩前会话）
   listCompactions: (sessionId: number) =>
     get<CompactionIndexOut[]>(`/sessions/${sessionId}/compactions`),

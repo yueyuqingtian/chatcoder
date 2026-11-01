@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # 团队相关表 (team_agents/teams/agent_templates/session_members/task_edges/decisions)
 # 已被 v2 废弃，不再维护迁移。
 _MIGRATIONS: list[tuple[str, str, str]] = [
+    ("sessions", "message_revision", "INTEGER DEFAULT 0 NOT NULL"),
     # ========== sessions（v1 缺 project_id / model_id / pinned / fork_parent / worktree / updated_at）==========
     ("sessions", "project_id", "BIGINT"),
     # 侧边会话（子会话）所属主会话 id；旧库缺列时启动迁移补齐，NULL = 普通会话
@@ -681,6 +682,7 @@ async def _memory_origin_not_null(db: AsyncSession) -> bool:
 
 # (索引名, 表名, 列)。create_all 不会给已存在的表补索引，这里幂等补建。
 _INDEXES: list[tuple[str, str, str]] = [
+    ("idx_messages_window", "messages", "session_id, thread_id, deleted, id"),
     # plan-20261021-usage-update：调用记录表按时间倒序分页，数万行时没有索引会每页全表排序
     ("ix_usage_records_created_at", "usage_records", "created_at"),
 ]
@@ -699,6 +701,26 @@ async def _ensure_indexes(db: AsyncSession) -> None:
                 await db.rollback()
             except Exception:
                 pass
+
+
+async def ensure_message_revision(db: AsyncSession) -> None:
+    """plan-20261101-performance：数据库触发器覆盖 ORM、原生 SQL 和回滚恢复等所有改写入口。"""
+    if db.bind.dialect.name == "sqlite":
+        await db.execute(text("""CREATE TRIGGER IF NOT EXISTS messages_revision_update
+            AFTER UPDATE ON messages
+            WHEN NEW.content IS NOT OLD.content OR NEW.deleted IS NOT OLD.deleted
+              OR NEW.turn_id IS NOT OLD.turn_id OR NEW.thread_id IS NOT OLD.thread_id
+            BEGIN UPDATE sessions SET message_revision = message_revision + 1 WHERE id = OLD.session_id; END"""))
+        await db.execute(text("""CREATE TRIGGER IF NOT EXISTS messages_revision_delete AFTER DELETE ON messages
+            BEGIN UPDATE sessions SET message_revision = message_revision + 1 WHERE id = OLD.session_id; END"""))
+    elif db.bind.dialect.name == "postgresql":
+        await db.execute(text("""CREATE OR REPLACE FUNCTION chatcoder_message_revision() RETURNS trigger AS $$
+            BEGIN UPDATE sessions SET message_revision = message_revision + 1 WHERE id = OLD.session_id;
+            RETURN OLD; END; $$ LANGUAGE plpgsql"""))
+        await db.execute(text("DROP TRIGGER IF EXISTS messages_revision ON messages"))
+        await db.execute(text("""CREATE TRIGGER messages_revision AFTER UPDATE OR DELETE ON messages
+            FOR EACH ROW EXECUTE FUNCTION chatcoder_message_revision()"""))
+    await db.commit()
 
 
 async def run_migrations(db: AsyncSession) -> dict:
@@ -726,6 +748,7 @@ async def run_migrations(db: AsyncSession) -> dict:
             except Exception:
                 pass
     await _ensure_indexes(db)
+    await ensure_message_revision(db)
 
     # plan-278-1391: 清理模型已删除、库中仍为 NOT NULL 且无默认值的遗留列。
     # 根因：旧版 sessions.plan_restore_after_turn 为 NOT NULL 无默认值，新代码不带该列

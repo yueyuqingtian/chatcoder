@@ -8,6 +8,8 @@ import { IconChevronDown } from "../icons";
 import { MessageFileCards, RefChips, TokenText, attachmentsOf, refsOf, stripRefLines } from "./AttachmentCard";
 import { msgText } from "./timeline";
 import type { MessageOut } from "../../api/client";
+import { Button, Tooltip } from "../ui";
+import { isBusy, subscribe } from "../../perf/bus";
 
 /** 折叠行数阈值：超过 6 行才出现控件 */
 const COLLAPSE_LINES = 6;
@@ -28,16 +30,25 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
   useLayoutEffect(() => {
     const el = textRef.current;
     if (!el) { setOverflow(false); return; }
+    let frame = 0;
+    let missed = false;
     const measure = () => {
+      if (isBusy()) { missed = true; return; }
+      missed = false;
       const lh = parseFloat(getComputedStyle(el).lineHeight) || 24;
       const limit = lh * COLLAPSE_LINES;
       // 折叠态 scrollHeight 即全文高度；展开态 clientHeight 也是全文高度，二者取大
       setOverflow(Math.max(el.scrollHeight, el.clientHeight) > limit + 2);
     };
     measure();
-    const ro = new ResizeObserver(measure);
+    const schedule = () => {
+      if (isBusy()) { missed = true; return; }
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
+    };
+    const ro = new ResizeObserver(schedule);
     ro.observe(el);
-    return () => ro.disconnect();
+    const off = subscribe((busy) => { if (!busy && missed) schedule(); });
+    return () => { ro.disconnect(); off(); if (frame) cancelAnimationFrame(frame); };
   }, [text]);
 
   const toggle = () => {
@@ -51,7 +62,7 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
 
   const collapsed = overflow && !expanded;
   return (
-    <div className="turn-user-bubble">
+    <div className="turn-user-bubble" data-message-id={msg.id}>
       <MessageFileCards atts={attachmentsOf(content)} />
       {/* plan-308-1542 需求2：引用芯片 */}
       <RefChips refs={refs} />
@@ -64,15 +75,19 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
         </div>
       )}
       {overflow && (
-        <button
+        <Tooltip content={expanded ? "收起长消息" : "展开完整消息"}><Button
           type="button"
+          size="xs"
+          variant="subtle"
+          pill
           className={"ub-toggle" + (expanded ? " is-open" : "")}
           aria-expanded={expanded}
           aria-label={expanded ? "收起" : "展开全文"}
           onClick={toggle}
         >
           <IconChevronDown size={14} />
-        </button>
+          <span>{expanded ? "收起" : "展开全文"}</span>
+        </Button></Tooltip>
       )}
     </div>
   );

@@ -8,6 +8,9 @@ import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
 import { parseServerTime } from "../utils/time";
 import { adoptWakeupTurn } from "../utils/wakeupMessages";
+import { equalJson } from "../utils/equalMessage";
+import { indexMessageAppend, hasMessageId } from "../utils/messageChanges";
+import { initialMessages, refreshMessageWindow, abortMessageHistory, invalidateMessageHistory } from "./messageHistory";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -826,21 +829,31 @@ function mergeSubagentMeta(
   const next: Record<number, SubagentMeta> = {};
   for (const it of list) {
     const p = prev[it.agent_id];
-    // plan-565-2323 G11：所属轮次已结束时，残留的 running/in_progress/pending 一律按 terminated 呈现。
-    // 服务端下发的 turn_status 是权威值；缺失时用本地轮次快照兜底。
-    const turnEnded = it.turn_status
-      ? TURN_ENDED_STATUS.has(String(it.turn_status))
-      : (it.turn_id != null && endedTurnIds.has(it.turn_id));
+    // 只有在所属轮次是非正常中断/回滚/取消时，残留的开放状态才按 terminated 呈现。
+    // 正常 completed 的轮次，后台子代理在正常运行中，绝不能误标记为 terminated。
+    const turnAborted = it.turn_status
+      ? (it.turn_status === "interrupted" || it.turn_status === "rolled_back" || it.turn_status === "cancelled")
+      : (it.turn_id != null && endedTurnIds.has(it.turn_id) && it.turn_status !== "completed");
     const rawStatus = it.status || p?.status || "running";
-    const status = turnEnded && OPEN_SUBAGENT_STATUS.has(rawStatus) ? "terminated" : rawStatus;
+    const status = turnAborted && OPEN_SUBAGENT_STATUS.has(rawStatus) ? "terminated" : rawStatus;
+
+    // 终态单向不可逆：本地已进入终态（done/failed/cancelled）时，绝不被服务端滞后的开放态
+    // （running/in_progress/pending）或误算的 terminated 覆盖回退
+    const prevTerminal = p?.status === "done" || p?.status === "failed" || p?.status === "cancelled";
+    const finalStatus = prevTerminal && OPEN_SUBAGENT_STATUS.has(String(it.status))
+      ? p!.status
+      : (p?.status === "done" && status === "terminated"
+        ? "done"
+        : (p?.status === "running" && it.status === "pending" ? "running" : status));
+
     next[it.agent_id] = {
       name: it.name || p?.name || `子代理 #${it.agent_id}`,
       turnId: it.turn_id ?? p?.turnId ?? null,
       taskId: it.task_id ?? p?.taskId ?? null,
       // plan-156-624：运行中不得把 updated_at 当结束时刻（该值只在启动/进度时推进）
       startedAt: it.created_at ?? p?.startedAt ?? null,
-      endedAt: (status === "done" || status === "failed"
-        || status === "cancelled" || status === "terminated")
+      endedAt: (finalStatus === "done" || finalStatus === "failed"
+        || finalStatus === "cancelled" || finalStatus === "terminated")
         ? (it.updated_at ?? p?.endedAt ?? null)
         : null,
       filesCount: it.files_count ?? p?.filesCount ?? 0,
@@ -849,10 +862,7 @@ function mergeSubagentMeta(
       programId: it.workflow?.program_id ?? p?.programId ?? null,
       spawnMessageId: it.spawn_message_id ?? p?.spawnMessageId ?? null,
       messageCount: it.message_count ?? p?.messageCount ?? 0,
-      // 终态单向不可逆：本地已 done/failed 不被 REST 滞后的 running/pending 回退
-      status: (p?.status === "done" || p?.status === "failed") && (it.status === "running" || it.status === "pending")
-        ? p.status
-        : (p?.status === "running" && it.status === "pending" ? "running" : status),
+      status: finalStatus,
     };
   }
   for (const [idStr, m] of Object.entries(prev)) {
@@ -1087,7 +1097,7 @@ registerReconcileTask("chat-stream-flush", RECONCILE_ORDER.streamFlush,
 function _appendOrdered(messages: MessageOut[], msg: MessageOut): MessageOut[] {
   const last = messages[messages.length - 1];
   const lastId = last ? Number(last.id) || 0 : 0;
-  if ((Number(msg.id) || 0) >= lastId) return [...messages, msg];
+  if ((Number(msg.id) || 0) >= lastId) return indexMessageAppend(messages, [...messages, msg]);
   return [...messages, msg].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
 }
 
@@ -1201,34 +1211,6 @@ export function pairOptimisticMessages(
   return { pairs, pending };
 }
 
-/** v967: 合并「快照已有消息」与「DB 拉取的最新消息」：按 id 去重、乐观消息 content 匹配替换、保持升序。 */
-function _mergeMessages(existing: MessageOut[], fetched: MessageOut[]): MessageOut[] {
-  const out = new Map<number, MessageOut>();
-  // DB 权威结果优先；仅纳入已确认 id
-  for (const m of fetched) {
-    const id = Number(m.id) || 0;
-    if (id > 0 && !isOptimisticMessageId(id)) out.set(id, m);
-  }
-  // plan-549-2281 复盘：占位与真实消息按「一对一消费」配对（旧实现按文本取第一条，同文本会互相吞掉）
-  const { pairs } = pairOptimisticMessages(existing, fetched);
-  for (const m of existing) {
-    const id = Number(m.id) || 0;
-    if (isOptimisticMessageId(id)) {
-      // 乐观消息（user 占位）：已配对到 DB 中唯一一条真实 user 消息则替换，否则保留等待落库
-      const replaced = pairs.get(id);
-      if (replaced) {
-        const rid = Number(replaced.id) || 0;
-        if (rid > 0) out.set(rid, replaced);
-      } else {
-        out.set(id, m); // 后端尚未落库：保留乐观占位
-      }
-    } else if (!out.has(id)) {
-      out.set(id, m); // 未在 DB 结果的已确认消息（去重兜底）
-    }
-  }
-  return [...out.values()].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
-}
-
 /** plan-41-198: 快照刷新的安全合并——DB 结果为准，但保留「请求发起后才在本地出现」的消息。
  *
  *  背景（用户反馈「排队消息自动发送后不显示，重新进会话又出现」）：
@@ -1258,7 +1240,7 @@ function _mergeRefreshed(existing: MessageOut[], fetched: MessageOut[], baseIds:
   const reuse = (m: MessageOut): MessageOut => {
     const old = existingById.get(Number(m.id) || 0);
     if (!old) return m;
-    if (_messageSignature(old) !== _messageSignature(m)) return m;
+    if (_messageSignature(old) !== _messageSignature(m) || !equalJson(old.content, m.content)) return m;
     return old;
   };
   const out = new Map<number, MessageOut>();
@@ -1318,15 +1300,28 @@ function _messageSignature(m: MessageOut): string {
 async function refreshAndMergeMessages(sessionId: number): Promise<void> {
   const cur = useChatStore.getState();
   if (cur.currentSessionId !== sessionId) return;
-  let fetched: MessageOut[] = [];
   try {
-    fetched = await api.listSessionMessages(sessionId);
+    const result = await refreshMessageWindow(sessionId, cur.messages);
+    const now = useChatStore.getState();
+    if (now.currentSessionId !== sessionId) return;
+    const present = new Set(result.items.map((m) => m.id));
+    const existing = now.messages.filter((m) => !result.checkedIds.has(m.id) || present.has(m.id));
+    useChatStore.setState({ messages: _mergeRefreshed(existing, result.items, new Set()), loading: false });
   } catch {
     return; // 拉取失败不阻塞切换（保留快照）
   }
-  const now = useChatStore.getState();
-  if (now.currentSessionId !== sessionId) return;
-  useChatStore.setState({ messages: _mergeMessages(now.messages, fetched), loading: false });
+}
+
+/** plan-20261101-performance：分页只合并本窗口，不把窗口外的消息当成删除。 */
+export function mergeHistoryIntoChat(sessionId: number, messages: MessageOut[], threadId?: number, checkedIds = new Set<number>()): void {
+  useChatStore.setState((s) => {
+    if (s.currentSessionId !== sessionId || (!messages.length && !checkedIds.size)) return {};
+    const present = new Set(messages.map((m) => m.id));
+    const retain = (existing: MessageOut[]) => existing.filter((m) => !checkedIds.has(m.id) || present.has(m.id));
+    if (threadId != null) return { subagentMessages: { ...s.subagentMessages,
+      [threadId]: _mergeRefreshed(retain(s.subagentMessages[threadId] ?? []), messages, new Set()) } };
+    return { messages: _mergeRefreshed(retain(s.messages), messages, new Set()) };
+  });
 }
 
 /** v38 (plan-482): task.proposed 处理中按 request_task_id 取请求任务标题作卡片文案。 */
@@ -1730,6 +1725,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // v2.2 分桶：切走前把当前视图快照存回旧会话 slice（后台会话状态不丢）
     const prev = get();
     const prevId = prev.currentSessionId;
+    if (prevId != null && prevId !== sessionId) abortMessageHistory(prevId);
     if (prevId != null && prevId !== sessionId) {
       const slice = _snapshotSlice(prev);
       set((s) => ({ sessionState: { ...s.sessionState, [prevId]: slice } }));
@@ -1845,7 +1841,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loading: true, error: null, sessionLoading: true });
     try {
       const [messages, turns, tasks] = await Promise.all([
-        api.listSessionMessages(sessionId),
+        initialMessages(sessionId),
         api.listTurns(sessionId),
         api.listSessionTasks(sessionId),
       ]);
@@ -2691,7 +2687,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .map((a) => a as unknown as AttachmentInfo)
         : [];
       const [messages, turns, tasks] = await Promise.all([
-        api.listSessionMessages(currentSessionId),
+        initialMessages(currentSessionId),
         api.listTurns(currentSessionId),
         api.listSessionTasks(currentSessionId),
       ]);
@@ -2823,14 +2819,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   refreshMessages: async () => {
     const { currentSessionId } = get();
     if (!currentSessionId) return;
-    // plan-41-198: 请求发起前记录本地已确认消息 id——区分「请求期间新增」与「已被删除」
-    const baseIds = new Set(
-      get().messages.filter((m) => !isOptimisticMessageId(Number(m.id) || 0)).map((m) => Number(m.id)),
-    );
     try {
-      const messages = await api.listSessionMessages(currentSessionId);
+      const result = await refreshMessageWindow(currentSessionId, get().messages);
       if (get().currentSessionId !== currentSessionId) return;
-      set((s) => ({ messages: _mergeRefreshed(s.messages, messages, baseIds) }));
+      const present = new Set(result.items.map((m) => m.id));
+      set((s) => ({ messages: _mergeRefreshed(s.messages.filter((m) =>
+        !result.checkedIds.has(m.id) || present.has(m.id)), result.items, new Set()) }));
     } catch (e) {
       set({ error: String(e) });
     }
@@ -3014,7 +3008,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addMessage: (msg) => {
     set((state) => {
       // 去重：相同 ID 直接跳过
-      if (state.messages.some((m) => m.id === msg.id)) return {};
+      if (hasMessageId(state.messages, msg.id)) return {};
       // 处理乐观消息替换：后端真实用户消息到达时，用它的 id 顶替对应的占位
       // plan-549-2281 复盘：替换口径统一走 pairOptimisticMessages——临时 id 不再是 Date.now()，
       // 判据也不再是「超大 ID」魔法值；单条到达时与整表合并用的是同一套「已确认集合 + 一对一消费」。
@@ -3089,12 +3083,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const rawThread = rawMsg.thread_id != null ? Number(rawMsg.thread_id) : null;
         if (rawThread != null) {
           // 流式思考落库：展开态移交给落库后的思考块（只认新增消息，重复投递不移交）
-          if (isThinking && !(get().subagentMessages[rawThread] ?? []).some((m) => m.id === rawMsg.id)) {
+          if (isThinking && !hasMessageId(get().subagentMessages[rawThread] ?? [], rawMsg.id)) {
             handOffThinkingExpand(rawMsg.id, rawThread);
           }
           set((state) => {
             const bucket = state.subagentMessages[rawThread] ?? [];
-            if (bucket.some((m) => m.id === rawMsg.id)) return {};
+            if (hasMessageId(bucket, rawMsg.id)) return {};
             const subStreams = { ...state.subagentStreams };
             const subThinking = { ...state.subagentThinking };
             // plan-330-1648 M6: 落库清理流式缓冲时**保留未落库的尾部增量**——
@@ -3122,10 +3116,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           break;
         }
         // 流式思考落库：展开态移交给落库后的思考块（只认新增消息，重复投递不移交）
-        if (isThinking && !get().messages.some((m) => m.id === rawMsg.id)) handOffThinkingExpand(rawMsg.id);
+        if (isThinking && !hasMessageId(get().messages, rawMsg.id)) handOffThinkingExpand(rawMsg.id);
         set((state) => {
           // 去重
-          if (state.messages.some((m) => m.id === rawMsg.id)) return {};
+          if (hasMessageId(state.messages, rawMsg.id)) return {};
           // 处理乐观消息替换
           const isUserMsg = rawMsg.sender_type === "user";
           let newMessages: MessageOut[];
@@ -4288,7 +4282,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       case "sync.response": {
         const count = Number(payload.count ?? 0);
-        if (count > 0) {
+        if (payload.reset_required && get().currentSessionId != null) invalidateMessageHistory(get().currentSessionId!);
+        if (count > 0 || payload.reset_required) {
           // plan-568-2333：只有「没有运行中轮次」时才能清空流式缓冲。服务端不把
           // token/thinking 增量写入补偿缓冲（见 gateway/ws.py 的 _STREAM_NO_BUFFER_EVENTS），
           // 所以运行中清空不会补回任何内容，只会把当前正在输出的正文与思考整段抹掉，
@@ -4547,3 +4542,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     globalWsClient.disconnect();
   },
 }));
+
+// plan-20261101-performance：仅保留最近五个非活动热视图；后台执行与待处理输入不淘汰。
+const _viewUsedAt = new Map<number, number>();
+let _viewClock = 0;
+useChatStore.subscribe((state, previous) => {
+  if (state.currentSessionId !== previous.currentSessionId && state.currentSessionId != null) {
+    _viewUsedAt.set(state.currentSessionId, ++_viewClock);
+  }
+  if (state.sessionState === previous.sessionState) return;
+  const cold = Object.entries(state.sessionState).filter(([sid, view]) => Number(sid) !== state.currentSessionId
+    && !view.isRunning && !view.pendingSubagents && !view.queuedInputs.length
+    && !Object.keys(view.streamingBuffers).length && !Object.keys(view.thinkingBuffers).length);
+  if (cold.length <= 5) return;
+  cold.sort(([a], [b]) => (_viewUsedAt.get(Number(b)) ?? 0) - (_viewUsedAt.get(Number(a)) ?? 0));
+  const next = { ...state.sessionState };
+  for (const [sid] of cold.slice(5)) { delete next[Number(sid)]; _viewUsedAt.delete(Number(sid)); }
+  useChatStore.setState({ sessionState: next });
+});

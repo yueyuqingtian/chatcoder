@@ -11,7 +11,7 @@
  *  - 代码块头部「语言 + 复制」——复制为图标按钮（去文字噪音，保留 aria-label）；
  *  - 文件链接先校验存在性再允许点击，避免点空。
  */
-import { memo, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
+import { memo, useState, useCallback, useRef, useEffect, isValidElement, Children, type ReactNode } from "react";
 import { FileIcon } from "../iconkit/FileIcon";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,6 +26,10 @@ import { api, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { TableBlock } from "./TableBlock";
 import { Tooltip } from "./Tooltip";
+import { nodeText } from "./markdownData";
+import { LongCode } from "./LongCode";
+import { ViewportBlock } from "./ViewportBlock";
+import { isSampling, recordMarkdown } from "../../perf/metrics";
 
 /** 相对链接存在性校验缓存（path → 存在且为文件）；长会话中路径不断增加，设上限防止无界增长 */
 const STAT_CACHE_LIMIT = 1000;
@@ -37,9 +41,10 @@ function statCacheSet(key: string, value: boolean): void {
   statCache.set(key, value);
 }
 
-function CodeBlockWrapper({ children }: { children: ReactNode }) {
+export function CodeBlockWrapper({ children, live = false }: { children: ReactNode; live?: boolean }) {
   const [copied, setCopied] = useState(false);
   const preRef = useRef<HTMLPreElement>(null);
+  const source = nodeText(children);
 
   // 从子节点中提取 language-xxx 标记
   let detectedLang = "";
@@ -53,13 +58,16 @@ function CodeBlockWrapper({ children }: { children: ReactNode }) {
   }
 
   const handleCopy = useCallback(() => {
-    const text = preRef.current?.textContent || "";
+    const text = source;
     if (!text) return;
+    // plan-621-2572：捕获剪贴板权限拒绝或无焦点异常，避免未捕获 Promise rejection
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
+    }).catch(() => {
+      /* 忽略剪贴板权限拒绝，避免未捕获异常 */
     });
-  }, []);
+  }, [source]);
 
   return (
     <div className="md-code-block" role="region" aria-label="代码块">
@@ -79,7 +87,8 @@ function CodeBlockWrapper({ children }: { children: ReactNode }) {
           </button>
         </Tooltip>
       </div>
-      <pre className="md-code-pre" ref={preRef}>{children}</pre>
+      <pre className="md-code-pre" ref={preRef}>{source.length > 12000
+        ? <LongCode source={source} language={detectedLang} live={live} /> : children}</pre>
     </div>
   );
 }
@@ -157,6 +166,10 @@ export const markdownComponents: Components = {
   h1({ children }) { return <h1 className="md-h1">{children}</h1>; },
   h2({ children }) { return <h2 className="md-h2">{children}</h2>; },
   h3({ children }) { return <h3 className="md-h3">{children}</h3>; },
+  // plan-621-2572：补齐 h4/h5/h6 组件映射，与 flow.css 中对应的阶梯样式挂钩
+  h4({ children }) { return <h4 className="md-h4">{children}</h4>; },
+  h5({ children }) { return <h5 className="md-h5">{children}</h5>; },
+  h6({ children }) { return <h6 className="md-h6">{children}</h6>; },
   p({ children }) { return <p className="md-p">{children}</p>; },
   ul({ children }) { return <ul className="md-ul">{children}</ul>; },
   ol({ children }) { return <ol className="md-ol">{children}</ol>; },
@@ -217,8 +230,13 @@ const MD_CACHE_MAX_CHARS = 2 * 1024 * 1024;
 /** 单条文本上限：超过则不缓存 */
 const MD_CACHE_MAX_ONE = 128 * 1024;
 
-const mdCache = new Map<string, ReactNode>();
+const mdCache = new Map<string, { tree: ReactNode; nodes: number }>();
 let mdCacheChars = 0;
+let mdCacheNodes = 0;
+function countNodes(node: ReactNode): number {
+  if (Array.isArray(node)) return node.reduce((sum, child) => sum + countNodes(child), 0);
+  return isValidElement<{ children?: ReactNode }>(node) ? 1 + countNodes(node.props.children) : 1;
+}
 
 function mdCacheGet(key: string): ReactNode | undefined {
   if (!mdCache.has(key)) return undefined;
@@ -226,17 +244,21 @@ function mdCacheGet(key: string): ReactNode | undefined {
   // 命中后移到队尾：Map 保持插入顺序，即天然 LRU
   mdCache.delete(key);
   mdCache.set(key, hit);
-  return hit;
+  return hit.tree;
 }
 
 function mdCacheSet(key: string, node: ReactNode): void {
   if (key.length > MD_CACHE_MAX_ONE) return;
   if (mdCache.has(key)) return; // 已存在（并发双渲染）：保留先入的元素树
-  mdCache.set(key, node);
+  const nodes = countNodes(node);
+  if (nodes > 20000) return;
+  mdCache.set(key, { tree: node, nodes });
   mdCacheChars += key.length;
-  while (mdCache.size > MD_CACHE_MAX_ENTRIES || mdCacheChars > MD_CACHE_MAX_CHARS) {
+  mdCacheNodes += nodes;
+  while (mdCache.size > MD_CACHE_MAX_ENTRIES || mdCacheChars > MD_CACHE_MAX_CHARS || mdCacheNodes > 20000) {
     const oldest = mdCache.keys().next();
     if (oldest.done) break;
+    mdCacheNodes -= mdCache.get(oldest.value)?.nodes ?? 0;
     mdCache.delete(oldest.value);
     mdCacheChars -= oldest.value.length;
   }
@@ -244,7 +266,23 @@ function mdCacheSet(key: string, node: ReactNode): void {
 
 /** 插件数组提到模块级：每次渲染新建数组会让下游无法做引用比较 */
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
-const REHYPE_PLUGINS = [rehypeHighlight, rehypeKatex];
+/** plan-20261101-performance：长代码留给 Worker，防止解析插件先在主线程高亮一遍。 */
+export function skipLongHighlight() {
+  return (tree: unknown) => {
+    const walk = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const node = value as { tagName?: string; value?: string; properties?: { className?: string[] }; children?: unknown[] };
+      if (node.tagName === "code" && node.children?.some((child) =>
+        typeof child === "object" && child != null && "value" in child && typeof child.value === "string" && child.value.length > 12000)) {
+        node.properties ??= {};
+        node.properties.className = [...(node.properties.className ?? []), "no-highlight"];
+      }
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+  };
+}
+const REHYPE_PLUGINS = [skipLongHighlight, rehypeHighlight, rehypeKatex];
 
 /** plan-20261017-ux-overhaul 阶段 E：直接调用 react-markdown 的同步函数，拿到「解析 + 高亮后」的元素树。
  *  此前缓存的是 `<ReactMarkdown>` 元素本身——虚拟列表重新挂载时 React 仍会再次执行该组件，
@@ -263,7 +301,13 @@ export const Markdown = memo(function Markdown({ children, cache = true }: { chi
   // 命中缓存则直接复用内层元素树（跳过解析与 highlight/katex）；外层 .md-body 每次新建，
   // 保证无论是否命中缓存，DOM 结构恒为单层 .md-body。
   const cached = cache ? mdCacheGet(children) : undefined;
+  const started = isSampling() ? performance.now() : 0;
   const inner = cached !== undefined ? cached : renderMarkdownTree(children);
   if (cache && cached === undefined) mdCacheSet(children, inner);
-  return <div className="md-body">{inner}</div>;
+  recordMarkdown(cached !== undefined, started ? performance.now() - started : 0, mdCache.size, mdCacheNodes, mdCacheChars);
+  const blocks = children.length > 12000 && isValidElement<{ children?: ReactNode }>(inner)
+    ? Children.toArray(inner.props.children) : null;
+  return <div className="md-body">{blocks?.length ? blocks.map((block, index) => (
+    <ViewportBlock key={index} estimate={Math.min(1600, Math.max(48, nodeText(block).length / 55 * 24))}>{block}</ViewportBlock>
+  )) : inner}</div>;
 });

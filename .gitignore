@@ -292,3 +292,8 @@ server/*_out.txt
 
 # 独立开发实例（后端 8010 / 前端 5174）的本地数据目录，含数据库副本，不入库
 /tmp-dev-*/
+# plan-20261101-performance：本地性能构建、日志与临时采集产物。
+/client/.cache/
+
+# 会话协作过程记录（current_state / journal 等），属工作过程产物，不入库
+/.project-memory/

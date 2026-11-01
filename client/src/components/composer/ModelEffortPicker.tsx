@@ -152,7 +152,7 @@ export function ModelEffortPicker({ models, value, onChange, open, onToggle, onC
 
   const tip = (activeModel
     ? `模型：${activeModel.provider_name ? `${activeModel.provider_name}/` : ""}${activeModel.name}`
-    : "选择模型")
+    : groups.length === 0 ? "配置模型" : "选择模型")
     + (supportsReasoning ? ` · 思考深度：${effortLabel(effort)}` : "");
 
   const manageItem = (
@@ -172,7 +172,7 @@ export function ModelEffortPicker({ models, value, onChange, open, onToggle, onC
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={tip}
-          onClick={onToggle}
+          onClick={groups.length === 0 ? () => openModelSettings() : onToggle}
           onKeyDown={(e) => {
             // 浮层向上展开：打开时 ↑ / ↓ 直接进入浮层，落在当前模型上
             if (!open || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
@@ -182,7 +182,7 @@ export function ModelEffortPicker({ models, value, onChange, open, onToggle, onC
             (box.querySelector<HTMLElement>(".cc-mp-model.is-selected") ?? box.querySelector<HTMLElement>(".pop-item"))?.focus();
           }}
         >
-          <span className="cc-model-name">{activeModel?.name ?? "选择模型"}</span>
+          <span className="cc-model-name">{activeModel?.name ?? (groups.length === 0 ? "配置模型" : "选择模型")}</span>
           {supportsReasoning && <span className="cc-model-effort">{effortLabel(effort)}</span>}
           <IconChevronDown size={12} className="cc-chip-caret" />
         </button>

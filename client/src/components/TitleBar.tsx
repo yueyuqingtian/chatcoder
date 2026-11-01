@@ -10,7 +10,7 @@ import { useChatStore, useCurrentSession } from "../store/chat";
 import { usePanelStore } from "../store/panel";
 import { useI18n } from "../store/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { Floating, Input, Tooltip } from "./ui";
+import { Floating, IconButton, Input, Tooltip } from "./ui";
 import { WorktreeCreateDialog } from "./worktree/WorktreeCreateDialog";
 import { IconGitBranch as IconGitBranchTb } from "./icons";
 import {
@@ -192,11 +192,13 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
             以子会话 id 调 createWorktree 语义未定义（侧栏也只对主会话提供该入口）。 */}
         {session && !session.worktree_path && session.side_parent_id == null && currentSessionId != null && (
           <>
-            <button type="button" className="tb-wt-btn" onClick={() => setWtOpen(true)}
-              title="在独立工作树中继续本会话，改动只落在该工作树分支上">
-              <IconGitBranchTb size={13} />
-              <span>工作树</span>
-            </button>
+            {/* plan-621-2572：原生 title 迁移为统一 Tooltip */}
+            <Tooltip content="在独立工作树中继续本会话，改动只落在该工作树分支上">
+              <button type="button" className="tb-wt-btn" onClick={() => setWtOpen(true)}>
+                <IconGitBranchTb size={13} />
+                <span>工作树</span>
+              </button>
+            </Tooltip>
             <WorktreeCreateDialog
               open={wtOpen}
               subtitle={`为「${session.title || "当前会话"}」切换到独立工作树`}
@@ -211,9 +213,10 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
         )}
         {session && (
           <div className="titlebar-more">
-            <button
+            <IconButton
               ref={moreBtnRef}
               className="titlebar-btn titlebar-more-btn"
+              icon={<IconMoreHorizontal size={16} />}
               title={t("titlebar.session_actions")}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
@@ -221,10 +224,7 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
                 e.stopPropagation();
                 setMenuOpen((v) => !v);
               }}
-              type="button"
-            >
-              <IconMoreHorizontal size={16} />
-            </button>
+            />
             <Floating
               open={menuOpen}
               anchorRef={moreBtnRef}
@@ -241,16 +241,17 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
                 {/* 归档限制：正在执行任务的会话不允许归档（与侧栏一致）——
                     执行中归档会让运行中的 turn 与它所属的会话被拆散。
                     会话未执行过任务（has_running 为假）时照常可用。 */}
-                <div
-                  className={"context-menu-item" + (session.has_running ? " disabled" : "")}
-                  title={session.has_running ? t("sidebar.archive_disabled") : ""}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    if (session.has_running) return;
-                    // plan-20261025-shell（需求 8）：走统一归档动作——归档当前会话后自动回退到上一个会话或新建任务页
-                    void useChatStore.getState().archiveSession(session.id);
-                  }}
-                ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
+                <Tooltip content={session.has_running ? t("sidebar.archive_disabled") : undefined} side="right">
+                  <div
+                    className={"context-menu-item" + (session.has_running ? " disabled" : "")}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (session.has_running) return;
+                      // plan-20261025-shell（需求 8）：走统一归档动作——归档当前会话后自动回退到上一个会话或新建任务页
+                      void useChatStore.getState().archiveSession(session.id);
+                    }}
+                  ><IconArchive size={13} /> {t("sidebar.ctx_archive")}</div>
+                </Tooltip>
                 <div className="context-menu-divider" />
                 <div className="context-menu-item danger" onClick={() => setConfirmDelete(true)}><IconTrash size={13} /> {t("sidebar.ctx_delete")}</div>
               </div>
@@ -268,22 +269,24 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
         {!bare && (
         <>
         <div className="titlebar-folder-dropdown-wrap">
-          <button
-            ref={folderBtnRef}
-            className="titlebar-btn titlebar-folder-combo"
-            aria-haspopup="menu"
-            aria-expanded={folderMenuOpen}
-            onClick={(e) => {
-              e.stopPropagation();
-              setFolderMenuOpen((v) => !v);
-            }}
-            title={t("titlebar.open_external_tip")}
-            disabled={!project?.path}
-            type="button"
-          >
-            {renderOpenTargetIcon(openTarget, 15)}
-            <IconChevronDown size={10} className="titlebar-folder-caret" />
-          </button>
+          <Tooltip content={t("titlebar.open_external_tip")}>
+            <button
+              ref={folderBtnRef}
+              className="titlebar-btn titlebar-folder-combo"
+              aria-haspopup="menu"
+              aria-expanded={folderMenuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                setFolderMenuOpen((v) => !v);
+              }}
+              aria-label={t("titlebar.open_external_tip")}
+              disabled={!project?.path}
+              type="button"
+            >
+              {renderOpenTargetIcon(openTarget, 15)}
+              <IconChevronDown size={10} className="titlebar-folder-caret" />
+            </button>
+          </Tooltip>
           <Floating
             open={folderMenuOpen}
             anchorRef={folderBtnRef}
@@ -343,11 +346,15 @@ export function TitleBar({ leftCollapsed, settings = false, page = false, panelA
             </div>
           </Floating>
         </div>
-        {/* 终端入口移至顶栏右上；新建任务页没有右面板，入口一并隐藏（plan-20261025-shell 需求 7） */}
+        {/* 终端入口移至顶栏右上；新建任务页没有右面板，入口一并隐藏（plan-20261025-shell 需求 7）
+            plan-621-2572：收敛为统一 IconButton + Tooltip */}
         {panelAvailable && (
-          <button className="titlebar-btn" onClick={() => usePanelStore.getState().openNewTab("terminal")} title={t("titlebar.terminal_btn")}>
-            <IconTerminal size={16} />
-          </button>
+          <IconButton
+            className="titlebar-btn"
+            icon={<IconTerminal size={16} />}
+            title={t("titlebar.terminal_btn")}
+            onClick={() => usePanelStore.getState().openNewTab("terminal")}
+          />
         )}
         </>
         )}

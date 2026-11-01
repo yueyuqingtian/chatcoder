@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { tableMarkdown, tableRows, nodeText } from "../src/components/ui/markdownData.ts";
+const source = "| 项目 | 状态 |\n| :--- | ---: |\n" + "| **长表格** | `已完成` |\n".repeat(400);
+const tree = ReactMarkdown({ children: source, remarkPlugins: [remarkGfm] });
+assert.equal(tableRows(tree).length, 401);
+const copied = tableMarkdown(tree);
+assert.equal(copied.split("\n").length, 402);
+assert.ok(copied.includes("**长表格**"));
+assert.ok(copied.includes("`已完成`"));
+assert.ok(copied.includes(":--- | ---:"));
+assert.ok(nodeText(tree).includes("长表格"));
+console.log("400 行表格完整复制、格式与列对齐回归通过");

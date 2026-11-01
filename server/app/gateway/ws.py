@@ -16,6 +16,7 @@ from collections import defaultdict, deque
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
+from app.gateway.ws_sender import SocketSender
 
 logger = logging.getLogger(__name__)
 
@@ -89,22 +90,47 @@ class ConnectionManager:
         self._seqs: dict[int, int] = defaultdict(int)
         # v2.1: 会话级事件环形缓冲区（断线补偿补发源）
         self._buffers: dict[int, deque] = defaultdict(lambda: deque(maxlen=_EVENT_BUFFER_SIZE))
+        self._senders: dict[WebSocket, SocketSender] = {}
+
+    def _drop(self, ws: WebSocket) -> None:
+        sender = self._senders.pop(ws, None)
+        if sender and sender.task is not asyncio.current_task():
+            sender.close()
+        self._global_conns.discard(ws)
+        for sid, conns in list(self._conns.items()):
+            conns.discard(ws)
+            if not conns:
+                self._conns.pop(sid, None)
+
+    def send(self, ws: WebSocket, event: dict | str, meta: dict | None = None) -> None:
+        sender = self._senders.get(ws)
+        if sender is None:
+            sender = SocketSender(ws, lambda: self._drop(ws))
+            self._senders[ws] = sender
+        sender.put(event if isinstance(event, str) else json.dumps(event, ensure_ascii=False),
+                   meta if isinstance(event, str) else event)
+
+    def snapshot(self) -> dict:
+        return {"connections": len(self._senders), "senders": [s.snapshot() for s in self._senders.values()]}
+
+    async def send_replay(self, ws: WebSocket, event: dict) -> None:
+        if ws not in self._senders:
+            self._senders[ws] = SocketSender(ws, lambda: self._drop(ws))
+        await self._senders[ws].put_replay(json.dumps(event, ensure_ascii=False))
 
     async def connect(self, session_id: int, ws: WebSocket) -> None:
         await ws.accept()
         self._conns[session_id].add(ws)
 
     def disconnect(self, session_id: int, ws: WebSocket) -> None:
-        self._conns[session_id].discard(ws)
-        if not self._conns[session_id]:
-            self._conns.pop(session_id, None)
+        self._drop(ws)
 
     def connect_global(self, ws: WebSocket) -> None:
         """v37: 登记全局连接（侧栏跨会话状态通道）。"""
         self._global_conns.add(ws)
 
     def disconnect_global(self, ws: WebSocket) -> None:
-        self._global_conns.discard(ws)
+        self._drop(ws)
 
     async def broadcast_global(self, event: dict) -> None:
         """v37: 向全部全局连接广播；发送失败的连接直接剔除。
@@ -118,14 +144,8 @@ class ConnectionManager:
         except (TypeError, ValueError):
             logger.warning("[ws] 全局事件序列化失败: %r", event.get("event"))
             return
-        dead: list[WebSocket] = []
         for ws in list(self._global_conns):
-            try:
-                await asyncio.wait_for(ws.send_text(raw), timeout=5.0)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self._global_conns.discard(ws)
+            self.send(ws, raw)
 
     async def _forward_global(self, session_id: int, event: dict) -> None:
         """v37: 白名单事件转发到全局通道，payload 注入 session_id 供前端定位会话。
@@ -139,6 +159,10 @@ class ConnectionManager:
             return
         payload = event.get("payload")
         merged = {**(payload if isinstance(payload, dict) else {}), "session_id": session_id}
+        if name == "message.created" and isinstance(merged.get("msg"), dict):
+            msg = merged["msg"]
+            merged["msg"] = {key: msg.get(key) for key in (
+                "id", "session_id", "turn_id", "thread_id", "sender_type", "msg_type", "created_at")}
         if name == "todo.updated":
             todos = merged.get("todos")
             if isinstance(todos, list) and len(todos) > _TODO_FORWARD_MAX:
@@ -180,16 +204,9 @@ class ConnectionManager:
         if event.get("event") not in _STREAM_NO_BUFFER_EVENTS and "seq" not in event:
             event["seq"] = self.next_seq(session_id)
             self._buffers[session_id].append(event)
-        dead: list[WebSocket] = []
-        for ws in self._conns.get(session_id, set()):
-            try:
-                await asyncio.wait_for(
-                    ws.send_text(json.dumps(event, ensure_ascii=False)), timeout=5.0,
-                )
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self._conns[session_id].discard(ws)
+        raw = json.dumps(event, ensure_ascii=False)
+        for ws in list(self._conns.get(session_id, set())):
+            self.send(ws, raw, event)
         # v37: 白名单事件同步转发到全局通道（侧栏感知非当前会话的状态变化）
         await self._forward_global(session_id, event)
 
@@ -250,7 +267,7 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                await ws.send_text(json.dumps({"event": "error", "payload": {"code": "bad_json", "message": "invalid json"}}))
+                manager.send(ws, {"event": "error", "payload": {"code": "bad_json", "message": "invalid json"}})
                 continue
 
             event = data.get("event")
@@ -275,13 +292,13 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                             "[approval] 拒绝跨会话作答 approval=%s 来源会话=%s 提交会话=%s",
                             approval_id, _owner_sid, session_id,
                         )
-                        await ws.send_text(json.dumps({
+                        manager.send(ws, {
                             "event": "ack",
                             "payload": {
                                 "ref": approval_id, "resolved": False,
                                 "error": "session_mismatch",
                             },
-                        }))
+                        })
                         continue
                     # v2.2: answer 为 ask_user_question 的结构化回答
                     _answer = payload.get("answer")
@@ -294,9 +311,9 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                     if approved and payload.get("remember"):
                         scope = "global" if payload.get("remember_scope") == "global" else "session"
                         await _remember_approval(approval_id, _owner_sid or session_id, scope)
-                await ws.send_text(json.dumps({
+                manager.send(ws, {
                     "event": "ack", "payload": {"ref": approval_id, "resolved": resolved},
-                }))
+                })
                 # 回执广播到审批所属会话（不是提交方连接），保证发起会话的 UI 能关掉卡片，
                 # 并把 session_id 放进 payload 供多通道按会话过滤。
                 _broadcast_sid = _owner_sid or session_id
@@ -323,25 +340,29 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                         "[cancel] WS 收到停止请求 turn=%s session=%s", turn_id, session_id,
                     )
                     ok = await engine.cancel_turn(int(turn_id), source="ws")
-                    await ws.send_text(json.dumps({"event": "ack", "payload": {"ref": f"cancel:{turn_id}", "ok": ok}}))
+                    manager.send(ws, {"event": "ack", "payload": {"ref": f"cancel:{turn_id}", "ok": ok}})
 
             elif event == "sync.request":
                 # v2.1: 断线补偿——重放 seq > last_seq 的缓冲事件
                 last_seq = int(payload.get("last_seq") or 0)
                 missed = manager.replay_since(session_id, last_seq)
                 for ev in missed:
-                    await ws.send_text(json.dumps(ev, ensure_ascii=False))
-                await ws.send_text(json.dumps({
+                    await manager.send_replay(ws, ev)
+                await manager.send_replay(ws, {
                     "event": "sync.response",
                     "seq": 0,  # 不占序号：纯确认帧
-                    "payload": {"last_seq": last_seq, "count": len(missed)},
-                }))
+                    "payload": {"last_seq": last_seq, "count": len(missed), "current_seq": manager._seqs[session_id],
+                                "reset_required": bool(last_seq and (last_seq > manager._seqs[session_id]
+                                    or (manager._buffers[session_id] and last_seq < manager._buffers[session_id][0].get("seq", 0) - 1)))},
+                })
 
             elif event in ("terminal.input", "browser.command"):
                 # 转发给同会话其他客户端（面板与 agent 协作预留）
                 await manager.broadcast(session_id, data)
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, ConnectionError, asyncio.TimeoutError):
+        pass
+    finally:
         manager.disconnect(session_id, ws)
 
 

@@ -1408,55 +1408,59 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               <span>松开以添加附件</span>
             </div>
           )}
-          {/* 紧凑内嵌浏览器标注胶囊块：小巧精致不占空间，点击弹出详情预览 Modal（对齐图 2） */}
+          {/* 紧凑内嵌浏览器标注胶囊块：小巧精致不占空间，点击弹出详情预览 Modal（对齐图 2）
+              plan-621-2572：原生 title 迁移为统一 Tooltip */}
           {composerBrowserRefs.length > 0 && (
             <div className="composer-browser-refs">
               {composerBrowserRefs.map((ref) => (
-                <div
-                  key={ref.id}
-                  className={`composer-browser-ref-card kind-${ref.kind}`}
-                  onClick={() => setBrowserRefPreview(ref)}
-                  title="点击查看标注详情预览"
-                >
-                  {ref.thumbUrl ? (
-                    <img
-                      src={resolveFileUrl(ref.thumbUrl)}
-                      alt="缩略图"
-                      className="composer-ref-chip-thumb"
-                    />
-                  ) : (
-                    <div className="composer-ref-chip-icon">
-                      {ref.kind === "element" && <IconTarget size={13} />}
-                      {ref.kind === "screenshot" && <IconImage size={13} />}
-                      {ref.kind === "dom" && <IconCode size={13} />}
-                      {ref.kind === "console" && <IconTerminal size={13} />}
-                    </div>
-                  )}
-                  <div className="composer-ref-card-info">
-                    <span className="ref-chip-kind-label">
-                      {ref.kind === "element"
-                        ? "元素标注"
-                        : ref.kind === "screenshot"
-                        ? "网页截图"
-                        : ref.kind === "dom"
-                        ? "DOM快照"
-                        : "控制台"}
-                    </span>
-                    <span className="composer-ref-card-page">{ref.pageTitle}</span>
-                    {ref.selector && <span className="composer-ref-card-selector">{ref.selector}</span>}
-                    {ref.note && <span className="composer-ref-card-note-brief">· {ref.note}</span>}
-                  </div>
-                  <button
-                    className="composer-ref-card-remove"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeComposerBrowserRef(ref.id);
-                    }}
-                    title="移除此标注"
+                <Tooltip key={ref.id} content="点击查看标注详情预览">
+                  <div
+                    className={`composer-browser-ref-card kind-${ref.kind}`}
+                    onClick={() => setBrowserRefPreview(ref)}
                   >
-                    <IconX size={11} />
-                  </button>
-                </div>
+                    {ref.thumbUrl ? (
+                      <img
+                        src={resolveFileUrl(ref.thumbUrl)}
+                        alt="缩略图"
+                        className="composer-ref-chip-thumb"
+                      />
+                    ) : (
+                      <div className="composer-ref-chip-icon">
+                        {ref.kind === "element" && <IconTarget size={13} />}
+                        {ref.kind === "screenshot" && <IconImage size={13} />}
+                        {ref.kind === "dom" && <IconCode size={13} />}
+                        {ref.kind === "console" && <IconTerminal size={13} />}
+                      </div>
+                    )}
+                    <div className="composer-ref-card-info">
+                      <span className="ref-chip-kind-label">
+                        {ref.kind === "element"
+                          ? "元素标注"
+                          : ref.kind === "screenshot"
+                          ? "网页截图"
+                          : ref.kind === "dom"
+                          ? "DOM快照"
+                          : "控制台"}
+                      </span>
+                      <span className="composer-ref-card-page">{ref.pageTitle}</span>
+                      {ref.selector && <span className="composer-ref-card-selector">{ref.selector}</span>}
+                      {ref.note && <span className="composer-ref-card-note-brief">· {ref.note}</span>}
+                    </div>
+                    <Tooltip content="移除此标注">
+                      <button
+                        className="composer-ref-card-remove"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeComposerBrowserRef(ref.id);
+                        }}
+                        aria-label="移除此标注"
+                        type="button"
+                      >
+                        <IconX size={11} />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </Tooltip>
               ))}
             </div>
           )}
@@ -1464,38 +1468,42 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           {attachments.length > 0 && (
             <div className="composer-attachments">
               {attachments.map((att, idx) => (
-                <div
-                  key={att.file_id ?? idx}
-                  className={`composer-attach-chip${att.type === "image" ? " image" : ""}`}
-                  title={att.filename}
-                >
-                  {att.type === "image" ? (
-                    <img
-                      src={resolveFileUrl(att.url)}
-                      alt={att.filename}
-                      className="attach-chip-thumb"
-                      onClick={() => openAttachmentPreview(att)}
-                    />
-                  ) : (
-                    <IconPaperclip size={11} />
-                  )}
-                  <span
-                    className="attach-chip-name"
-                    onClick={() =>
-                      att.type === "image"
-                        ? openAttachmentPreview(att)
-                        : window.open(resolveFileUrl(att.url), "_blank", "noopener")
-                    }
+                <Tooltip key={att.file_id ?? idx} content={att.filename}>
+                  <div
+                    className={`composer-attach-chip${att.type === "image" ? " image" : ""}`}
                   >
-                    {att.filename}
-                  </span>
-                  <button
-                    className="remove"
-                    onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                  >
-                    <IconX size={10} />
-                  </button>
-                </div>
+                    {att.type === "image" ? (
+                      <img
+                        src={resolveFileUrl(att.url)}
+                        alt={att.filename}
+                        className="attach-chip-thumb"
+                        onClick={() => openAttachmentPreview(att)}
+                      />
+                    ) : (
+                      <IconPaperclip size={11} />
+                    )}
+                    <span
+                      className="attach-chip-name"
+                      onClick={() =>
+                        att.type === "image"
+                          ? openAttachmentPreview(att)
+                          : window.open(resolveFileUrl(att.url), "_blank", "noopener")
+                      }
+                    >
+                      {att.filename}
+                    </span>
+                    <Tooltip content="移除附件">
+                      <button
+                        className="remove"
+                        aria-label={`移除附件 ${att.filename}`}
+                        onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                        type="button"
+                      >
+                        <IconX size={10} />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </Tooltip>
               ))}
               {uploading && <span className="composer-attach-uploading">上传中…</span>}
             </div>
@@ -1507,76 +1515,88 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             <div className="goal-pill">
               <span className="goal-pill-label">目标</span>
               <span className="goal-pill-text">下一条消息将作为目标，自动推进直到达成</span>
-              <button className="goal-pill-btn" onClick={() => setGoalArmed(false)} title="退出目标模式" type="button">
-                <IconX size={11} />
-              </button>
+              <Tooltip content="退出目标模式">
+                <button className="goal-pill-btn" onClick={() => setGoalArmed(false)} aria-label="退出目标模式" type="button">
+                  <IconX size={11} />
+                </button>
+              </Tooltip>
             </div>
           )}
           {goalPillVisible && (
-            <div
-              className={`goal-pill${isRunning ? " running" : ""}${goalStatus === "completed" ? " done" : ""}`}
-              title={goalText ?? ""}
-            >
-              <span className="goal-pill-label">
-                {goalStatus === "completed" ? "已完成" : isRunning ? "推进中" : "目标"}
-              </span>
-              <span className="goal-pill-text">{goalText}</span>
-              {goalStatus === "active" && !isHome && (
-                <span className="goal-pill-count">{goalTurnsUsed}/{goalMaxTurns}</span>
-              )}
-              {goalStatus === "active" && !isHome && (
-                <button
-                  className="goal-pill-btn"
-                  onClick={completeGoal}
-                  title="确认目标已达成（停止自动续跑）"
-                  type="button"
-                >
-                  <IconCheck size={11} />
-                </button>
-              )}
-              {goalStatus === "active" && (
-                <button
-                  className="goal-pill-btn"
-                  onClick={cancelGoal}
-                  title={isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}
-                  type="button"
-                >
-                  <IconX size={11} />
-                </button>
-              )}
-            </div>
+            <Tooltip content={goalText ?? ""}>
+              <div
+                className={`goal-pill${isRunning ? " running" : ""}${goalStatus === "completed" ? " done" : ""}`}
+              >
+                <span className="goal-pill-label">
+                  {goalStatus === "completed" ? "已完成" : isRunning ? "推进中" : "目标"}
+                </span>
+                <span className="goal-pill-text">{goalText}</span>
+                {goalStatus === "active" && !isHome && (
+                  <span className="goal-pill-count">{goalTurnsUsed}/{goalMaxTurns}</span>
+                )}
+                {goalStatus === "active" && !isHome && (
+                  <Tooltip content="确认目标已达成（停止自动续跑）">
+                    <button
+                      className="goal-pill-btn"
+                      onClick={completeGoal}
+                      aria-label="确认目标已达成"
+                      type="button"
+                    >
+                      <IconCheck size={11} />
+                    </button>
+                  </Tooltip>
+                )}
+                {goalStatus === "active" && (
+                  <Tooltip content={isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}>
+                    <button
+                      className="goal-pill-btn"
+                      onClick={cancelGoal}
+                      aria-label={isHome ? t("composer.remove_goal") : t("composer.cancel_goal")}
+                      type="button"
+                    >
+                      <IconX size={11} />
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
+            </Tooltip>
           )}
           {/* plan-238-1210 (A2): 引用 chips 行（@文件 / $技能）——不再内嵌进输入文本，
               从结构上消除"透明 textarea + 标签高亮层"的排版错位问题。 */}
           {refs.length > 0 && (
             <div className="composer-refs">
-              {refs.map((r, i) => (
-                <span
-                  key={`${r.kind}-${r.value}-${i}`}
-                  className={`composer-ref-chip composer-ref-${r.kind}`}
-                  title={r.value}
-                >
-                  <span className="composer-ref-icon">
-                    {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件） */}
-                    {r.kind === "file" ? <IconFileText size={12} />
-                      : r.kind === "mcp" ? <IconPlug size={12} />
-                      : r.kind === "plugin" ? <IconPuzzle size={12} />
-                      : <IconSparkles size={12} />}
-                  </span>
-                  <span className="composer-ref-name">{r.label}</span>
-                  <button
-                    type="button"
-                    className="composer-ref-remove"
-                    title={r.kind === "file" ? "移除文件引用"
-                      : r.kind === "mcp" ? "移除连接器引用"
-                      : r.kind === "plugin" ? "移除插件引用"
-                      : "移除技能引用"}
-                    onClick={() => setRefs((prev) => prev.filter((_, idx) => idx !== i))}
-                  >
-                    <IconX size={10} />
-                  </button>
-                </span>
-              ))}
+              {refs.map((r, i) => {
+                const removeTip = r.kind === "file" ? "移除文件引用"
+                  : r.kind === "mcp" ? "移除连接器引用"
+                  : r.kind === "plugin" ? "移除插件引用"
+                  : "移除技能引用";
+                return (
+                  <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.value}>
+                    <span
+                      className={`composer-ref-chip composer-ref-${r.kind}`}
+                    >
+                      <span className="composer-ref-icon">
+                        {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件） */}
+                        {r.kind === "file" ? <IconFileText size={12} />
+                          : r.kind === "mcp" ? <IconPlug size={12} />
+                          : r.kind === "plugin" ? <IconPuzzle size={12} />
+                          : <IconSparkles size={12} />}
+                      </span>
+                      <span className="composer-ref-name">{r.label}</span>
+                      <Tooltip content={removeTip}>
+                        <button
+                          type="button"
+                          className="composer-ref-remove"
+                          aria-label={removeTip}
+                          onClick={() => setRefs((prev) => prev.filter((_, idx) => idx !== i))}
+                        >
+                          <IconX size={10} />
+                        </button>
+                      </Tooltip>
+                    </span>
+                  </Tooltip>
+                );
+              })}
             </div>
           )}
           <div className="composer-input-wrap">
@@ -1864,21 +1884,22 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           <div className="browser-ref-preview-modal">
             {browserRefPreview.thumbUrl && (
               <div className="browser-ref-preview-shot-wrap">
-                <img
-                  src={resolveFileUrl(browserRefPreview.thumbUrl)}
-                  alt="标注截图"
-                  className="browser-ref-preview-shot"
-                  title="点击查看大图"
-                  onClick={() => {
-                    const u = browserRefPreview.thumbUrl;
-                    if (u) {
-                      openGallery(
-                        [{ url: resolveFileUrl(u), name: `${browserRefPreview.pageTitle || "标注"}-截图.png` }],
-                        0,
-                      );
-                    }
-                  }}
-                />
+                <Tooltip content="点击查看大图">
+                  <img
+                    src={resolveFileUrl(browserRefPreview.thumbUrl)}
+                    alt="标注截图"
+                    className="browser-ref-preview-shot"
+                    onClick={() => {
+                      const u = browserRefPreview.thumbUrl;
+                      if (u) {
+                        openGallery(
+                          [{ url: resolveFileUrl(u), name: `${browserRefPreview.pageTitle || "标注"}-截图.png` }],
+                          0,
+                        );
+                      }
+                    }}
+                  />
+                </Tooltip>
               </div>
             )}
             <div className="browser-ref-preview-details">
@@ -2415,27 +2436,31 @@ function QuestionWizardBox({
           </Tooltip>
         </div>
         <div className="question-wizard-pager">
-          <button
-            type="button"
-            className="question-wizard-pager-btn"
-            disabled={stepIndex === 0}
-            onClick={() => writeDraft({ stepIndex: Math.max(0, stepIndex - 1), answers })}
-            title="上一题"
-          >
-            <IconChevronLeft size={13} />
-          </button>
+          <Tooltip content="上一题">
+            <button
+              type="button"
+              className="question-wizard-pager-btn"
+              disabled={stepIndex === 0}
+              onClick={() => writeDraft({ stepIndex: Math.max(0, stepIndex - 1), answers })}
+              aria-label="上一题"
+            >
+              <IconChevronLeft size={13} />
+            </button>
+          </Tooltip>
           <span>
             {stepIndex + 1}/{total}
           </span>
-          <button
-            type="button"
-            className="question-wizard-pager-btn"
-            disabled={stepIndex >= total - 1}
-            onClick={() => writeDraft({ stepIndex: Math.min(total - 1, stepIndex + 1), answers })}
-            title="下一题"
-          >
-            <IconChevronRight size={13} />
-          </button>
+          <Tooltip content="下一题">
+            <button
+              type="button"
+              className="question-wizard-pager-btn"
+              disabled={stepIndex >= total - 1}
+              onClick={() => writeDraft({ stepIndex: Math.min(total - 1, stepIndex + 1), answers })}
+              aria-label="下一题"
+            >
+              <IconChevronRight size={13} />
+            </button>
+          </Tooltip>
         </div>
       </div>
 

@@ -144,7 +144,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .tc-row.tc-write .tc-add { color: var(--success); font-variant-numeric: tabular-nums; }
 .tc-row.tc-write .tc-del { color: var(--error); font-variant-numeric: tabular-nums; }
 .tc-row.tc-write.expanded { padding-bottom: 6px; }
-.tc-diff-line { border-radius: 4px; }
+/* plan-621-2572: 圆角收敛至设计令牌 var(--r-sm) */
+.tc-diff-line { border-radius: var(--r-sm); }
 .msg-action { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), color var(--dur-2), transform var(--dur-spring) var(--spring-bouncy); }
 .msg-action:active { transform: scale(0.9); }
 .msg-action.active { color: var(--accent); }

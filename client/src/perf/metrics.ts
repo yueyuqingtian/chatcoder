@@ -37,6 +37,7 @@ export interface PerfSnapshot {
   frames: FrameStats;
   longtasks: { count: number; totalMs: number; maxMs: number };
   reconcile: { count: number; lastMs: number; p95Ms: number; maxMs: number };
+  markdown: { hits: number; misses: number; parseMs: number; cacheEntries: number; cacheNodes: number; cacheChars: number };
   /** plan-75-334 阶段0：关键组件渲染与派生计数（仅采集期间统计） */
   components: {
     messageFlowCore: number;
@@ -65,6 +66,15 @@ let longtaskTotal = 0;
 let longtaskMax = 0;
 
 let sampling = false;
+let markdownStats = { hits: 0, misses: 0, parseMs: 0, cacheEntries: 0, cacheNodes: 0, cacheChars: 0 };
+
+/** plan-20261101-performance：解析和缓存成本独立计量，元素树另设节点预算。 */
+export function recordMarkdown(hit: boolean, parseMs: number, entries: number, nodes: number, chars: number): void {
+  markdownStats.cacheEntries = entries; markdownStats.cacheNodes = nodes; markdownStats.cacheChars = chars;
+  if (!sampling) return;
+  if (hit) markdownStats.hits += 1; else markdownStats.misses += 1;
+  markdownStats.parseMs += parseMs;
+}
 let rafId = 0;
 let lastFrameTs = 0;
 let startedAt = 0;
@@ -148,6 +158,7 @@ export function reset(): void {
   longtaskMax = 0;
   startedAt = performance.now();
   lastFrameTs = 0;
+  markdownStats = { ...markdownStats, hits: 0, misses: 0, parseMs: 0 };
   componentCounts = { messageFlowCore: 0, turnGroup: 0, streamingTail: 0, taskSummary: 0, filePanel: 0 };
   derivationCounts = {
     timelineBuild: 0, filePreviewRequest: 0, terminalFit: 0, browserResize: 0,
@@ -179,6 +190,7 @@ export function snapshot(): PerfSnapshot {
   const r = [...reconcileMs].sort((a, b) => a - b);
   return {
     elapsed: startedAt ? Math.round(performance.now() - startedAt) : 0,
+    markdown: { ...markdownStats, parseMs: r1(markdownStats.parseMs) },
     frames: {
       count: f.length,
       p50: r1(percentile(f, 50)),

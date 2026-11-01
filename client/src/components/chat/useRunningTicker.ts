@@ -17,7 +17,8 @@
  *     （组件通常在 enabled=false 时自动退订，定时器随之停止，静止期零唤醒）。
  */
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+export const FlowVisibilityContext = createContext(true);
 
 type Listener = (now: number) => void;
 
@@ -53,10 +54,11 @@ export function subscribeTick(fn: Listener): () => void {
 
 /** 共享节拍的 React 版本：enabled=false 时不订阅，定时器自动停摆（静止期零唤醒）。 */
 export function useRunningTicker(enabled: boolean): number {
+  const visible = useContext(FlowVisibilityContext);
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !visible) return;
     return subscribeTick(() => setTick((v) => v + 1));
-  }, [enabled]);
+  }, [enabled, visible]);
   return tick;
 }

@@ -34,7 +34,8 @@
 .mp-group-current { flex-shrink: 0; display: inline-flex; color: var(--accent); }
 /* workbuddy 积分徽标（一级供应商行 / 二级菜单头） */
 .mp-credits { display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; flex-shrink: 0; min-width: 62px; font-size: 10px; font-weight: 400; color: var(--success); white-space: nowrap; }
-.mp-credits-refresh { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 4px; color: var(--text-3); cursor: pointer; }
+/* plan-621-2572: 圆角收敛至设计令牌 var(--r-sm) */
+.mp-credits-refresh { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: var(--r-sm); color: var(--text-3); cursor: pointer; }
 .mp-credits-refresh:hover { color: var(--text-1); background: var(--bg-active); }
 .mp-credits-refresh.busy { opacity: .4; pointer-events: none; }
 .mp-menu-head .mp-credits { margin-left: 8px; }
@@ -167,7 +168,8 @@
   background: transparent; padding: 16px; overflow-y: auto; min-height: 0;
 }
 .models-detail-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; color: var(--text-3); font-size: 13px; }
-.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: color-mix(in oklab, var(--color-card) 94%, transparent); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; }
+/* plan-621-2572: 吸顶提示改用纯色不透明 var(--bg-panel)，遵守 AGENTS.md 2.1.4 吸顶头纯色防透底规范 */
+.models-detail-loading { position: sticky; top: -16px; z-index: 2; margin: -16px -16px -6px; padding: 7px 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: 11px; text-align: center; }
 .models-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* plan-41-225（右列照图）：名称常态为标题（点铅笔才进入编辑） */
 .models-detail-name { max-width: 320px; font-size: 16px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

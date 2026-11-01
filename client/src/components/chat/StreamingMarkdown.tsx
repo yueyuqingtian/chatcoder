@@ -16,14 +16,16 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { markdownComponents } from "../MarkdownContent";
-import { advanceSplit, prepareTail, type SplitState } from "./streamMarkdown";
+import { advanceSplit, prepareSplitTail, type SplitState } from "./streamMarkdown";
+import { CodeBlockWrapper, skipLongHighlight } from "../ui/Markdown";
+import { ViewportBlock } from "../ui/ViewportBlock";
 
 /** 插件数组提到模块级：引用稳定，memo 的 props 比较与 react-markdown 内部都不必重建处理器 */
 const PLAIN_REMARK = [remarkGfm];
 const FULL_REMARK = [remarkGfm, remarkMath];
 const NO_REHYPE: never[] = [];
 const CODE_REHYPE = [rehypeHighlight];
-const FULL_REHYPE = [rehypeHighlight, rehypeKatex];
+const FULL_REHYPE = [skipLongHighlight, rehypeHighlight, rehypeKatex];
 
 /** 尾块代码块做语法高亮的体量上限：更长的输出每帧高亮成本偏高，封块后再高亮 */
 const TAIL_HIGHLIGHT_MAX = 12000;
@@ -32,6 +34,13 @@ type BlockMode = "full" | "code" | "plain";
 
 /** 单块渲染：memo 按内容缓存——封块（full，含高亮/公式）不再重复解析 */
 const StreamBlock = memo(function StreamBlock({ source, mode }: { source: string; mode: BlockMode }) {
+  // plan-20261101-performance：未闭合长代码直接显示原文，避免每次增量重新解析围栏全文。
+  if (mode !== "full" && source.length > TAIL_HIGHLIGHT_MAX) {
+    const opening = /^\s{0,3}(`{3,}|~{3,})([^\n]*)\n/.exec(source);
+    if (opening) return <CodeBlockWrapper live><code className={`language-${opening[2].trim().split(/\s/)[0]}`}>
+      {source.slice(opening[0].length)}
+    </code></CodeBlockWrapper>;
+  }
   return (
     <ReactMarkdown
       remarkPlugins={mode === "full" ? FULL_REMARK : PLAIN_REMARK}
@@ -41,6 +50,13 @@ const StreamBlock = memo(function StreamBlock({ source, mode }: { source: string
       {source}
     </ReactMarkdown>
   );
+});
+
+// plan-20261101-performance：稳定前缀独立 memo，活动尾块产字不再映射全部历史块。
+const SealedBlocks = memo(function SealedBlocks({ blocks }: { blocks: string[] }) {
+  return <>{blocks.map((source, index) => blocks.length > 20
+    ? <ViewportBlock key={index}><StreamBlock source={source} mode="full" /></ViewportBlock>
+    : <StreamBlock key={index} source={source} mode="full" />)}</>;
 });
 
 /** S10a 尾块节流参数：新增不足 MIN_CHARS 且距上次提交不足 MIN_GAP_MS 时延后合并。
@@ -91,15 +107,13 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({ children }: {
   const { sealed, tail, tailKind } = useMemo(() => {
     const st = advanceSplit(splitRef.current, shown);
     splitRef.current = st;
-    const t = prepareTail(st.pending, st.pendingFence);
-    return { sealed: st.sealed.slice(), tail: t.text, tailKind: t.kind };
+    const t = prepareSplitTail(st);
+    return { sealed: st.sealed, tail: t.text, tailKind: t.kind };
   }, [shown]);
 
   return (
-    <div className="md-body md-body-stream">
-      {sealed.map((b, i) => (
-        <StreamBlock key={i} source={b} mode="full" />
-      ))}
+    <div className="md-body md-body-stream" data-rendered-length={shown.length}>
+      <SealedBlocks blocks={sealed} />
       {/* 尾块 key 取封块数：封块时同一实例原地升级为完整插件渲染，不重新挂载 */}
       {tail && (
         <StreamBlock

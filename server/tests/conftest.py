@@ -46,6 +46,11 @@ async def _reset_shared_test_db():
     async with engine.begin() as conn:
         # 幂等建表：表已存在时只查一次 sqlite_master，不重写任何 DDL
         await conn.run_sync(Base.metadata.create_all)
+        # plan-20261101-performance：测试库跨进程复用，create_all 不会给已有表补字段和索引。
+        columns = (await conn.exec_driver_sql("PRAGMA table_info(sessions)")).all()
+        if not any(row[1] == "message_revision" for row in columns):
+            await conn.exec_driver_sql("ALTER TABLE sessions ADD COLUMN message_revision INTEGER DEFAULT 0 NOT NULL")
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_messages_window ON messages(session_id, thread_id, deleted, id)")
         # 关外键后按 sorted_tables 逆序删数据：外键开启时删除会被约束挡下
         await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         for table in reversed(Base.metadata.sorted_tables):
