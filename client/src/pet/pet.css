@@ -72,78 +72,77 @@ body {
   gap: var(--block-gap);
 }
 
-/* ── 任务块主题（plan-20261016 D2）：深色 / 浅色两套变量，设置页「浮窗底色」切换 ──
-   所有块内颜色只读这组变量，主题切换不需要逐个选择器覆盖。 */
+/* ── 任务块主题（plan-20261016 D2 / plan-20261102-pet-ux）：
+   深色 / 浅色两套变量，设置页「浮窗底色」切换。
+   深色摒弃生硬纯黑，采用深邃通透的玻璃微质感；微光边框取代厚重阴影，杜绝透明窗口外产生黑晕。 */
 .pet-blocks-wrap.is-dark {
-  --pb-bg: color-mix(in oklab, var(--color-neutral-900) 96%, transparent);
-  --pb-bg-hover: var(--color-neutral-800);
-  --pb-ring: rgba(255, 255, 255, 0.07);
-  --pb-ring-hover: rgba(255, 255, 255, 0.12);
-  --pb-fg: var(--color-neutral-50);
-  --pb-sub: var(--color-neutral-400, #a3a3a3);
-  --pb-muted: var(--color-neutral-500);
-  --pb-faint: var(--color-neutral-600, #525252);
+  --pb-bg: rgba(18, 24, 38, 0.92);
+  --pb-bg-hover: rgba(26, 36, 56, 0.96);
+  --pb-ring: rgba(255, 255, 255, 0.10);
+  --pb-ring-hover: rgba(255, 255, 255, 0.18);
+  --pb-fg: var(--color-neutral-50, #f8fafc);
+  --pb-sub: var(--color-neutral-400, #94a3b8);
+  --pb-muted: var(--color-neutral-500, #64748b);
+  --pb-faint: rgba(255, 255, 255, 0.28);
   --pb-btn: rgba(255, 255, 255, 0.08);
   --pb-btn-hover: rgba(255, 255, 255, 0.16);
-  --pb-btn-fg: var(--color-neutral-200);
+  --pb-btn-fg: var(--color-neutral-200, #e2e8f0);
   --pb-pill: rgba(255, 255, 255, 0.08);
-  --pb-stop: color-mix(in oklab, var(--color-red-500) 22%, transparent);
-  --pb-stop-fg: var(--color-red-400);
-  --pb-ask: color-mix(in oklab, var(--color-green-500) 22%, transparent);
-  --pb-ask-fg: var(--color-green-400);
-  --pb-run: var(--color-sky-400);
-  --pb-wait: var(--color-green-400);
-  --pb-fail: var(--color-red-400);
-  --pb-thinking: var(--color-violet-400);
-  --pb-message: var(--color-sky-300);
-  --pb-read: var(--color-teal-400);
-  --pb-edit: var(--color-amber-600);
-  --pb-search: var(--color-indigo-400);
-  --pb-web: var(--color-cyan-400);
-  --pb-done: var(--color-green-400);
+  --pb-stop: rgba(239, 68, 68, 0.16);
+  --pb-stop-fg: #f87171;
+  --pb-ask: rgba(16, 185, 129, 0.18);
+  --pb-ask-fg: #34d399;
+  --pb-run: var(--color-sky-400, #38bdf8);
+  --pb-wait: var(--color-green-400, #34d399);
+  --pb-fail: var(--color-red-400, #f87171);
+  --pb-thinking: #c084fc;
+  --pb-message: #38bdf8;
+  --pb-read: #2dd4bf;
+  --pb-edit: #fbbf24;
+  --pb-search: #818cf8;
+  --pb-web: #22d3ee;
+  --pb-done: #34d399;
 }
 
 .pet-blocks-wrap.is-light {
-  --pb-bg: color-mix(in oklab, #ffffff 97%, transparent);
+  --pb-bg: rgba(255, 255, 255, 0.95);
   --pb-bg-hover: #ffffff;
-  --pb-ring: rgba(0, 0, 0, 0.08);
-  --pb-ring-hover: rgba(0, 0, 0, 0.14);
-  --pb-fg: var(--color-neutral-900);
-  --pb-sub: var(--color-neutral-500);
-  --pb-muted: var(--color-neutral-400, #a3a3a3);
-  --pb-faint: var(--color-neutral-300, #d4d4d4);
+  --pb-ring: rgba(0, 0, 0, 0.09);
+  --pb-ring-hover: rgba(0, 0, 0, 0.16);
+  --pb-fg: var(--color-neutral-900, #0f172a);
+  --pb-sub: var(--color-neutral-500, #475569);
+  --pb-muted: var(--color-neutral-400, #94a3b8);
+  --pb-faint: rgba(0, 0, 0, 0.25);
   --pb-btn: rgba(0, 0, 0, 0.05);
   --pb-btn-hover: rgba(0, 0, 0, 0.1);
-  --pb-btn-fg: var(--color-neutral-700, #404040);
+  --pb-btn-fg: var(--color-neutral-700, #334155);
   --pb-pill: rgba(0, 0, 0, 0.05);
-  --pb-stop: color-mix(in oklab, var(--color-red-500) 12%, transparent);
-  --pb-stop-fg: var(--color-red-600);
-  --pb-ask: color-mix(in oklab, var(--color-green-500) 16%, transparent);
-  --pb-ask-fg: var(--color-green-700);
-  --pb-run: var(--color-sky-600);
-  --pb-wait: var(--color-green-600);
-  --pb-fail: var(--color-red-600);
-  --pb-thinking: var(--color-violet-600);
-  --pb-message: var(--color-sky-600);
-  --pb-read: var(--color-teal-600);
-  --pb-edit: var(--color-amber-600);
-  --pb-search: var(--color-indigo-500);
-  --pb-web: var(--color-cyan-600);
-  --pb-done: var(--color-green-600);
+  --pb-stop: rgba(239, 68, 68, 0.12);
+  --pb-stop-fg: #dc2626;
+  --pb-ask: rgba(16, 185, 129, 0.14);
+  --pb-ask-fg: #059669;
+  --pb-run: var(--color-sky-600, #0284c7);
+  --pb-wait: var(--color-green-600, #16a34a);
+  --pb-fail: var(--color-red-600, #dc2626);
+  --pb-thinking: #9333ea;
+  --pb-message: #0284c7;
+  --pb-read: #0d9488;
+  --pb-edit: #d97706;
+  --pb-search: #4f46e5;
+  --pb-web: #0891b2;
+  --pb-done: #16a34a;
 }
 
-/* ── 任务块：两行卡片（卡片圆角 12 / 内部按钮 8，对齐全站令牌；无边框） ── */
+/* ── 任务块：两行卡片（亲和圆角 16px / 内部圆形胶囊按钮 24px，自然通透微质感） ── */
 .pet-block {
   box-sizing: border-box;
   height: var(--block-h);
-  padding: 0 10px 0 12px;
-  border-radius: var(--r-lg);
+  padding: 0 12px 0 14px;
+  /* 告别 12px 生硬直角，采用 16px 亲和圆角 */
+  border-radius: 16px;
   background: var(--pb-bg);
   color: var(--pb-fg);
-  /* 本窗口禁用一切**外部**阴影（plan-73-344）。
-     原因（用户截图像素实测）：透明窗口没有"背景色"可参与混合，box-shadow 的每个像素
-     都是真实的半透明黑，直接与桌面合成 → 视觉上就是「浮窗周围一圈半透明色块」。
-     层次一律改由底色明度 + inset 描边表达，不产生窗口外像素。 */
+  /* 禁用外部厚重黑圈阴影，仅用 1px 细微光感 inset 描边维持卡片轮廓 */
   box-shadow: inset 0 0 0 1px var(--pb-ring);
   display: flex;
   flex-direction: column;
@@ -174,6 +173,7 @@ body {
 
 .pet-block:hover {
   background: var(--pb-bg-hover);
+  /* hover 仅轻微提亮内描边，杜绝大范围扩散黑圈 */
   box-shadow: inset 0 0 0 1px var(--pb-ring-hover);
 }
 
@@ -258,7 +258,7 @@ body {
   color: var(--pb-sub);
 }
 
-/* 角标按钮：统一 26×26、控件圆角 8；等待处理为绿色问号（用户明确要求绿色） */
+/* 角标按钮：统一 24×24、纯圆胶囊（告别方正感）；等待处理为绿色问号 */
 .pet-block-actions {
   flex: none;
   display: inline-flex;
@@ -268,14 +268,14 @@ body {
 .pet-block-btn,
 .pet-block-ask {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--r-md);
+  border-radius: var(--r-pill, 999px);
   background: var(--pb-btn);
   color: var(--pb-btn-fg);
   cursor: pointer;
@@ -315,7 +315,7 @@ body {
   color: var(--color-neutral-950);
 }
 
-/* ── 第二行：抓取手柄 + 活动图标 + 动词 + 滚动内容 ── */
+/* ── 第二行：抓取手柄 + 活动图标 + 动词 + 滚动内容（纯净自然图文流，绝无直角底框） ── */
 .pet-block-row2 {
   display: flex;
   align-items: center;
@@ -330,11 +330,13 @@ body {
   align-items: center;
   color: var(--pb-faint);
   cursor: grab;
-  transition: color var(--dur-2, 120ms) var(--pet-ease);
+  opacity: 0.45;
+  transition: color var(--dur-2, 120ms) var(--pet-ease), opacity var(--dur-2, 120ms) var(--pet-ease);
 }
 
 .pet-block:hover .pet-block-grip {
   color: var(--pb-muted);
+  opacity: 0.9;
 }
 
 .pet-block-act {

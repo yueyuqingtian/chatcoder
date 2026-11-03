@@ -19,23 +19,13 @@ import { FolderBrowser } from "./FolderBrowser";
 import { ProjectIcon } from "./ProjectIcon";
 import { PROJECT_ICON_DEFS } from "./projectIconData";
 import { PROJECT_COLORS, DEFAULT_PROJECT_ICON, projectColorKey, projectIconKey, suggestProjectColor } from "./projectMeta";
+// plan-633-2604（R3）：拖入文件夹的读取/定位逻辑抽到 utils/dirDrop，输入框与本弹窗共用
+import { readChildNames } from "../../utils/dirDrop";
 
 /** 索引库按工作区路径登记；比较时统一斜杠与大小写（Windows 路径不区分大小写） */
 function samePath(a: string, b: string): boolean {
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
   return norm(a) === norm(b);
-}
-
-/** 读出拖入文件夹的第一层子项名称（浏览器定位同名文件夹时用来消歧）；readEntries 每次最多回 100 项 */
-async function readChildNames(entry: FileSystemDirectoryEntry): Promise<string[]> {
-  const reader = entry.createReader();
-  const names: string[] = [];
-  for (let i = 0; i < 3; i++) {
-    const batch = await new Promise<FileSystemEntry[]>((resolve) => reader.readEntries(resolve, () => resolve([])));
-    if (batch.length === 0) break;
-    names.push(...batch.map((e) => e.name));
-  }
-  return names;
 }
 
 export function ProjectDialog() {

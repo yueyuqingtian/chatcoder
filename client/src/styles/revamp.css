@@ -29,8 +29,14 @@
 /* ── 消息流 ── */
 .turn-user-bubble {
   /* plan-114-447：用户气泡中性化，强调色只留给可操作的主元素 */
-  background: var(--bubble-user); border-radius: 16px 16px 4px 16px;
-  padding: 10px 16px; animation: mo-pop-in var(--dur-3) var(--ease-out-quart) both; --pop-dy: 6px;
+  /* plan-633-2604：气泡收紧——内距 10px 16px → 8px 12px，圆角收敛到 --r-lg（16px 在窄面板里显得笨重）。
+   *  行高也在此收敛：气泡正文改 1.75（原来继承 --chat-line-height 的 2.2 = 13×2.2 ≈ 28.6px/行，
+   *  三行正文的留白比内容还多）。--ub-line-height 同时被折叠高度（global.css 的 .is-collapsed）读取，
+   *  两处必须同源，否则「6 行折叠」会显示成 7~8 行。 */
+  --ub-line-height: 1.75;
+  background: var(--bubble-user); border-radius: var(--r-lg);
+  padding: 8px 12px; line-height: var(--ub-line-height);
+  animation: mo-pop-in var(--dur-3) var(--ease-out-quart) both; --pop-dy: 6px;
 }
 .md-body-stream > :last-child { animation: stream-in var(--dur-4) var(--ease-emphasized-decel) both; }
 @keyframes stream-in { from { opacity: 0; filter: blur(4px); transform: translateY(3px); } to { opacity: 1; filter: none; transform: none; } }

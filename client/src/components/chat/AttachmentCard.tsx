@@ -3,7 +3,7 @@
  * 会话 229: 统一改用全局 ImageGallery（左右切换/缩放/下载）；
  * 并新增 MessageAttachmentList——消息内图片改为约 150px 缩略图并排展示，非图片附件保持卡片。
  */
-import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage } from "../icons";
+import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage, IconFolder } from "../icons";
 import { type AttachmentInfo, type ComposerRefOut, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { Tooltip } from "../ui";
@@ -58,17 +58,22 @@ export function MessageImageGrid({ atts }: { atts: AttachmentInfo[] }) {
   return (
     <div className="msg-image-grid">
       {images.map((a) => (
-        <img
+        <div
           key={a.file_id || a.url}
-          className="msg-image-thumb"
-          src={resolveFileUrl(a.url)}
-          alt={a.filename}
-          title={`${a.filename}（点击查看大图）`}
-          loading="lazy"
-          decoding="async"
-          draggable={false}
+          className="msg-image-thumb-wrap"
           onClick={() => openImage(a)}
-        />
+          title={`${a.filename}（点击查看大图）`}
+        >
+          <img
+            className="msg-image-thumb"
+            src={resolveFileUrl(a.url)}
+            alt={a.filename}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+          />
+          {a.size > 0 && <span className="msg-image-meta">{fmtSize(a.size)}</span>}
+        </div>
       ))}
     </div>
   );
@@ -109,7 +114,7 @@ export function TokenText({ text }: { text: string }) {
  * 调用方回退用 TokenText 解析文本（见 stripRefLines + TokenText）。
  */
 const REF_KIND_LABEL: Record<string, string> = {
-  file: "文件", skill: "技能", mcp: "连接器", plugin: "插件",
+  file: "文件", dir: "文件夹", skill: "技能", mcp: "连接器", plugin: "插件",
 };
 
 export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
@@ -124,6 +129,7 @@ export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
         >
           <span className="msg-ref-icon">
             {r.kind === "file" ? <IconFileText size={11} />
+              : r.kind === "dir" ? <IconFolder size={11} />
               : r.kind === "mcp" ? <IconPlug size={11} />
               : r.kind === "plugin" ? <IconPackage size={11} />
               : <IconBox size={11} />}
@@ -147,12 +153,13 @@ export function refsOf(content: Record<string, unknown> | undefined): ComposerRe
 
 /** plan-308-1542 需求2：拼在消息文本里的引用行（buildRefsSuffix 产物）在有了芯片后
  *  应从气泡文本中剔除，避免「芯片 + 同一段文字」重复展示。
- *  只在消息确实带结构化 refs 时才剔除（历史消息保留原文，不丢信息）。 */
+ *  只在消息确实带结构化 refs 时才剔除（历史消息保留原文，不丢信息）。
+ *  plan-633-2604（R3）：「引用文件夹」同样剔除（拖入文件夹的引用行）。 */
 export function stripRefLines(text: string, hasRefs: boolean): string {
   if (!hasRefs || !text) return text;
   return text
     .split("\n")
-    .filter((ln) => !/^(引用文件|使用技能|使用连接器|使用插件)：/.test(ln.trim()))
+    .filter((ln) => !/^(引用文件|引用文件夹|使用技能|使用连接器|使用插件)：/.test(ln.trim()))
     .join("\n")
     .trim();
 }

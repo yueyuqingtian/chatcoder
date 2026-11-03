@@ -97,6 +97,8 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   },
   // 保持唤醒开关（powerSaveBlocker）
   setKeepAwake: (on) => ipcRenderer.invoke("power:setKeepAwake", !!on),
+  // R4：任务完成系统通知（三档：always / unfocused / off；点击通知回到对应会话）
+  notifyTaskFinished: (payload) => ipcRenderer.invoke("app:notifyTask", payload || {}),
   // 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色）
   setTonePref: (tone) => ipcRenderer.send("theme:setTone", String(tone)),
   setThemePref: (theme) => ipcRenderer.send("theme:setPref", theme === "light" ? "light" : "dark"),

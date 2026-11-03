@@ -79,7 +79,9 @@ export function WindowControls({ panelAvailable, panelShown, fullscreen, onToggl
       <Tooltip content={t("titlebar.max")} side="bottom">
         <button type="button" className="wc-btn" style={NO_DRAG} aria-label={t("titlebar.max")} disabled={!winApi}
           onClick={() => winApi?.toggleMaximize?.()}>
-          <IconSquare size={14} />
+          {/* 三个窗口按钮统一 16px：antd 图形已按 opticalScale 归一到同一视觉跨度，
+              仍给方框单独 14px 会让它比最小化 / 关闭小一圈（实测 14 vs 18.5），工具栏里最刺眼的一处 */}
+          <IconSquare size={16} />
         </button>
       </Tooltip>
       <Tooltip content={t("titlebar.close")} side="bottom">

@@ -247,6 +247,8 @@ export function RightPanel({ visible = true }: { visible?: boolean }) {
                   aria-expanded={showTabsMenu}
                   onClick={() => { setShowTabsMenu((v) => !v); setShowAddMenu(false); }}
                 >
+                  {/* 与同排的「新建 +」等大：图标已按 opticalScale 归一到 89.3% 跨度，
+                      这里用 14 与加号同尺寸即自动一致，不需再为箭头单独放缩 */}
                   <IconChevronDown size={14} />
                 </button>
               </Tooltip>
@@ -275,7 +277,7 @@ export function RightPanel({ visible = true }: { visible?: boolean }) {
                 aria-expanded={showAddMenu}
                 onClick={() => { const next = !showAddMenu; setShowAddMenu(next); setShowTabsMenu(false); if (next) refreshDebugEnabled(); }}
               >
-                <IconPlus size={15} />
+                <IconPlus size={14} />
               </button>
             </Tooltip>
             <Popover open={showAddMenu} onClose={() => setShowAddMenu(false)} placement="bottom-end" className="rp-menu rp-menu-add" ignoreRefs={[addBtnRef]} role="menu" aria-label={t("rp.new_tab")}>

@@ -345,6 +345,12 @@ export function StatusCapsule({
             className={`pet-block is-${c.status}${isDragging ? " is-reordering" : ""}`}
             // --i：展开时按离宠物由近及远依次入场（plan-20261016 D2），不影响内联位移
             style={{ ...blockStyle(c.sessionId, idx), "--i": idx } as CSSProperties}
+            onClick={(e) => {
+              // 非按钮点击且非拖拽时，点击卡片主体直接聚焦回到该会话
+              if ((e.target as HTMLElement).closest("button")) return;
+              if (reorderRef.current.moved) return;
+              onFocusSession(c.sessionId);
+            }}
             onPointerDown={(e) => onBlockPointerDown(e, c.sessionId)}
             onPointerMove={onBlockPointerMove}
             onPointerUp={onBlockPointerUp}

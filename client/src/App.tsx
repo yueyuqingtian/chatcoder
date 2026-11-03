@@ -345,7 +345,7 @@ export default function App() {
       {/* plan-20261025-shell（需求 5）：左栏铺在最底层，中间 / 右侧面板是浮在其上的微圆角卡片。
           rp-shown / rp-full 与 data-wc 只驱动卡片预留给右上角控件组的宽度（见 shell.css）。 */}
       <div
-        className={"app-shell" + (rightShown ? " rp-shown" : "") + (rightFull ? " rp-full" : "")}
+        className={"app-shell" + (rightShown ? " rp-shown" : "") + (rightFull ? " rp-full" : "") + (sidebarHidden ? " sidebar-collapsed" : "")}
         data-wc={rightAvailable ? "panel" : "win"}
         style={{ ["--pane-w" as string]: sidebarHidden ? "0px" : `${leftPanelWidth}px` }}
       >

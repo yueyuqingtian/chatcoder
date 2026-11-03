@@ -71,6 +71,11 @@ export function hasReconcileTask(id: string): boolean {
 /**
  * 触发一次收敛：按顺序分帧执行已注册任务，运动开始时取消旧代次。
  * 重复调用合并为一次。
+ *
+ * plan-633-2604：执行中若又进入几何运动期，**不能静默丢弃这一轮**。
+ * 此前直接 `return`，于是「运动期被跳过的测量」在 reconcile 里永远等不到补测，
+ * 屏外项停在旧高度，表现为消息流中间露出一大片空白，直到滚动重新挂载才恢复。
+ * 现在改为登记一次性订阅：运动结束（busy 转 false）后自动重跑一轮。
  */
 export function runReconcile(): void {
   if (typeof requestAnimationFrame !== "function") return;
@@ -80,7 +85,12 @@ export function runReconcile(): void {
   let cursor = 0;
   const step = () => {
     raf = 0;
-    if (token !== generation || isBusy()) return;
+    if (token !== generation) return;
+    if (isBusy()) {
+      // 重新回到运动期：本轮作废，但运动结束后必须补跑（否则被跳过的测量再无补测机会）。
+      deferUntilIdle();
+      return;
+    }
     const t0 = performance.now();
     while (cursor < list.length) {
       const [id, e] = list[cursor++];
@@ -103,6 +113,19 @@ export function runReconcile(): void {
   raf = requestAnimationFrame(step);
 }
 
+/** 运动期被打断的一次性补跑：busy 转 false 时自动重跑，只登记一份。 */
+let idleResumeOff: (() => void) | null = null;
+
+function deferUntilIdle(): void {
+  if (idleResumeOff) return;
+  idleResumeOff = subscribe((busy) => {
+    if (busy) return;
+    idleResumeOff?.();
+    idleResumeOff = null;
+    runReconcile();
+  });
+}
+
 /** 是否有一次收敛已排队（诊断用）。 */
 export function isReconcilePending(): boolean {
   return raf !== 0;
@@ -114,6 +137,10 @@ export const RECONCILE_ORDER = {
   unfreezePane: 10,
   /** ② 虚拟列表视口尺寸提交 */
   virtualizerRect: 20,
+  /** ②' plan-20261118-width-epoch：宽度变化后让屏外项的高度缓存失效（重测）。
+   *  必须排在 virtualizerRect 之后（此时新宽度已提交给虚拟器）、scrollAnchor 之前
+   *  （锚点还原要用失效后的真实总高算目标 scrollTop）。 */
+  widthInvalidate: 25,
   /** ③ 滚动锚点还原 / 贴底（plan-31-151 S4：改为双帧后执行，等虚拟器按新 rect 重算完成） */
   scrollAnchor: 30,
   /** ④ 虚拟列表重新测量（plan-31-151 S4：已移除——directDomUpdates 模式下 RO 自动触发重测，

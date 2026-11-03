@@ -711,42 +711,51 @@ def _prune_messages_for_compaction(messages: list, retain_tokens: int) -> list:
     return [m for m in messages if m.role in ("system", "developer") or id(m) in kept_ids]
 
 
-def resolve_compact_thresholds(agent_window: int, ratio: float, max_out: int) -> dict:
-    """压缩阈值解析（plan-598-2517，纯函数，诊断日志与前置检查共用）。
+def resolve_compact_thresholds(agent_window: int, ratio: float) -> dict:
+    """压缩阈值解析（纯函数，诊断日志与前置/后置检查共用）。
 
-    返回：{configured, out_reserve, pre_threshold, post_threshold}
+    返回：{configured, pre_threshold, post_threshold}
 
-    背景（真实事故）：旧实现的前置触发点用
-        `_out_reserve = min(输出配置 or 8192, agent_window // 4)`
-        `_pre_threshold = max(窗口*0.5, 窗口*ratio - _out_reserve)`
-    本机配置（ratio=0.90、输出上限=128000）下，512K 窗口的触发点被压到
-    332800（65%）——**远未到配置的 90% 就开始压缩**，且与「后置触发点」
-    （纯 ratio，无预留）口径相差 25 个百分点。
+    阈值口径只有一条：**总窗口 × 设置里的百分比**（plan-599-2520）。
+    「单次最大输出」不参与计算——它只决定请求里的 max_tokens，不会占用
+    输入预算；把它从阈值里预扣会让用户在远低于设置比例时就被压缩。
 
-    两个缺陷：
-    1. 输出上限未配（0）时兜底 8192 是凭空加的——请求根本不带 max_tokens；
-    2. 输出上限很大时预留吃满 1/4 窗口，把输入预算挤掉一大块。
+    真实事故：本机 450K 窗口 + 128K 输出上限 + 设置 90%，旧公式把
+    `min(128000, 阈值以上余量 45000, 窗口 15% 67500)` 当输出预留扣掉，
+    前置触发点变成 360000（80%），而界面显示的「已使用」才 34xK（76%）——
+    用户看到的就是「设 90%，70 多就压缩」。更早一版用 `min(max_out, 窗口//4)`
+    时，512K 窗口的触发点被压到 65%。
 
-    现在：
-    - 输出余量已隐含在「100% - ratio」的窗口差额里，不再二次扣减；
-    - 预留只在「阈值以上还有余量」时取一点，且不超过输出上限与窗口 15%；
-    - 窗口 50% 的下限保护保持不变。
+    真正超窗的兜底不靠预留，而是模型报 context overflow 时的紧急压缩。
     """
     window = max(0, int(agent_window))
-    configured = int(window * ratio)
-    # 阈值以上的窗口余量；ratio 很小时它就是全部可用的输出空间
-    headroom = max(0, window - configured)
-    reserve = 0
-    if max_out and max_out > 0:
-        reserve = min(int(max_out), headroom, int(window * 0.15))
-    pre = max(int(window * 0.5), configured - reserve)
+    configured = max(0, int(window * max(0.0, float(ratio))))
     return {
         "configured": configured,
-        "out_reserve": reserve,
-        # 前置（调用前估算触发）可能略早；后置（真实占用触发）严格等于配置阈值
-        "pre_threshold": pre,
+        # 前置与后置同口径：都按「已使用 / 总窗口 >= 设置百分比」触发
+        "pre_threshold": configured,
         "post_threshold": configured,
     }
+
+
+def resolve_used_tokens(*, est_raw: int, calib: float,
+                        last_est_raw: int = 0, last_real_prompt: int = 0) -> int:
+    """前置检查用的「已使用」token 口径（纯函数）。
+
+    有上一次 API 返回的真实 prompt_tokens 时，以它为基数，只把「本次新增
+    内容」按估算补上；没有真实值时才退回「全量估算 × 校准系数」。
+
+    为什么不能只用全量估算：估算系数的偏差会随历史长度被重复放大
+    （实测 calib=1.246 时，296K 的历史被估成 369K，而真实占用只有 344K），
+    于是「界面显示 76%」与「前置判断 82%」对不上，用户看到的就是提前压缩。
+    """
+    raw = max(0, int(est_raw))
+    factor = float(calib or 1.0)
+    if last_real_prompt > 0 and last_est_raw > 0:
+        # 增量部分仍需校准：raw 估算对中文/工具结果系统性偏低或偏高
+        delta = max(0, raw - int(last_est_raw))
+        return max(0, int(last_real_prompt) + int(delta * factor))
+    return max(0, int(raw * factor))
 
 
 async def _compact_persistent_or_fallback(
@@ -824,10 +833,13 @@ async def _compact_persistent_or_fallback(
             "[agent] turn=%s 压缩后内存上下文 %d -> %d tokens（保留预算 %d，消息 %d -> %d 条，压缩后占用 %s%%）",
             turn_id, _before_tokens, _after_tokens, _retain, len(messages), len(_pruned), _post_ratio,
         )
-        messages = [*_pruned, ChatMessage(
+        # plan-599-2520：落库式压缩的内存上下文同样走统一收尾，避免裁剪后的保留区
+        # 以 assistant(tool_calls) 或 tool 开场、或在 checkpoint 之前出现悬空调用。
+        from app.orchestration.compaction import finalize_compacted_messages
+        messages = finalize_compacted_messages([*_pruned, ChatMessage(
             role="developer",
             content=f"{get_checkpoint_preamble(reply_language)}\n\n{_result['summary']}",
-        )]
+        )], reply_language)
         await broadcast(session_id, {
             "event": "compact.summary",
             "payload": {
@@ -853,7 +865,7 @@ async def _compact_persistent_or_fallback(
     else:
         if trigger == "context-overflow":
             from app.orchestration.compaction import emergency_compact
-            messages = emergency_compact(messages, agent_window)
+            messages = emergency_compact(messages, agent_window, reply_language)
         else:
             from app.orchestration.compaction import auto_compact
             messages = await auto_compact(messages, agent_window, provider,
@@ -1199,10 +1211,10 @@ async def run_agent_loop(
     is_unlimited_steps = (max_steps <= 0)
     loop_step_limit = 10_000_000 if is_unlimited_steps else max_steps
 
-    # v6.4: 启动时打印压缩阈值诊断日志
-    # plan-598-2517：这条日志过去只报「配置比例 × 窗口」，而真实的前置触发点还要扣掉
-    # 输出预留（旧公式最多扣满 1/4 窗口），两者能差 25 个百分点——用户看到「阈值 90%」
-    # 却在 65% 就被压缩，很难自证。现在把真实触发点一并打印，日志与行为对得上。
+    # 启动时打印压缩阈值诊断日志（plan-599-2520：阈值口径 = 已使用 / 总窗口）
+    # 历史事故都源于「日志报 90%，实际按更低的点压缩」：先是扣满 1/4 窗口的输出预留
+    # （65% 触发），后又按 min(输出上限, 阈值以上余量, 窗口 15%) 扣（80% 触发）。
+    # 现在单次最大输出完全不参与阈值计算，日志里的数字就是真实触发点。
     try:
         from app.orchestration.token_counter import get_agent_context_window
         _diag_window = await get_agent_context_window(db, agent, model_id=model_id)
@@ -1213,17 +1225,13 @@ async def run_agent_loop(
             )
             _diag_window = 500000
         _diag_ratio = settings.auto_compact_threshold_ratio
-        _diag_max_out = int(settings.agent_max_output_tokens or 0)
-        _diag = resolve_compact_thresholds(_diag_window, _diag_ratio, _diag_max_out)
+        _diag = resolve_compact_thresholds(_diag_window, _diag_ratio)
         logger.info(
-            "[agent] turn=%s agent_context_window=%d, 压缩配置阈值=%.0f%% (%d tokens)，"
-            "前置触发点=%d tokens (%.1f%%，输出预留 %d)，后置触发点=%d tokens (%.0f%%)",
+            "[agent] turn=%s agent_context_window=%d, 压缩阈值=%.0f%% (%d tokens)，"
+            "已使用达到该值即压缩（单次最大输出 %d 不参与计算）",
             turn_id, _diag_window,
             _diag_ratio * 100, _diag["configured"],
-            _diag["pre_threshold"],
-            _diag["pre_threshold"] / _diag_window * 100 if _diag_window else 0,
-            _diag["out_reserve"],
-            _diag["post_threshold"], _diag_ratio * 100,
+            int(settings.agent_max_output_tokens or 0),
         )
     except Exception:
         logger.warning("[agent] turn=%s 压缩阈值诊断日志获取失败", turn_id, exc_info=True)
@@ -1271,6 +1279,11 @@ async def run_agent_loop(
     # plan-527-2218: 系数按模型持久化（token_counter 落盘 store），重启后仍有效
     from app.orchestration.token_counter import get_calibration_factor as _get_calib
     _calib_factor = _get_calib(_calib_key)  # real / est
+    # plan-599-2520: 「已使用」判断基数——上一次 API 真实 prompt_tokens，以及那次请求前的原始估算。
+    # 前置检查以真实值为基数、只补新增内容，避免估算系数把历史偏差重复放大（见 resolve_used_tokens）。
+    # 压缩重写上下文后归零，退回全量估算口径。
+    _last_real_prompt = 0
+    _last_est_raw = 0
     # v2.2 (对齐 zcode 3.14): 重复工具调用检测——工具名+参数签名 → 连续次数
     _call_sigs: dict[str, int] = {}
     _last_sig: str | None = None  # 上一次执行的工具签名（连续重复判定用）
@@ -1443,23 +1456,32 @@ async def run_agent_loop(
                 _tools_tokens = _est_tools(tool_schemas)
                 _est_raw = _est_tokens(api_messages) + _tools_tokens
                 _est_prompt = int(_est_raw * _calib_factor)
-                # plan-598-2517：输出预留只为「避免本次输出撑爆窗口」，不能反过来把输入预算
-                # 挤到配置阈值以下一半以上。阈值口径统一由 resolve_compact_thresholds 给出，
-                # 与启动诊断日志、后置（真实占用）触发点共用同一份计算。
+                # 阈值 = 总窗口 × 设置百分比；「单次最大输出」不参与计算（plan-599-2520）。
+                # 前置与后置（真实占用）共用同一份阈值，界面上看到多少就按多少触发。
                 _th = resolve_compact_thresholds(
-                    agent_window,
-                    settings.auto_compact_threshold_ratio,
-                    int(settings.agent_max_output_tokens or 0),
+                    agent_window, settings.auto_compact_threshold_ratio,
                 )
                 _pre_threshold = _th["pre_threshold"]
-                if _est_prompt >= _pre_threshold:
-                    logger.info("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) >= 阈值 %d，调用前压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
-                    await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _est_prompt, "context_window": agent_window, "ratio": round(_est_prompt / agent_window * 100, 1)}})
+                # 「已使用」口径：有上一次 API 真实 prompt_tokens 时以它为基数，只补本次新增；
+                # 全量估算 × 校准系数会把历史偏差重复放大（实测 76% 显示 / 82% 判断）。
+                _used_tokens = resolve_used_tokens(
+                    est_raw=_est_raw, calib=_calib_factor,
+                    last_est_raw=_last_est_raw, last_real_prompt=_last_real_prompt,
+                )
+                if _used_tokens >= _pre_threshold:
+                    logger.info(
+                        "[agent] turn=%s step=%s 前置已使用 %d (est_raw=%d calib=%.3f "
+                        "last_real=%d) >= 阈值 %d (%.0f%%)，调用前压缩",
+                        turn_id, step, _used_tokens, _est_raw, _calib_factor,
+                        _last_real_prompt, _pre_threshold,
+                        _pre_threshold / agent_window * 100 if agent_window else 0,
+                    )
+                    await broadcast(session_id, {"event": "compact.started", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "used_tokens": _used_tokens, "context_window": agent_window, "ratio": round(_used_tokens / agent_window * 100, 1)}})
                     # v30: 优先落库式压缩（持久化 checkpoint），失败回退内存式 auto_compact
                     # plan-560-2311 A2：带上线程身份，子代理不做落库式压缩
                     _cc_pre, messages = await _compact_persistent_or_fallback(
                         db, session_id=session_id, provider=provider, agent_window=agent_window,
-                        used_tokens=_est_prompt, agent_id=agent_id, agent_name=agent_name,
+                        used_tokens=_used_tokens, agent_id=agent_id, agent_name=agent_name,
                         turn_id=turn_id, messages=messages, trigger="pressure",
                         reply_language=reply_language,
                         thread_id=thread_id, agent_kind=agent_kind,
@@ -1469,11 +1491,14 @@ async def run_agent_loop(
                     messages = normalize_tool_sequence(messages)
                     api_messages = build_api_copy(messages, workspace)
                     _est_after = int((_est_tokens(api_messages) + _tools_tokens) * _calib_factor)
-                    logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _est_prompt, _est_after, bool(_cc_pre))
+                    logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _used_tokens, _est_after, bool(_cc_pre))
+                    # 上下文已被重写，真实基数与估算增量都失效：下一次退回全量估算口径
+                    _last_real_prompt = 0
+                    _last_est_raw = 0
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
                     await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, **(_cc_pre or {})}})
                 else:
-                    logger.debug("[agent] turn=%s step=%s 前置估算 prompt=%d (raw=%d calib=%.3f) < 阈值 %d，不压缩", turn_id, step, _est_prompt, _est_raw, _calib_factor, _pre_threshold)
+                    logger.debug("[agent] turn=%s step=%s 前置已使用 %d (est_raw=%d calib=%.3f last_real=%d) < 阈值 %d，不压缩", turn_id, step, _used_tokens, _est_raw, _calib_factor, _last_real_prompt, _pre_threshold)
             except Exception:
                 logger.warning("[agent] turn=%s step=%s 前置压缩检查失败，降级为原始消息继续", turn_id, step, exc_info=True)
                 api_messages = messages
@@ -1834,9 +1859,12 @@ async def run_agent_loop(
                                 thread_id=thread_id, agent_kind=agent_kind,
                             )
                             if _cc_ovf is None:
-                                messages = emergency_compact(messages, agent_window)
-                            # 紧急压缩后同样修复 id + 规范化工具消息序列，防止孤立 tool / 夹层消息
+                                messages = emergency_compact(messages, agent_window, reply_language)
+                            # 紧急压缩后同样修复 id + 补齐配对 + 规范化工具消息序列，
+                            # 防止孤立 tool / 夹层消息（plan-599-2520：缺 ensure 时
+                            # normalize 会把缺结果的后续 tool 成批丢弃，压缩后首次请求即报错）
                             messages = repair_tool_call_ids(messages)
+                            messages = ensure_tool_pairing(messages)
                             messages = normalize_tool_sequence(messages)
                             # R5: 与首次同一份 payload（含超长结果落盘保护、旧推理剥离）
                             api_messages = _build_api_dc(messages, workspace)
@@ -2092,12 +2120,17 @@ async def run_agent_loop(
             except Exception:
                 logger.debug("usage 流水落库失败(非阻塞)", exc_info=True)
 
-            # v6.4: 调用后真实占用驱动压缩 -- 用 API 精确 prompt_tokens 判断
-            # 替代旧的 should_auto_compact 估算检查，避免过早摘要。
-            # 阈值 = agent_window * auto_compact_threshold_ratio (默认 0.90)
+            # 调用后真实占用驱动压缩 —— 用 API 精确 prompt_tokens 判断（plan-599-2520）。
+            # 阈值口径与前置检查同一份：已使用 / 总窗口 >= 设置百分比；单次最大输出不参与。
+            # 这里顺手记下「真实值 + 当次请求的原始估算」，供下一步前置检查做增量基数。
             if _final_prompt > 0 and agent_window > 0:
                 _real_ratio = _final_prompt / agent_window
-                _threshold = settings.auto_compact_threshold_ratio
+                _threshold = resolve_compact_thresholds(
+                    agent_window, settings.auto_compact_threshold_ratio,
+                )["configured"] / agent_window
+                if _usage_source == "api":
+                    _last_real_prompt = _final_prompt
+                    _last_est_raw = _est_prompt
                 if _real_ratio >= _threshold:
                     logger.info(
                         "[agent] turn=%s step=%s 真实上下文占用 %.1f%% (p=%d/w=%d) >= %.0f%%，触发自动压缩",
@@ -2123,6 +2156,9 @@ async def run_agent_loop(
                         reply_language=reply_language,
                         thread_id=thread_id, agent_kind=agent_kind,
                     )
+                    # 上下文已被重写：真实基数与估算增量都失效，下一步退回全量估算口径
+                    _last_real_prompt = 0
+                    _last_est_raw = 0
                     # v6.5: 压缩后广播，前端关闭反馈提示（携带阴影定价供渲染压缩卡片）
                     await broadcast(session_id, {
                         "event": "compact.completed",

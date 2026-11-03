@@ -1021,7 +1021,17 @@ class Ta3Provider(ModelProvider):
         2. 每一个 role='tool' 消息的前一条，必须是包含该 tool_call_id 的 assistant 消息；
         若发生未映射工具降级、异常中断丢失 tool_result、或上下文预算截断，
         会导致出现孤儿 tool 消息或悬空 tool_calls，网关会直接返回 API 异常。
-        此函数将未完成的悬空 tool_calls 降级为普通文本，将孤儿 tool 消息转换为 user 文本。
+
+        plan-599-2520：旧实现按「紧随其后的连续 tool」整体匹配，只要匹配到**任意一条**
+        就原样保留 assistant 的全部 tool_calls——并行调用里只要缺一条结果（压缩把某条
+        tool 结果划进摘要区就会这样），就留下悬空 tool_calls，上游直接判非法（ta3 表现为
+        「AI服务异常，请稍后重试」，客户端只能看到这一句）。实测事故：会话 630 turn=2596，
+        新一轮第一条消息触发压缩后立即请求失败，压缩产物 assistant 67 / tool 66。
+
+        现在逐个 id 对齐：
+        - 缺少结果的 tool_call 从 assistant 上剔除（一个都不剩时整条降级为纯文本）；
+        - 结果按 tool_calls 的顺序紧跟在 assistant 之后；
+        - 没有前置 assistant 的孤儿 tool 消息降级为 user 文本。
         """
         if not messages:
             return []
@@ -1032,30 +1042,33 @@ class Ta3Provider(ModelProvider):
             m = messages[i]
             role = m.get("role")
             if role == "assistant" and m.get("tool_calls"):
-                expected_ids = {tc["id"] for tc in m["tool_calls"] if tc.get("id")}
-                # 检查后续是否紧跟对应的 tool 消息
-                matched_tools = []
+                expected_ids = [tc.get("id") for tc in m["tool_calls"] if tc.get("id")]
+                # 收集紧随其后所有 tool 消息的结果（按 id 建索引，不依赖顺序）
+                results: dict[str, dict] = {}
                 j = i + 1
                 while j < n and messages[j].get("role") == "tool":
                     t_id = messages[j].get("tool_call_id")
-                    if t_id in expected_ids:
-                        matched_tools.append(messages[j])
+                    if t_id in expected_ids and t_id not in results:
+                        results[t_id] = messages[j]
                     j += 1
-                if not matched_tools:
-                    # 悬空 tool_calls（后续完全没有 tool 结果，如命令执行中服务重启被强杀）
+                matched = [tid for tid in expected_ids if tid in results]
+                if not matched:
+                    # 悬空 tool_calls（后续完全没有 tool 结果，如命令执行中被强杀）
                     # 剥离 tool_calls，保留文字，避免协议破坏
                     m_copy = dict(m)
                     m_copy.pop("tool_calls", None)
                     if not m_copy.get("content"):
                         m_copy["content"] = "（工具调用未完成）"
                     cleaned.append(m_copy)
-                    i += 1
                 else:
-                    # 正常配对：保留 assistant 和匹配的 tool 消息
+                    # 只保留有结果的 tool_calls，避免部分缺失造成的悬空
+                    if len(matched) != len(m["tool_calls"]):
+                        m = dict(m)
+                        m["tool_calls"] = [tc for tc in m["tool_calls"]
+                                           if not tc.get("id") or tc.get("id") in results]
                     cleaned.append(m)
-                    for tm in matched_tools:
-                        cleaned.append(tm)
-                    i = j
+                    cleaned.extend(results[tid] for tid in matched)
+                i = j
             elif role == "tool":
                 # 没有前置匹配 assistant 的孤儿 tool 消息 → 降级为 user 提示文本
                 content = m.get("content") or ""

@@ -622,6 +622,11 @@ class ProviderCredentialUpdate(BaseModel):
     extra: dict | None = None
 
 
+class CredentialRevealOut(BaseModel):
+    """用于设置页安全查看明文密钥与复制。"""
+    api_key: str | None = None
+
+
 class ProviderProxyTestOut(BaseModel):
     ok: bool
     latency_ms: int = 0
@@ -897,6 +902,9 @@ class EvAgentEvent(WsEventPayload):
     status: str | None = None
     summary: str | None = None
     artifact_ids: list[int] | None = None
+    # plan-20261030-subagent-resume-status：resume_subagent / continue_subagent 再次广播
+    # agent.started 时置 True——前端据此区分「续跑」与「迟到的重放启动」（后者不得把终态改回运行中）
+    resumed: bool | None = None
 
 
 class EvError(WsEventPayload):

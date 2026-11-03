@@ -76,6 +76,7 @@ v[0-9]*/
 0.9.4/
 0.10.0/
 0.10.0a/
+0.10.a/
 releasev1/
 
 # 第三方参考仓库（deepseek-harness 等）
@@ -297,3 +298,7 @@ server/*_out.txt
 
 # 会话协作过程记录（current_state / journal 等），属工作过程产物，不入库
 /.project-memory/
+
+# 本地设计预览页（无应用代码引用）
+/preview-design.html
+/preview-pet-and-panel.html

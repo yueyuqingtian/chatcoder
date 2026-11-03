@@ -42,22 +42,21 @@ a { color: var(--accent); text-decoration: none; }
    与系统弧线错位成"双层圆角 + 错位边框"，即用户反馈的"四角弧度与边框不一致"。 */
 /* 左栏实时宽度 --pane-w：折叠 / 展开的唯一驱动量（由 App 写入）。注册为 <length> 才能被 transition 逐帧插值；
    左栏宽度、导航条底色分界、标题栏左缘都由它派生，三者共用同一条过渡曲线，任何一帧都不会错位。 */
+/* 左栏宽度静态注册，移除顶层 --pane-w 的逐帧过渡，彻底消除引起全局回流卡顿的 Houdini 插值开销 */
 @property --pane-w { syntax: "<length>"; inherits: true; initial-value: 264px; }
-.app-shell { position: relative; display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); transition: --pane-w var(--dur-pane) var(--ease-drawer); }
+.app-shell { position: relative; display: flex; flex-direction: row; height: 100vh; overflow: hidden; background: var(--bg-sidebar); }
 .app-right { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow: hidden; }
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 .app-pane { flex-shrink: 0; overflow: hidden; transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer); }
 /* 左面板：自身不画接缝线，只保留 1px 透明 border 占位（布局零位移 + 背景延伸进 border 区，
    不会露出窗口底/壁纸）。线的绘制**统一由分隔条 .resize-handle::after 承担**（见该规则处说明）。
-   为什么不在面板上画（两轮踩坑，务必保持本形态）：
-     ① 线跟随**面板自身图层**：拖拽期面板宽度逐帧变化、图层重建/合并，细线会被亚像素稀释或吃掉（用户反馈"偶尔消失"）；
-     ② inset box-shadow 绘制（上一轮实现）：**错**——内阴影画在 padding box 内边缘、内容之下，
-        子元素的不透明背景（.sidebar 的 background）会把它整条盖住；同时透明 border 区
-        与之相邻形成第二条色带 ⇒ 现状"左侧分割线看起来很粗"。 */
+   引入 contain: layout 与 will-change 隔离，避免展开折叠期间内部重排穿透到全局 */
 .app-pane-left {
   background: var(--bg-sidebar);
   border-right: 1px solid transparent;
   background-clip: border-box;
+  contain: layout;
+  will-change: width, flex-basis;
   /* 占位边框与宽度同曲线过渡：DPR≠1 时 1px 边框实际约 0.67px，折叠终点若仍保留它，
      标题栏左缘与导航条之间会残留一条发丝缝；收到 0 必须逐帧过渡，不能在起点瞬间去掉（否则 1px 跳变） */
   transition: width var(--dur-pane) var(--ease-drawer), flex-basis var(--dur-pane) var(--ease-drawer), border-right-width var(--dur-pane) var(--ease-drawer);
@@ -1378,13 +1377,49 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .composer-attach-uploading { font-size: 11px; color: var(--text-3); align-self: center; }
 /* v14: 消息中的附件卡片（用户气泡内），点击预览 */
 .turn-user-bubble .attach-card,
-.attach-card { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 4px; margin: 4px 4px 0 0; border-radius: var(--r-sm); background: var(--bg-muted); border: 1px solid var(--border); cursor: pointer; max-width: 240px; vertical-align: middle; }
-.turn-user-bubble .attach-card { display: flex; margin: 6px 0 0; max-width: 100%; }
-.attach-card:hover { border-color: var(--text-3); background: var(--bg-hover); }
-.attach-card-thumb { width: 26px; height: 26px; object-fit: cover; border-radius: var(--r-sm); flex-shrink: 0; }
-.attach-card-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; color: var(--text-3); background: var(--bg-elevated); border-radius: var(--r-sm); }
-.attach-card-name { font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.attach-card-size { font-size: 10px; color: var(--text-3); flex-shrink: 0; }
+.attach-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 6px;
+  margin: 6px 6px 0 0;
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  max-width: 300px;
+  vertical-align: middle;
+  transition: all var(--dur-2) var(--ease-standard);
+  box-shadow: var(--shadow-sm);
+}
+.turn-user-bubble .attach-card { display: flex; margin: 8px 0 0; max-width: 100%; }
+/* plan-633-2604：气泡内附件由「整行大卡」收敛为紧凑 chip（高 46px → 30px）。
+ *  ① 宽度随文件名自适、不撑满：原来是 display:flex + max-width:100%，配合 .attach-card-name 的 flex:1
+ *     把整行占满，一个 30KB 的小文件也顶满整条版面；
+ *  ② 行高显式 1.4：气泡本体 line-height 是 --chat-line-height(2.2)，不覆盖则字号再小也被 28.6px 行盒撑开；
+ *  ③ 底色用 var(--bg-elevated)：原 background 引用的 --bg-card 全仓未定义（实际透明），
+ *     这里改用既有令牌（浅色=白 / 深色=neutral-800），不靠边框硬撑层次。 */
+.turn-user-bubble .attach-card {
+  display: inline-flex; margin: 4px 0 0; padding: 3px 8px 3px 3px;
+  max-width: min(260px, 100%); line-height: 1.4; background: var(--bg-elevated);
+}
+/* 气泡内图标槽与卡高同步缩小：卡高 = 22 + 3 + 3 + 2(边框) = 30px */
+.turn-user-bubble .attach-card-icon,
+.turn-user-bubble .attach-card-thumb { width: 22px; height: 22px; }
+.attach-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.attach-card-thumb { width: 32px; height: 32px; object-fit: cover; border-radius: var(--r-sm); flex-shrink: 0; }
+.attach-card-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; flex-shrink: 0; color: var(--accent);
+  background: var(--accent-soft); border-radius: var(--r-sm);
+}
+.attach-card-name { font-size: 12.5px; font-weight: 500; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.attach-card-size { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 /* v14: 仅附件无文字的用户消息 */
 .turn-user-bubble .turn-user-text { margin-bottom: 2px; }
 /* plan-128-518：超长用户消息折叠——高度限制为 6 行 + 底部渐隐遮罩（mask，不叠色块），展开时去掉限制。箭头按钮占固定槽位，展开/收起只转角度 */
@@ -1395,7 +1430,9 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    过渡只在用户点过按钮之后（.is-animating）才挂上，避免长消息一出现就从全高缩到 6 行。 */
 .turn-user-bubble .ub-text.is-overflow { overflow: hidden; interpolate-size: allow-keywords; }
 .turn-user-bubble .ub-text.is-animating { transition: height var(--dur-3) var(--ease-emphasized-decel); }
-.turn-user-bubble .ub-text.is-collapsed { height: calc(var(--chat-line-height, 2.2) * 1em * 6); -webkit-mask-image: linear-gradient(to bottom, #000 86%, transparent); mask-image: linear-gradient(to bottom, #000 86%, transparent); }
+/* plan-633-2604：折叠高度必须与气泡行高同源。气泡改用 --ub-line-height(1.75) 后，
+ *  这里若仍读 --chat-line-height(2.2)，折叠框会显示约 7~8 行（JS 阈值读的是元素实际行高）。 */
+.turn-user-bubble .ub-text.is-collapsed { height: calc(var(--ub-line-height, 1.75) * 1em * 6); -webkit-mask-image: linear-gradient(to bottom, #000 86%, transparent); mask-image: linear-gradient(to bottom, #000 86%, transparent); }
 .ub-toggle { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 8px auto 0; }
 .ub-toggle:hover { background: var(--bg-hover); color: var(--text-1); }
 .ub-toggle:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: 2px; }
@@ -5187,20 +5224,48 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 
 /* 1) 消息内图片缩略图网格（会话 228-1142: 渲染在用户气泡外部、靠右；下方 6px 间距衔接气泡）
  * plan-246-1236 S7: 网格占满用户消息列宽并从右侧往左排，超过 5 张换行后第二行仍右对齐。 */
-.msg-image-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; max-width: 100%; }
+.msg-image-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; max-width: 100%; }
 .turn-item-user > .msg-image-grid {
   align-self: stretch;
   width: 100%;
   max-width: 100%;
   justify-content: flex-end;
 }
-.msg-image-thumb {
-  width: 150px; height: 110px; object-fit: cover; border-radius: var(--r-md);
-  border: 1px solid var(--border); background: var(--bg-muted);
-  cursor: zoom-in; transition: border-color var(--dur-fast), transform var(--dur-fast);
-  flex: 0 0 150px;
+.msg-image-thumb-wrap {
+  position: relative;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--dur-2) var(--ease-standard);
+  cursor: zoom-in;
 }
-.msg-image-thumb:hover { border-color: var(--text-3); transform: translateY(-1px); }
+.msg-image-thumb-wrap:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+.msg-image-thumb {
+  width: 156px;
+  height: 112px;
+  object-fit: cover;
+  display: block;
+  background: var(--bg-muted);
+}
+.msg-image-meta {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
 
 /* 2) Markdown 图片（点击进全局查看器） */
 .md-img { max-width: 100%; border-radius: var(--r-md); cursor: zoom-in; }
@@ -5265,12 +5330,42 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .gallery-zoom-pct:focus-visible,
 .gallery-nav:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85), 0 0 0 4px rgba(0, 0, 0, 0.45); }
 /* 图片外的空白区域可点（触发蒙层关闭）；图片本身在 onClick 中 stopPropagation */
-.gallery-stage { cursor: zoom-out; }
-.gallery-stage.zoomed { cursor: grab; }
-.gallery-stage { position: absolute; inset: 0; display: flex; overflow: hidden; }
-.gallery-stage.zoomed { overflow: auto; cursor: grab; }
-.gallery-stage.zoomed.dragging { cursor: grabbing; }
-.gallery-img { margin: auto; display: block; user-select: none; }
+.gallery-stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: zoom-out;
+  user-select: none;
+}
+.gallery-stage.shifted { cursor: zoom-out; }
+.gallery-stage.dragging,
+.gallery-stage.dragging * { cursor: grabbing !important; }
+
+.gallery-transform-layer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+  will-change: transform;
+  cursor: zoom-in;
+}
+.gallery-stage.shifted .gallery-transform-layer {
+  cursor: grab;
+}
+.gallery-transform-layer.animating {
+  transition: transform var(--dur-2) var(--ease-standard);
+}
+
+.gallery-img {
+  margin: auto;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: auto;
+}
 .gallery-nav {
   position: absolute; top: 50%; transform: translateY(-50%);
   width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
@@ -5288,11 +5383,15 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .gallery-zoom-btn {
   width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
   border-radius: 50%; border: none; background: transparent; color: #fff; cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), opacity var(--dur-2) var(--ease-standard);
 }
-.gallery-zoom-btn:hover { background: rgba(255, 255, 255, 0.16); }
+.gallery-zoom-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.16); }
+.gallery-zoom-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .gallery-zoom-pct {
-  min-width: 54px; padding: 0 4px; border: none; background: transparent;
-  color: #fff; font-size: 12px; cursor: pointer;
+  min-width: 58px; padding: 0 6px; border: none; background: transparent;
+  color: #fff; font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums;
+  text-align: center; border-radius: 999px; height: 26px;
+  transition: color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
 }
 .gallery-zoom-pct:hover { color: var(--accent); }
 .gallery-counter { position: absolute; bottom: 24px; right: 22px; color: rgba(255, 255, 255, 0.75); font-size: 12px; z-index: 2; }

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type ScheduledTaskOut } from "../api/client";
 import { useChatStore } from "../store/chat";
 import {
-  IconCheckSquare, IconClipboard, IconFileText, IconInfo,
+  IconCheckSquare, IconFileText, IconInfo,
   IconTarget, IconX, IconZap,
 } from "./icons";
 import { ScheduledTaskFormModal, cronToForm, type TaskForm } from "./settings/ScheduledTaskFormModal";
@@ -18,7 +18,9 @@ function SwitchRow({ checked, onChange }: { checked: boolean; onChange: (v: bool
 
 /** 任务模板（对齐 zcode 自动化页） */
 const IDLE_TEMPLATES = [
-  { icon: <IconClipboard size={15} />, name: "Git 站会摘要", desc: "每周五总结这一周发生的事情。", schedule: "最早可用时段", cron: "0 13 * * 5", prompt: "总结本周 git 提交、模块变化与待跟进事项，生成站会摘要。" },
+  // 「站会摘要」与下面的「发布简报」同为「读代码现状、产出摘要文档」，用同一个文档图形；
+  // 原先用 IconClipboard 画出来是复制图标，同列表里两种摘要用了不同语义的图。
+  { icon: <IconFileText size={15} />, name: "Git 站会摘要", desc: "每周五总结这一周发生的事情。", schedule: "最早可用时段", cron: "0 13 * * 5", prompt: "总结本周 git 提交、模块变化与待跟进事项，生成站会摘要。" },
   { icon: <IconZap size={15} />, name: "CI 失败与不稳定测试报告", desc: "汇总近期 CI 失败和不稳定测试，并分析可能原因。", schedule: "最早可用时段", cron: "0 13 * * *", prompt: "汇总近期 CI 失败和不稳定测试，并分析可能原因。" },
   { icon: <IconCheckSquare size={15} />, name: "文档同步检查", desc: "检查 README、docs、配置说明和使用示例是否与当前代码一致。", schedule: "最早可用时段", cron: "0 13 * * 3", prompt: "检查 README、docs、配置说明和使用示例是否与当前代码一致，列出不一致处。" },
 ];

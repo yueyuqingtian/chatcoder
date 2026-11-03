@@ -42,9 +42,10 @@ export function normalizeApprovalMode(mode: string | null | undefined): Approval
 }
 
 /** plan-238-1210 (A2): 引用 chip 的可序列化形态（与 ComposerCore.ComposerRef 同构）。
- *  plan-282-1441（#9）：新增 "mcp"（连接器引用）。 */
+ *  plan-282-1441（#9）：新增 "mcp"（连接器引用）。
+ *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹引用）。 */
 export interface ComposerRefDraft {
-  kind: "file" | "skill" | "mcp" | "plugin";
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin";
   value: string;
   label: string;
 }

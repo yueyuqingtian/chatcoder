@@ -2,7 +2,7 @@
 // 修复: data: URL → loadFile / stdout 安全 / 全局错误捕获 / 图标
 // plan-75-335：libuv 线程池须在首次异步 IO 前配置（默认 4，提高到 8 增加主进程 IO 并行度）。
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || "8";
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, Notification } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -1840,6 +1840,47 @@ ipcMain.handle("power:setKeepAwake", (_e, on) => {
   return _psbId !== null;
 });
 
+// ── IPC:任务完成系统通知（R4）──
+// 三档语义由渲染层按全局设置（task_notify_mode）传入：
+//   always     始终弹；
+//   unfocused  仅主窗未聚焦/不可见/已最小化时弹（默认）——用户正看着窗口就不打扰；
+//   off        不弹。
+// 点击通知：还原/聚焦主窗，并通过 app:focusSession 让渲染层切回对应会话
+// （App.tsx 已监听该通道，与宠物面板「查看会话」同一路径）。
+ipcMain.handle("app:notifyTask", (_e, payload) => {
+  try {
+    const mode = String(payload?.mode || "unfocused");
+    if (mode === "off") return false;
+    if (mode !== "always") {
+      const focused = !!mainWindow && !mainWindow.isDestroyed()
+        && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused();
+      if (focused) return false;
+    }
+    if (!Notification.isSupported()) return false;
+    const sessionId = Number(payload?.sessionId ?? 0) || null;
+    const notification = new Notification({
+      title: String(payload?.title || "chatcoder"),
+      body: String(payload?.body || ""),
+    });
+    notification.on("click", () => {
+      try {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        if (sessionId) mainWindow.webContents.send("app:focusSession", sessionId);
+      } catch (err) {
+        logErr("[chatcoder] 通知点击跳转失败:", err && err.message);
+      }
+    });
+    notification.show();
+    return true;
+  } catch (err) {
+    logErr("[chatcoder] 任务完成通知失败:", err && err.message);
+    return false;
+  }
+});
+
 // ── IPC:窗口 chrome 状态（plan-114-450）──
 // preload 在**文档解析前**同步读取，写入 <html> 的 data-maximized / data-native-corners——
 // 这两个属性决定「窗口四角由 DWM 原生圆角裁剪，还是由 CSS 自绘圆角」。
@@ -2238,6 +2279,11 @@ if (!gotLock) {
 // ── 应用生命周期 ──
 app.whenReady().then(async () => {
   log("[chatcoder] app ready, isPackaged =", app.isPackaged);
+  // R4：任务完成系统通知。Windows 下必须先设 AppUserModelID，否则 Notification 被系统
+  //   静默丢弃（没报错也不弹）；取值与 package.json 的 build.appId / 快捷方式保持一致。
+  if (process.platform === "win32") {
+    try { app.setAppUserModelId("com.chatcoder.desktop"); } catch (err) { logErr("[chatcoder] setAppUserModelId 失败:", err && err.message); }
+  }
   // Cordis 兼容插件在后台加载，不阻塞窗口与后端启动；结果通过 cordis:status 查询
   void cordisHost.load().catch((e) => logErr("[cordis] 启动加载失败：", e && e.message));
   // 后端启动需要数秒，延迟同步连接器；失败只记日志，之后安装或重新加载时会再次同步

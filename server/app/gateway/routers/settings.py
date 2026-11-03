@@ -72,6 +72,16 @@ def _tool_card_sections(value) -> dict[str, bool]:
     return out
 
 
+# 任务完成系统通知的三档取值（桌面端 Notification）
+_NOTIFY_MODES = ("always", "unfocused", "off")
+
+
+def _notify_mode(value) -> str:
+    """任务完成通知档位：只认 always / unfocused / off，其余一律回落 unfocused。"""
+    text = str(value or "").strip().lower()
+    return text if text in _NOTIFY_MODES else "unfocused"
+
+
 # ── 工作目录 ──
 
 class WorkspaceOut(BaseModel):
@@ -165,6 +175,9 @@ def load_persisted_workspace() -> None:
     # plan-156-619 S2：消息搜索入口开关（默认关闭，关闭时只隐藏入口按钮，Ctrl+F 仍可用）
     if "show_message_search" in data:
         settings.show_message_search = bool(data["show_message_search"])
+    # 任务完成系统通知档位：与 PUT 同口径夹紧，否则重启后回落为默认档
+    if "task_notify_mode" in data:
+        settings.task_notify_mode = _notify_mode(data["task_notify_mode"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
     # 采样温度与最大输出：与 PUT 同口径夹紧，启动即生效（否则重启后回落到环境变量或默认值）
@@ -383,6 +396,8 @@ class GlobalSettingsOut(BaseModel):
     show_todos: bool = True  # 消息流显示 todos 卡片
     # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起
     show_message_search: bool = False
+    # 任务完成系统通知（仅桌面版）：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭
+    task_notify_mode: str = "unfocused"
     # v3.0 (plan-88): 计划模式允许访问工作区外路径
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
@@ -507,6 +522,8 @@ class GlobalSettingsIn(BaseModel):
     enhanced_search: bool | None = None
     show_todos: bool | None = None
     show_message_search: bool | None = None
+    # 任务完成系统通知档位（always / unfocused / off）
+    task_notify_mode: str | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     # v36 (plan-321-1600 R2): 工作目录外读取自动审批
@@ -597,6 +614,8 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         ripgrep_source=(_rg.source if (_rg := locate_ripgrep()) else "none"),
         show_todos=data.get("show_todos", True),
         show_message_search=data.get("show_message_search", False),
+        # 任务完成系统通知档位（夹紧，缺省回落运行时值；默认 unfocused）
+        task_notify_mode=_notify_mode(data.get("task_notify_mode", settings.task_notify_mode)),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
@@ -783,6 +802,11 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.show_message_search is not None:
         data["show_message_search"] = body.show_message_search
         settings.show_message_search = body.show_message_search
+    # 任务完成系统通知档位（三档，非法值回落 unfocused；前端据此决定是否弹系统通知）
+    if body.task_notify_mode is not None:
+        _nm = _notify_mode(body.task_notify_mode)
+        data["task_notify_mode"] = _nm
+        settings.task_notify_mode = _nm
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
         settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access

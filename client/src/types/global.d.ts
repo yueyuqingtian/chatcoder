@@ -55,6 +55,14 @@ declare global {
       onWindowMotion?: (cb: (payload: { active?: boolean }) => void) => () => void;
       getUsername?: () => Promise<string>;
       setKeepAwake?: (on: boolean) => Promise<boolean>;
+      /** 任务完成系统通知（仅桌面版）：mode 决定是否弹窗，主进程判定窗口聚焦状态；
+       *  返回 true 表示已弹出（未弹/非桌面端为 false），点击通知回到 sessionId 对应会话。 */
+      notifyTaskFinished?: (payload: {
+        mode: "always" | "unfocused" | "off";
+        title: string;
+        body: string;
+        sessionId?: number | null;
+      }) => Promise<boolean>;
       /** 主题偏好同步（主进程落盘，下次启动 loading 页按此适配深浅色） */
       setThemePref?: (theme: "light" | "dark") => void;
       /** UI 偏好备份（plan-73-344）：localStorage 之外的第二落盘通道（启动时取较新者） */

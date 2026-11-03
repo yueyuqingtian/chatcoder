@@ -58,6 +58,8 @@ export function GeneralPanel() {
     enhanced_search: true,
     show_message_search: false,
     suggestion_enabled: false,
+    // 任务完成系统通知档位（仅桌面版）：always / unfocused / off
+    task_notify_mode: "unfocused" as "always" | "unfocused" | "off",
     agent_retry_intervals: "10,20,30",
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
@@ -68,6 +70,8 @@ export function GeneralPanel() {
   });
   /** 增强搜索实际使用的 rg 来源（只读，由后端探测；不随设置一起回写） */
   const [rgSource, setRgSource] = useState<"bundled" | "path" | "none" | undefined>(undefined);
+  /** 是否运行在桌面版（Electron）：任务完成通知依赖主进程 Notification，网页版不展示该设置 */
+  const hasDesktopApi = typeof window !== "undefined" && !!window.chatcoderAPI?.notifyTaskFinished;
 
   // S4（plan-41-197）：改为「修改即保存」——移除底部保存按钮，所有项在改动后
   // 300ms 内自动落盘（config.json），与外观/模型等页操作逻辑统一。
@@ -158,6 +162,9 @@ export function GeneralPanel() {
         enhanced_search: g.enhanced_search !== false,
         show_message_search: g.show_message_search === true,
         suggestion_enabled: g.suggestion_enabled === true,
+        task_notify_mode: g.task_notify_mode === "always" || g.task_notify_mode === "off"
+          ? g.task_notify_mode
+          : "unfocused",
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
@@ -236,6 +243,23 @@ export function GeneralPanel() {
         <Row title={t("gp.suggestion")} desc={t("gp.suggestion_desc")}>
           <Sw checked={cfg.suggestion_enabled} onChange={(v) => patch({ suggestion_enabled: v })} />
         </Row>
+        {/* R4：任务完成系统通知（三档）。仅桌面版可见——网页版没有 Electron 通知能力，
+            选项会恒不生效，因此直接不展示这一行。 */}
+        {hasDesktopApi && (
+          <Row title={t("gp.task_notify")} desc={t("gp.task_notify_desc")}>
+            <Select
+              value={cfg.task_notify_mode}
+              onChange={(v) => patch({ task_notify_mode: v as "always" | "unfocused" | "off" })}
+              options={[
+                { value: "always", label: t("gp.task_notify_always") },
+                { value: "unfocused", label: t("gp.task_notify_unfocused") },
+                { value: "off", label: t("gp.task_notify_off") },
+              ]}
+              style={{ minWidth: 200 }}
+              aria-label={t("gp.task_notify")}
+            />
+          </Row>
+        )}
         {/* 采样温度与单次最大输出：修改即保存。部分模型（Claude 系、思考模式）由适配器固定，不受此项影响 */}
         <Row title="工具轮温度" desc="工具调用轮次的采样温度（0–2）。数值越低输出越稳定，代码修改类任务通常偏低。">
           <Slider

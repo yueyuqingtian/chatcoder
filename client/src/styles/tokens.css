@@ -562,8 +562,11 @@
   --sidebar-hover: color-mix(in oklab, var(--text-1) 5%, transparent);
   --sidebar-selected: color-mix(in oklab, var(--text-1) 9%, transparent);
   --sidebar-paper-dark: oklch(18.5% 0.003 80);
-  /* 用户消息气泡：中性底 */
-  --bubble-user: color-mix(in oklab, var(--text-1) 6%, transparent);
+  /* 用户消息气泡：中性底。
+   * plan-633-2604：原来用 color-mix(text-1 6%) 叠透明——深色主题下等于「近白 6% 盖在深底上」，
+   * 渲染出来是一块比面板更亮的灰块，配上边框/内距就成了「深色大卡片」。改引既有实底令牌：
+   * 浅色=白、深色=neutral-800，气泡自身即是一层干净的浅面，不再需要靠边框撑层次。 */
+  --bubble-user: var(--bg-elevated);
   /* 兼容补齐 */
   --ok: var(--success);
   --radius: var(--r-md);

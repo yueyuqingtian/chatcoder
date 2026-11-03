@@ -55,6 +55,8 @@ export interface PerfSnapshot {
     virtualMeasure: number;
     /** plan-586-2374：运动期 + 视口外被跳过的测量次数 */
     virtualMeasureSkipped: number;
+    /** plan-633-2604：测得 0 高度并回退到缓存/估算的次数（隐藏标签保活时的 RO 回调） */
+    virtualMeasureZero: number;
   };
 }
 
@@ -97,6 +99,7 @@ let derivationCounts = {
   browserResize: 0,
   virtualMeasure: 0,
   virtualMeasureSkipped: 0,
+  virtualMeasureZero: 0,
 };
 
 /** 四舍五入到 0.1ms（报告里不必给更高精度）。 */
@@ -162,7 +165,7 @@ export function reset(): void {
   componentCounts = { messageFlowCore: 0, turnGroup: 0, streamingTail: 0, taskSummary: 0, filePanel: 0 };
   derivationCounts = {
     timelineBuild: 0, filePreviewRequest: 0, terminalFit: 0, browserResize: 0,
-    virtualMeasure: 0, virtualMeasureSkipped: 0,
+    virtualMeasure: 0, virtualMeasureSkipped: 0, virtualMeasureZero: 0,
   };
 }
 

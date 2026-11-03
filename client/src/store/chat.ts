@@ -6,6 +6,8 @@ import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, Debug
 import { wsClient, globalWsClient } from "../api/ws";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
+// R4：任务完成系统通知（仅桌面版，三档见设置 → 常规）
+import { notifyTaskFinished } from "../utils/taskNotify";
 import { parseServerTime } from "../utils/time";
 import { adoptWakeupTurn } from "../utils/wakeupMessages";
 import { equalJson } from "../utils/equalMessage";
@@ -801,7 +803,11 @@ const SUBSESSION_TURN_TERMINAL = new Set(["completed", "failed", "interrupted", 
 
 /** 子代理终态（plan-20261018-subagent-status-fix）：一旦进入这些状态，任何
  *  「启动 / 进度」类事件都不得把它改回 running——迟到重放的 agent.started 尤其常见
- *  （断线补发、resume_subagent / continue_subagent 会再次广播）。 */
+ *  （断线补发）。
+ *
+ *  plan-20261030-subagent-resume-status：续跑（resume/continue）是合法的「重新开始」，
+ *  它广播的 agent.started 带 resumed=true，不走这条「终态不可逆」规则——否则子代理
+ *  已在继续输出消息，界面却永远停在红色失败。 */
 export const TERMINAL_SUBAGENT_STATUS = new Set(["done", "completed", "failed", "cancelled", "terminated"]);
 
 /** plan-565-2323 G11：轮次**真正结束**的状态。
@@ -838,13 +844,19 @@ function mergeSubagentMeta(
     const status = turnAborted && OPEN_SUBAGENT_STATUS.has(rawStatus) ? "terminated" : rawStatus;
 
     // 终态单向不可逆：本地已进入终态（done/failed/cancelled）时，绝不被服务端滞后的开放态
-    // （running/in_progress/pending）或误算的 terminated 覆盖回退
-    const prevTerminal = p?.status === "done" || p?.status === "failed" || p?.status === "cancelled";
-    const finalStatus = prevTerminal && OPEN_SUBAGENT_STATUS.has(String(it.status))
-      ? p!.status
-      : (p?.status === "done" && status === "terminated"
-        ? "done"
-        : (p?.status === "running" && it.status === "pending" ? "running" : status));
+    // （running/in_progress/pending）或误算的 terminated 覆盖回退。
+    //
+    // plan-20261030-subagent-resume-status：failed **可以**被服务端的开放态纠正。
+    // 子代理失败/暂停后可以续跑（resume_subagent / continue_subagent），后端会把
+    // agents.status 与 tasks 都改回运行——旧实现把这一律当成「滞后」回退成 failed，
+    // 于是子代理在继续输出消息，卡片与面板却永远停在红色失败。
+    // done 仍然严格单向（完成就是完成）；cancelled 是用户主动终止，不自动复活。
+    const prevStatus = String(p?.status ?? "");
+    const serverOpen = OPEN_SUBAGENT_STATUS.has(String(it.status)) && status !== "terminated";
+    let finalStatus = status;
+    if (prevStatus === "done") finalStatus = "done";
+    else if (prevStatus === "running" && it.status === "pending") finalStatus = "running";
+    else if (prevStatus === "failed" && serverOpen) finalStatus = "running";
 
     next[it.agent_id] = {
       name: it.name || p?.name || `子代理 #${it.agent_id}`,
@@ -852,7 +864,9 @@ function mergeSubagentMeta(
       taskId: it.task_id ?? p?.taskId ?? null,
       // plan-156-624：运行中不得把 updated_at 当结束时刻（该值只在启动/进度时推进）
       startedAt: it.created_at ?? p?.startedAt ?? null,
-      endedAt: (finalStatus === "done" || finalStatus === "failed"
+      // plan-20261030-subagent-resume-status：paused 同样要固定「用时」终点——
+      // 暂停后可续跑，但这一段的计时已经停了，不能让面板继续按当前时间累加。
+      endedAt: (finalStatus === "done" || finalStatus === "failed" || finalStatus === "paused"
         || finalStatus === "cancelled" || finalStatus === "terminated")
         ? (it.updated_at ?? p?.endedAt ?? null)
         : null,
@@ -863,6 +877,9 @@ function mergeSubagentMeta(
       spawnMessageId: it.spawn_message_id ?? p?.spawnMessageId ?? null,
       messageCount: it.message_count ?? p?.messageCount ?? 0,
       status: finalStatus,
+      // plan-20261030-subagent-resume-status：续跑成功后旧失败原因必须清掉，
+      // 否则卡片与面板还会把上一次的错误原样挂在运行中的条目下面。
+      ...(finalStatus === "running" && p?.status !== "running" ? { error: null } : {}),
     };
   }
   for (const [idStr, m] of Object.entries(prev)) {
@@ -870,7 +887,9 @@ function mergeSubagentMeta(
     if (next[id]) continue;
     // plan-565-2323 G11：所属轮次已结束的本地残留条目直接丢弃，不再「因仍在运行而保留」
     if (m.turnId != null && endedTurnIds.has(m.turnId)) continue;
-    if (m.status === "running" || m.status === "in_progress") next[id] = m;
+    // plan-20261030-subagent-resume-status：失败条目在列表里暂时缺席（事件先到、REST 稍后）
+    // 时也要保留——续跑刚广播完 agent.started 的窗口里，丢掉它会让卡片直接消失。
+    if (m.status === "running" || m.status === "in_progress" || m.status === "failed") next[id] = m;
   }
   return next;
 }
@@ -3335,6 +3354,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
             pendingPlanTurn,
           };
         });
+        // R4：任务完成系统通知（三档：always / unfocused / off）。放在 isCurrentEvent 的
+        // 提前退出之前——别的会话的轮次结束同样值得提示（用户可能正切到别处干活）。
+        // plan-633-2604：补发批次必须跳过。重连 / 进入会话时 ws 会把缓冲里的历史事件逐条
+        // 补发并打上 replay 标记，若照此弹通知，一次重连就会把一批旧任务全部提醒一遍。
+        if (!(payload as { replay?: boolean }).replay) {
+          notifyTaskFinished({
+            turnId,
+            sessionId: turnCompletedSid,
+            ok: true,
+            sessionTitle: get().sessions.find((x) => x.id === turnCompletedSid)?.title,
+            detail: (payload.summary as string) ?? null,
+          });
+        }
         if (!isCurrentEvent) break;
         get().refreshMessages();
         get().refreshTasks();
@@ -3384,6 +3416,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : {}),
           ...(failSid != null ? patchSession(s, failSid, (x) => setSessionRunning(x, false)) : {}),
         }));
+        // R4：任务失败同样发系统通知（正文带失败原因）；非当前会话的失败也提示。
+        // plan-633-2604：与 turn.completed 同口径——补发批次（replay）不弹，避免重连后刷旧失败通知。
+        if (!(payload as { replay?: boolean }).replay) {
+          notifyTaskFinished({
+            turnId,
+            sessionId: failSid,
+            ok: false,
+            sessionTitle: get().sessions.find((x) => x.id === failSid)?.title,
+            detail: failReason,
+          });
+        }
         if (!isCurrentEvent) break;
         get().setFlowError(failReason, turnId);
         get().refreshMessages();
@@ -3504,6 +3547,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const doneAid = Number(payload.agent_id ?? 0);
         const doneKind = String(payload.kind ?? "");
         const doneSid = Number(payload.session_id ?? 0);
+        /* plan-20261030-subagent-resume-status：完成事件带真实终态（subagent.py 的
+           _sync_task_status 在 done/failed/cancelled 时都会广播 agent.completed）。
+           旧实线一律写 done——暂停 / 失败会先被刷成绿色「已完成」，接着再被
+           subagent.failed 改回来；一旦后者丢失（断线重连），界面就把失败写成完成。 */
+        const doneRawStatus = String(payload.status ?? "done");
+        const doneStatus = doneRawStatus === "done" || doneRawStatus === "completed" ? "done" : doneRawStatus;
         // plan-20261019-subagent-ghost: 携带 session_id 的事件必须属于当前会话（串会话防护）
         if (doneSid && doneSid !== get().currentSessionId) break;
         if (doneAid) {
@@ -3520,9 +3569,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...s.subagentMeta,
                 [doneAid]: {
                   ...(prev ?? {
-                    name: `子代理 #${doneAid}`, turnId: null, taskId: null, status: "done",
+                    name: `子代理 #${doneAid}`, turnId: null, taskId: null, status: doneStatus,
                   }),
-                  status: "done",
+                  status: doneStatus,
                   endedAt: prev?.endedAt ?? doneAt,
                 },
               },
@@ -3627,11 +3676,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           set((s) => {
             const prev = s.subagentMeta[aid];
             /* plan-20261018-subagent-status-fix：终态不可逆。
-               `agent.started` 可能迟到或重放（断线补发、resume/continue 会再次广播），
-               旧实现无条件把 status 写回 running 并把 endedAt 清空——已完成甚至失败的
-               子代理就此永久停在「运行中」，工具卡与右面板同时失真。
-               与 loadSessionSubagents 的合并口径保持一致：终态只允许补齐元数据。 */
-            const prevTerminal = prev != null && TERMINAL_SUBAGENT_STATUS.has(String(prev.status));
+               `agent.started` 可能迟到或重放（断线补发），旧实现无条件把 status 写回
+               running 并把 endedAt 清空——已完成甚至失败的子代理就此永久停在「运行中」。
+               plan-20261030-subagent-resume-status：**续跑广播带 resumed=true**，那是
+               真真切切重新开跑（后端同时把 tasks 拉回 in_progress），必须恢复运行态
+               并清掉上一次的失败原因与结束时刻；否则消息流在更新、状态却一直是失败。 */
+            const resumedAgain = payload.resumed === true;
+            const prevTerminal = !resumedAgain && prev != null
+              && TERMINAL_SUBAGENT_STATUS.has(String(prev.status));
             const status = prevTerminal ? prev!.status : "running";
             return {
               subagentMeta: {
@@ -3641,11 +3693,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   turnId: turnId ?? prev?.turnId ?? null,
                   taskId: taskId ?? prev?.taskId ?? null,
                   status,
-                  // plan-156-624：启动即记开始时刻——此前只有 REST 回填才有 startedAt，
-                  // 首次打开子代理面板时计时条无数据。重复广播时保留最早的开始时刻。
-                  startedAt: prev?.startedAt ?? new Date().toISOString(),
-                  // 终态条目保留原结束时刻，不再被清空
+                  // plan-156-624：启动即记开始时刻；重复广播时保留最早的开始时刻。
+                  // 续跑是新一轮交付，重新计时才有意义（与 SubagentPanel 的「用时」一致）。
+                  startedAt: resumedAgain ? new Date().toISOString()
+                    : (prev?.startedAt ?? new Date().toISOString()),
+                  // 终态条目保留原结束时刻；续跑则清空（这一段还在跑）
                   endedAt: prevTerminal ? (prev!.endedAt ?? null) : null,
+                  // 续跑清掉上次的失败/暂停原因，否则卡片与面板会继续红着写旧错误
+                  ...(resumedAgain ? { error: null } : {}),
                   programId: programId ?? prev?.programId ?? null,
                   spawnMessageId: spawnMessageId ?? prev?.spawnMessageId ?? null,
                 },
@@ -3884,19 +3939,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const taskId = Number(payload.task_id);
         const status = String(payload.status ?? "");
         const note = payload.note != null ? String(payload.note) : null;
-        // v19: 子代理状态随任务状态同步（in_progress→running / done / failed / cancelled）
+        // v19: 子代理状态随任务状态同步（in_progress→running / done / failed）
+        // plan-20261030-subagent-resume-status：续跑时后端先把子任务拉回 in_progress，
+        // 这里必须真的把卡片与面板改回运行中并清掉上一次的失败原因——否则「消息流在更新，
+        // 状态还红色失败」。同时：已完成的条目不因迟到的 in_progress 复活；
+        // cancelled 归为 stopped（用户主动终止不是失败）。
         if (status) {
           const mapped = status === "in_progress" ? "running"
             : status === "done" ? "done"
             : status === "failed" ? "failed"
-            : status === "cancelled" ? "failed"
+            : status === "cancelled" ? "cancelled"
             : null;
           if (mapped) {
             set((s) => {
               const hit = Object.entries(s.subagentMeta).find(([, m]) => m.taskId === taskId);
               if (!hit) return {};
               const aid = Number(hit[0]);
-              return { subagentMeta: { ...s.subagentMeta, [aid]: { ...s.subagentMeta[aid], status: mapped } } };
+              const cur = s.subagentMeta[aid];
+              if (mapped === "running" && cur.status === "done") return {};
+              return {
+                subagentMeta: {
+                  ...s.subagentMeta,
+                  [aid]: {
+                    ...cur,
+                    status: mapped,
+                    // 续跑正式开始：上一轮的失败原因与结束时刻都不能再挂着
+                    ...(mapped === "running" && cur.status !== "running"
+                      ? { error: null, endedAt: null }
+                      : {}),
+                  },
+                },
+              };
             });
           }
         }

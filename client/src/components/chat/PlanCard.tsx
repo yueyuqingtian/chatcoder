@@ -7,7 +7,7 @@
  *  · 待确认时卡片底部多一行「取消 / 确认执行」（参考图没有确认流程，这是本软件必需的决策入口）。
  * 预览去掉文档里的状态注释（<!-- plan-status … -->，此前被原样显示成一行乱码）。 */
 import { memo, useEffect, useRef, useState } from "react";
-import { IconArrowRight, IconCheck, IconClipboard, IconCopy } from "../icons";
+import { IconArrowRight, IconCheck, IconCopy, IconFileText } from "../icons";
 import { MarkdownContent } from "../MarkdownContent";
 import { Button, Collapse, IconButton, Tooltip } from "../ui";
 import { useChatStore } from "../../store/chat";
@@ -196,7 +196,10 @@ export const PlanCard = memo(function PlanCard({
     >
       <div className="plan-card-head">
         <span className="plan-card-label">
-          <IconClipboard size={14} />
+          {/* 计划文档用「文档」图形。原先用 IconClipboard，它映射到 antd 的 snippets
+              （两块重叠的纸）——画出来是复制图标，与「这是一份计划文档」的语义相反，
+              还和右侧「复制计划」按钮撞图（用户反馈「左边怎么是复制图标」）。 */}
+          <IconFileText size={14} />
           <span>计划</span>
           {status && (
             <span className="plan-card-status" data-tone={status.tone}>

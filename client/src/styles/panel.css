@@ -11,8 +11,16 @@
 .subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 12px 16px; }
 .subagent-panel .subagent-panel-title { align-items: flex-start; }
 .subagent-panel .subagent-panel-icon { padding-top: 3px; }
-.subagent-panel .subagent-panel-facts { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
-.subagent-panel .subagent-panel-meta { font-variant-numeric: tabular-nums; }
+/* plan-630-2590：facts 单行、不换行。
+ *
+ * 为什么改掉 flex-wrap：「已用 N 分 M 秒」每秒变宽（59 秒→1 分 0 秒时位数还会跳），
+ * 配合 wrap 会在窄面板里反复折行与回行，头部高度因此每秒变化一次 → 下方
+ * `.subagent-panel-body{flex:1}` 的滚动视口高度跟着变 → 贴底内核的 ResizeObserver
+ * 每次重写 scrollTop，用户看到的就是「没滚轮、消息流却自己在动」。
+ * 改为单行 + 溢出省略（与 global.css 里 facts 的原始设计一致），头部高度恒定；
+ * 用时再给固定槽位，秒数变化不推动同行其它项左右移动。 */
+.subagent-panel .subagent-panel-facts { flex-wrap: nowrap; overflow: hidden; }
+.subagent-panel .subagent-panel-meta { flex: 0 0 auto; min-width: 7.5em; text-align: right; font-variant-numeric: tabular-nums; }
 .subagent-panel .subagent-panel-facts .subagent-panel-stop { margin-left: auto; }
 .subagent-panel-details { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; line-height: 18px; color: var(--text-2); }
 .subagent-panel-facts > .btn::before { content: none; }
@@ -158,60 +166,80 @@
 }
 @container (min-width: 620px) { .rp-launch-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .rp-launch-inner { max-width: 560px; } }
 
-/* ── ③ 摘要（plan-128-518 重做）──────────────────────────────
- * 四个固定模块（进度 / 产物 / 子代理 / 拓展），每个模块是一块**封闭**的圆角面（一层，不嵌套）；
- * 模块之间只靠 10px 留白分隔，不再用开口的细横线。
- * 统一左轴（plan-20261014-summary）：表头图标、状态图标、行图标、进度条都从 12px 起，标题统一从 36px 起
- *   （前导槽位 16px + 间距 8px），扫读时列不跳。字号三档（13 / 12.5 / 12px），颜色三层（--text-1 / -2 / -3）。
- * 状态色只落在图标与进度条上，文字保持中性。行：[前导图标] 标题 …… 备注；悬停只变底色。
- * 圆角同心：卡片 12px = 内边距 4px + 行 8px。 */
-.ts-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px 12px 24px; }
-.ts-card {
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-lg);
-  background: var(--surface-inset);
-}
-/* 表头：[图标] 标题 …… [计数徽标] [折叠箭头]；高度固定，折叠/展开不抖动 */
+/* ── ③ 摘要（plan-633-2604 改版：去卡片化）──────────────────
+ * 四个固定模块（进度 / 产物 / 子代理 / 拓展）。此前每个模块是一块带边框 + 底色 + 阴影的封闭卡片，
+ * 四个框把窄面板切得很碎、也很占地方；现在改为「浅灰小标题 + 圆角图标块 + 文字 + 大留白」，
+ * 分组之间只靠 18px 留白分隔，状态色只落在图标与进度条上。
+ * 统一左轴：行内图标块 24px + 行内距 8px + 间距 10px，标题文字统一从 42px 起，扫读时列不跳。
+ * 字号三档（13 / 12.5 / 12px），颜色三层（--text-1 / -2 / -3）。
+ *
+ * plan-633-2604 滚动修复：卡片必须 flex:0 0 auto —— 滚动由外层 .rp-body 承担。
+ * 此前 .ts-panel 是 flex 列容器、卡片默认 flex-shrink:1 且带 overflow:hidden，
+ * 内容超长时卡片被逐张压扁、scrollHeight 恒等于 clientHeight，滚动条永不出现。 */
+.ts-panel { display: flex; flex-direction: column; gap: 18px; padding: 14px 10px 28px; }
+.ts-panel > .ts-card { flex: 0 0 auto; }
+/* 去卡片化后只剩裁切职责（Collapse 的网格高度动画需要），不再有边框/底色/阴影 */
+.ts-card { overflow: hidden; }
+/* 表头：[图标] 标题 …… [计数] [折叠箭头]；高度固定，折叠/展开不抖动 */
 .ts-card-head {
   display: flex; align-items: center; gap: 8px;
-  width: 100%; height: 40px; padding: 0 12px;
-  /* plan-621-2572：清理非令牌圆角计算值，统一采用 var(--r-lg) */
-  border: 0; border-radius: var(--r-lg);
-  background: transparent; color: var(--text-1);
+  width: 100%; height: 28px; padding: 0 8px;
+  border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
   font: inherit; text-align: left; cursor: pointer;
+  transition: color var(--dur-2) var(--ease-standard);
 }
 .ts-card-head:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
-.ts-card-ic { flex: none; display: inline-flex; color: var(--text-2); transition: color var(--dur-2) var(--ease-standard); }
-.ts-card-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-1); }
+.ts-card-ic { flex: none; display: inline-flex; color: var(--text-3); transition: color var(--dur-2) var(--ease-standard); }
+.ts-card-title {
+  flex: 1; min-width: 0;
+  font-size: 12.5px; font-weight: 500; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color var(--dur-2) var(--ease-standard);
+}
 .ts-card-end { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+/* 计数用同行的淡色小字（原灰底胶囊在去卡片化后显得过重） */
+.ts-card-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ts-chev {
   flex: none; width: 16px; height: 16px;
   display: inline-grid; place-items: center; color: var(--text-3);
   transition: rotate var(--dur-3) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
 .ts-card[data-fold="1"] .ts-chev { rotate: -90deg; }
+/* 悬停只提亮标题与箭头，不再整条变底色（去卡片化后没有底色可变） */
+.ts-card-head:hover { color: var(--text-1); }
 .ts-card-head:hover .ts-card-ic,
+.ts-card-head:hover .ts-card-title,
 .ts-card-head:hover .ts-chev { color: var(--text-1); }
-.ts-card-body { display: flex; flex-direction: column; gap: 8px; padding: 0 4px 6px; }
+.ts-card-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 0; }
 
-/* 行：进度步骤 / 产物文件 / 子代理 / 拓展共用：[前导图标 16px 槽位] 标题 …… 备注 */
-.ts-rows { display: flex; flex-direction: column; gap: 1px; }
+/* 行：进度步骤 / 产物文件 / 子代理 / 拓展共用：[圆角图标块 24px] 标题 …… 备注 */
+.ts-rows { display: flex; flex-direction: column; gap: 2px; }
 .ts-row {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%; min-height: 32px; padding: 0 8px;
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; min-height: 36px; padding: 0 8px;
   border: 0; border-radius: var(--r-md);
   background: transparent; color: var(--text-1);
   font: inherit; text-align: left;
 }
-button.ts-row { cursor: pointer; transition: background var(--dur-2) var(--ease-standard); }
+button.ts-row { cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
 button.ts-row:hover:not(:disabled) { background: var(--bg-hover); }
 button.ts-row:disabled { cursor: default; }
 button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
-.ts-row-lead { flex: none; width: 16px; height: 16px; display: inline-grid; place-items: center; color: var(--text-2); }
+/* plan-633-2604：前导槽位由 16px 纯图标改为 24px 圆角图标块（浅灰底），
+ * 这一层底色承担「行与行之间的视觉锚点」，去卡片化后仍然分得清每一行。 */
+.ts-row-lead {
+  flex: none; width: 24px; height: 24px;
+  display: inline-grid; place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--bg-muted); color: var(--text-2);
+}
 .ts-row-title { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ts-row-note { flex: none; max-width: 45%; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 运行中的步骤加粗；未开始的次之；已完成的淡化（图标已表达完成，文字不再抢眼） */
-.ts-row.is-running .ts-row-title { font-weight: 600; }
+/* 运行中的步骤突出高亮与进行态感知；未开始的次之；已完成的淡化 */
+.ts-row.is-running { background: var(--accent-soft); }
+.ts-row.is-running .ts-row-title { font-weight: 600; color: var(--accent); }
+.ts-row.is-running .ts-row-lead { background: transparent; color: var(--accent); }
 .ts-row.is-pending .ts-row-title { color: var(--text-2); }
 .ts-row.is-done .ts-row-title { color: var(--text-3); }
 .ts-row.is-goal .ts-row-lead { color: var(--accent); }
@@ -219,13 +247,46 @@ button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info)
 /* 进度组：状态行（前导图标 + 状态 + 百分比）+ 说明 + 细进度条，组内 6px；与下方步骤列表之间留 8px */
 .ts-progress { display: flex; flex-direction: column; gap: 6px; }
 .ts-status {
-  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto;
-  align-items: center; column-gap: 8px; row-gap: 4px;
-  min-height: 28px; padding: 0 8px;
+  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center; column-gap: 10px; row-gap: 4px;
+  min-height: 32px; padding: 0 8px;
 }
-.ts-status-lead { width: 16px; height: 16px; display: inline-grid; place-items: center; }
-/* 运行中的总览：静态圆点（步骤行已有转圈，这里不再转，避免两个转圈重复） */
-.ts-status-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--accent); }
+/* 与行图标块同尺寸同轴（plan-633-2604）：状态行与下方步骤的文字左缘对齐 */
+.ts-status-lead {
+  width: 24px; height: 24px;
+  display: inline-grid; place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--bg-muted);
+}
+.ts-status-title { min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 空闲：标题降一档，与其它状态区分开，但仍是完整的一行 */
+.ts-status-title.is-pending { font-weight: 500; color: var(--text-2); }
+/* 备注槽位定宽（右对齐）：百分比从 0 变到 100 时右侧不跳动 */
+.ts-status-note { min-width: 2.5em; text-align: right; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 说明对齐到标题左缘（跨过前导槽位），不另起一条左轴 */
+.ts-status-hint { grid-column: 2 / -1; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.ts-bar { height: 4px; margin: 0 8px; border-radius: var(--r-pill); background: color-mix(in oklab, var(--text-1) 8%, transparent); overflow: hidden; }
+.ts-bar-fill { display: block; height: 100%; width: calc(var(--ratio, 0) * 100%); border-radius: var(--r-pill); background: var(--accent); transition: width var(--dur-spring) var(--spring-soft), background-color var(--dur-3) var(--ease-standard); }
+/* 进度条随状态取色：完成 = 成功色，停止 / 待续接 / 待确认 = 警示色，执行中 = 主色，
+   已结束但有未完成项 = 中性灰（plan-20261025-progress-keep：清单保留展示，不再用主色冒充在跑） */
+.ts-bar[data-tone="done"] .ts-bar-fill { background: var(--success); }
+.ts-bar[data-tone="paused"] .ts-bar-fill { background: var(--warning); }
+.ts-bar[data-tone="pending"] .ts-bar-fill { background: color-mix(in oklab, var(--text-1) 32%, transparent); }
+/* 待确认：按钮与说明文字对齐到同一条标题线（24px 图标块 + 8px 行内距 + 10px 间距 = 42px） */
+.ts-plan-actions { display: flex; gap: 8px; padding: 2px 8px 0 42px; }
+/* 模块无内容时的一行说明：版面恒定，不动态增删模块 */
+.ts-empty { margin: 0; padding: 2px 8px 4px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
+/* 运行中的总览呼吸圆点 */
+.ts-status-dot {
+  width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent);
+  animation: ts-dot-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}
+@keyframes ts-dot-pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent); }
+  70% { transform: scale(1); box-shadow: 0 0 0 5px transparent; }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 transparent; }
+}
 .ts-status-title { min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 空闲：标题降一档，与其它状态区分开，但仍是完整的一行 */
 .ts-status-title.is-pending { font-weight: 500; color: var(--text-2); }

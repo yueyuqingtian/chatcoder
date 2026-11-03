@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import (
+    CredentialRevealOut,
     ModelOut,
     ProviderCreate,
     ProviderCredentialCreate,
@@ -319,6 +320,15 @@ async def create_credential(provider_id: int, body: ProviderCredentialCreate,
     )
     cred = await credential_service.get_credential(db, cid)
     return await _cred_to_out(cred)
+
+
+@router.get("/credentials/{credential_id}/reveal", response_model=CredentialRevealOut)
+async def reveal_credential_key(credential_id: int, db: AsyncSession = Depends(get_db)):
+    """按凭据 id 获取完整明文 API Key（供用户在设置界面点击显隐时安全核对/复制）。"""
+    cred = await credential_service.get_credential(db, credential_id)
+    if not cred:
+        raise HTTPException(404, "账号不存在或已被移除")
+    return CredentialRevealOut(api_key=cred.api_key or "")
 
 
 @router.patch("/credentials/{credential_id}", response_model=ProviderCredentialOut)

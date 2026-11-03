@@ -258,6 +258,57 @@ def ensure_tool_pairing(messages: list[ChatMessage]) -> list[ChatMessage]:
     return fixed
 
 
+def ensure_conversation_lead(messages: list[ChatMessage], language: str = "auto") -> list[ChatMessage]:
+    """确保「首条非 system/developer 消息」是 user（幂等，plan-599-2520）。
+
+    压缩会把早期 user 全部折进摘要，保留区常从 assistant(tool_calls) 起切；
+    一旦整段一条 user 都没有，OpenAI / Anthropic / ta3 都会判请求非法，客户端
+    只看到通用「AI服务异常，请稍后重试」，重试必然同样失败（历史事故 605/2520）。
+
+    三条压缩路径（落库式、auto_compact、emergency_compact）统一在出口调用本函数，
+    保证产物一定以 user 开场；已有 user 打头时原样返回。
+    """
+    if not messages:
+        return messages
+    _at = next(
+        (i for i, m in enumerate(messages) if m.role not in ("system", "developer")),
+        len(messages),
+    )
+    if _at < len(messages) and messages[_at].role == "user":
+        return messages
+    _zh = language == "zh"
+    _lead = ChatMessage(
+        role="user",
+        content=("（上下文已压缩，请接着上面的进度继续当前任务。）" if _zh
+                 else "(Context was compacted; continue the current task from the summary above.)"),
+    )
+    return messages[:_at] + [_lead] + messages[_at:]
+
+
+def finalize_compacted_messages(
+    messages: list[ChatMessage], language: str = "auto",
+) -> list[ChatMessage]:
+    """压缩产物的统一收尾（plan-599-2520，幂等）。
+
+    历史缺陷：三条压缩路径各自只做了其中一部分修补——
+    - 落库式：`_prune_messages_for_compaction` 只保证内存裁剪的配对平衡；
+    - `auto_compact`：补占位之后才拼上 `pre_boundary`，边界尾部可能留下悬空
+      `assistant(tool_calls)`；
+    - `emergency_compact`：只 repair + ensure，既没有 user 承接也没做序列规范化。
+    结果是「压缩成功后第一次请求就报错」，客户端只看到通用「AI服务异常」。
+
+    这里把顺序固定成：补 id → 补齐/清理配对 → 规范化顺序 → 保证 user 开场。
+    任何压缩路径在返回前都过一遍，出站序列由构造保证合法，而不是靠各路径自觉。
+    """
+    if not messages:
+        return messages
+    out = repair_tool_call_ids(messages)
+    out = ensure_tool_pairing(out)
+    out = normalize_tool_sequence(out)
+    out = ensure_conversation_lead(out, language)
+    return out
+
+
 def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
     """v8 + v36 + v37 根治：强制 OpenAI & Gemini 协议合规。
     
@@ -769,26 +820,10 @@ async def auto_compact(
     result = system_msgs + [boundary_msg, summary_msg] + [m for r in keep_rounds_data for m in r]
     if readstate_msg is not None:
         result = [readstate_msg] + result
-    result = repair_tool_call_ids(result)
-    result = ensure_tool_pairing(result)
+    # plan-599-2520：pre_boundary 必须先拼进来再修配对——旧实现拼在 repair/ensure 之后，
+    # 若边界正中 assistant(tool_calls) 与其结果之间，pre_boundary 尾部就是悬空调用。
     result = pre_boundary + result
-
-    # plan-598-2517：压缩后必须保留至少一条 user 打头，否则整段请求非法。
-    # 事故（会话 605 turn=2520）：保留区从 assistant(tool_calls) 起切，压缩后一条 user
-    # 也没有；ta3 侧再把 summary(developer)→assistant、boundary 丢弃，最终消息序列变成
-    # `system → assistant → assistant`，网关直接拒请求，客户端只看到「AI服务异常，请稍后重试」，
-    # 重试 3 次必然同样失败（用户重发「继续」后才恢复）。
-    # 这里在摘要之后补一条 user 承接，明确「上下文已压缩、接着上次进度继续」。
-    if not any(m.role == "user" for m in result):
-        _lead = ChatMessage(
-            role="user",
-            content=("（上下文已压缩，请接着上面的进度继续当前任务。）" if _zh
-                     else "(Context was compacted; continue the current task from the summary above.)"),
-        )
-        # 插到边界/摘要之后、保留区之前，保证「摘要即上文、user 即当前请求」的语义
-        _at = next((i for i, m in enumerate(result) if m.role not in ("system", "developer")),
-                   len(result))
-        result = result[:_at] + [_lead] + result[_at:]
+    return finalize_compacted_messages(result, language)
 
     logger.info(
         "[auto_compact] %d -> %d 条消息（折叠 %d 回合/%d tokens 为摘要，ReadState 提醒 %d 文件）",
@@ -801,7 +836,9 @@ async def auto_compact(
 # 紧急压缩（仅在 API 报 context overflow 错误时调用）
 # ---------------------------------------------------------------------------
 
-def emergency_compact(messages: list[ChatMessage], context_window: int) -> list[ChatMessage]:
+def emergency_compact(
+    messages: list[ChatMessage], context_window: int, language: str = "auto",
+) -> list[ChatMessage]:
     """紧急压缩：当 API 报 context overflow 时调用。
 
     参照 codex 的 emergency 策略：
@@ -890,11 +927,11 @@ def emergency_compact(messages: list[ChatMessage], context_window: int) -> list[
     summary_msg = ChatMessage(role="system", content=summary)
 
     # 组装：system(原) + summary + 最近回合
+    # plan-599-2520：统一走 finalize（补 id → 配对 → 规范化 → user 承接）。
+    # 旧实现只做 repair + ensure：摘要仍写成 system，保留区可能以 assistant 开场，
+    # 也没有 user 承接，压缩后第一次请求直接被网关判非法。
     result = system_msgs + [summary_msg] + [m for r in keep_rounds_data for m in r]
-
-    # 确保配对完整（先修复重复/空 id，避免 Gemini 等网关 400）
-    result = repair_tool_call_ids(result)
-    result = ensure_tool_pairing(result)
+    result = finalize_compacted_messages(result, language)
 
     logger.info(
         "[emergency] %d -> %d 条消息 (折叠 %d 个回合为摘要)",

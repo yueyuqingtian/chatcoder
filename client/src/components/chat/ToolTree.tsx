@@ -35,10 +35,7 @@ import { toolLabel } from "./toolLabels";
 import { ClampBlock } from "./ClampBlock";
 import { Tooltip } from "../ui/Tooltip";
 import {
-  IconFileRead, IconFileWrite, IconFolder, IconGlobe, IconTerminal,
-  IconUsers, IconBox, IconZap, IconFlask, IconGitBranch, IconBrain,
-  IconSpinner, IconX, IconImage, IconChevronRight, IconCheck,
-  IconFilePatch, IconFileSearch, IconOperationCluster, IconChecklist, IconCopy, IconInfo,
+  IconSpinner, IconX, IconChevronRight, IconCheck, IconCopy, IconInfo,
 } from "../icons";
 
 /** plan-20261016-ux（问题 4）：命令类工具——完成后即使没有输出也可展开，展开区给出「没有输出」提示卡 */
@@ -74,34 +71,15 @@ function browserSummary(leaf: ToolLeaf): string {
   }
 }
 
-const TOOL_ICONS: Record<string, React.ReactNode> = {
-  fs_read: <IconFileRead size={16} />,
-  fs_write: <IconFileWrite size={16} />,
-  fs_list: <IconFolder size={16} />,
-  fs_grep: <IconFileSearch size={16} />,
-  terminal_exec: <IconTerminal size={16} />,
-  web_fetch: <IconGlobe size={16} />,
-  web_search: <IconFileSearch size={16} />,
-  codebase_search: <IconFileSearch size={16} />,
-  git_diff: <IconGitBranch size={16} />,
-  git_root: <IconGitBranch size={16} />,
-  spawn_subagent: <IconUsers size={16} />,
-  ask_subagent: <IconBrain size={16} />,
-  collect_results: <IconBox size={16} />,
-  ci_run: <IconFlask size={16} />,
-  memory_search: <IconBrain size={16} />,
-  editor_apply_diff: <IconFilePatch size={16} />,
-  view_image: <IconImage size={16} />,
-  todo_write: <IconChecklist size={16} />,
-  ask_user_question: <IconBrain size={16} />,
-  mcp: <IconBox size={16} />,
-};
-
-/** plan-91-393：工具图标改为按语义设计、带运行态动画的 ToolGlyph；TOOL_ICONS 仅作兼容保留 */
+/** plan-91-393：工具图标一律走按语义设计、带运行态动画的 ToolGlyph。
+ *
+ * 这里曾有一张 `TOOL_ICONS` 兼容表，plan-630-2590 已删除：它把 fs_read / fs_write /
+ * editor_apply_diff 三个动作都映射到 antd 的 `fileText` 同一字形，是「读、写、改长得一样」的
+ * 源头；而且它是 antd 实心图形，与下面明细行的 ToolGlyph 线条图标并排时粗细不匀。
+ * 图标语义的**唯一事实源**是 `iconkit/ToolGlyphs.tsx` 的 `TOOL_KEY`，不要再另起一张表。 */
 function toolIcon(tool: string): React.ReactNode {
   return <ToolGlyph tool={tool} size={16} />;
 }
-void TOOL_ICONS; void IconZap;
 
 /** plan-474-2105 组 C：主代理被邮箱打断时，工具结果会留下「转后台 / 让出等待」标记。
  *  这两种都不是失败——用中性标签单独表达，避免落到红色失败态里误导用户。 */
@@ -171,6 +149,38 @@ function clusterVerb(leaves: ToolLeaf[]): string {
   if (leaves.every((l) => l.tool.startsWith("browser_"))) return "浏览";
   if (leaves.every((l) => LOOKUP_TOOLS.has(l.tool))) return "查阅";
   return "操作";
+}
+
+/** 合并行图标：必须和动作词一一对应（plan-630-2590 返工修复）。
+ *
+ * 两个问题一起修：
+ *  ① **四类动作共用一张图**：此前无论查阅 / 执行 / 浏览 / 操作都渲染 `IconOperationCluster`，
+ *     动作词区分了语义，图标却在拖后腿——用户扫一眼消息流分辨不出这行到底在干什么；
+ *  ② **两套图标体系并排**：合并行用 antd 实心图形，而它下面展开的明细行用 `ToolGlyph` 自绘线条，
+ *     同一列里一粗一细、一实一虚，观感就是「大小不一致」。
+ *
+ * 现在统一走 `ToolGlyph`：合并行与明细行同源，线宽由 `opticalStroke` 按尺寸换算，
+ * 16px 下与相邻行完全一致；四类动作各取一个专属字形。
+ *  · 查阅 = 读取（文件 + 扫描线）——读文件 / 搜索 / 看结构，统一是「获取信息」；
+ *  · 执行 = 终端（提示符 + 光标）——跑命令这件事的独占符号；
+ *  · 浏览 = 地球——全是浏览器工具时；
+ *  · 操作 = 九宫块 + 十字（`cluster`）——「一叠不同的调用」本身就是这里要表达的意思。
+ *
+ * 两个必须守住的约束：
+ *  ① 不要退回 antd 图标：那张表里 fs_read / fs_write / editor_apply_diff 都映射到
+ *    `fileText` 同一个字形，用它做合并行图标等于又制造一次重复；
+ *  ② 「操作」不能借任何具体工具的字形（曾经借用 collect_results 的层叠图），
+ *    否则展开明细后第一行就是同一张图，看起来像「这行和里面那条是同一个操作」。
+ *    所以给它单独开了 `cluster` 这个只用于聚合的字形。 */
+const CLUSTER_TOOL: Record<string, string> = {
+  查阅: "fs_read",
+  执行: "terminal_exec",
+  浏览: "browser_navigate",
+  操作: "cluster",
+};
+
+function ClusterGlyph({ verb }: { verb: string }) {
+  return <ToolGlyph tool={CLUSTER_TOOL[verb] ?? "cluster"} size={16} />;
 }
 
 /** 展开卡片顶部的命令头（plan-20261025-shell 需求 1）：提示符 + 完整命令 + 复制。
@@ -870,7 +880,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
     <div className="tc-node tc-explore">
       <div className={"tc-row has-output tc-explore-row" + (expanded ? " expanded" : "")}
           data-tool-state={running ? "running" : failed ? "fail" : "done"} onClick={() => setExpanded(!expanded)}>
-        <span className="tc-icon"><IconOperationCluster size={16} /></span>
+        <span className="tc-icon"><ClusterGlyph verb={verb} /></span>
         {running ? (
           <span className="tc-verb-roll" key={tick}>
             <span className="tc-verb text-shine">{rollingText || verb}</span>
@@ -923,7 +933,7 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
     <div className="tc-node">
       <div className={"tc-row has-output tc-write" + (expanded ? " expanded" : "")}
           data-tool-state={running ? "running" : failed ? "fail" : "done"} onClick={() => setExpanded(!expanded)}>
-        <span className="tc-icon"><IconFileWrite size={16} /></span>
+        <span className="tc-icon"><ToolGlyph tool="fs_write" size={16} /></span>
         {/* plan-20261025-shell（需求 1）：「编辑 文件名 目录 ×3 +N -M」——次数放到对象之后作计数 */}
         <span className={"tc-verb" + (running ? " text-shine" : "")}>编辑</span>
         {path && (

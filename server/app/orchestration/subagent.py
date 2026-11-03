@@ -505,14 +505,18 @@ class SubagentManager:
 
     async def _finish_paused(self, handle: "SubagentHandle", *, agent_id: int, task_id: int | None,
                              spec: dict, reason: str) -> None:
-        """暂停：保存检查点（可续跑）。不通知唤醒——由主代理在用户“继续”时决定续跑。"""
+        """暂停：保存检查点（可续跑）。不通知唤醒——由主代理在用户“继续”时决定续跑。
+
+        plan-20261030-subagent-resume-status：状态词统一为 paused。此前这里把事件状态写成
+        failed（tasks 表没有 paused，只能落 failed），前端据此把「暂停可续跑」渲染成红色失败。
+        """
         handle.status = "paused"
         handle.waiting = False
         handle.resumable = True
         handle.error = f"已暂停（{reason}），进度已保存，可续跑"
         await _persist_agent_state(agent_id, "paused", _checkpoint_payload(handle, spec, reason))
         await _sync_task(self.session_id, task_id, "failed", handle.error[:300], agent_id=agent_id)
-        await _broadcast_subagent_failed(self.session_id, agent_id, handle.error, "failed")
+        await _broadcast_subagent_failed(self.session_id, agent_id, handle.error, "paused")
         await self._after_terminal(handle, notify=False)
         logger.warning("[subagent] %s 已暂停（%s），检查点已保存", agent_id, reason)
 
@@ -1070,6 +1074,11 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
         n for n in manager._completion_queue if int(n.get("agent_id") or 0) != agent_id
     ]
     await _persist_agent_state(agent_id, "running", ck)
+    # plan-20261030-subagent-resume-status：续跑要把子任务状态拉回 in_progress。
+    # 暂停时 tasks 表只接受 failed（无 paused 态），不纠正就会一直是红叉任务，
+    # 而子代理其实已经在继续跑了——这就是「消息流在更新、状态还是失败」的直接原因。
+    await _sync_task(session_id, spec.get("task_id"), "in_progress",
+                     "已从断点续跑，进度已保留", agent_id=agent_id)
     handle.task = asyncio.create_task(manager._drive(
         handle, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
         messages=messages, cancel_event=cancel_event or asyncio.Event(),
@@ -1079,8 +1088,11 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
         from app.orchestration.agent_events import broadcast
         await broadcast(session_id, {
             "event": "agent.started",
+            # resumed=True 明确告知前端「这是续跑，不是迟到的重放启动」：
+            # 前端据此把已进入失败/暂停终态的条目恢复成运行中并清空失败原因。
             "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name,
-                        "turn_id": turn_id, "task_id": spec.get("task_id")},
+                        "turn_id": turn_id, "task_id": spec.get("task_id"),
+                        "resumed": True},
         })
         await broadcast(session_id, {
             "event": "subagent.pending",
@@ -1143,6 +1155,9 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
         n for n in manager._completion_queue if int(n.get("agent_id") or 0) != agent_id
     ]
     await _persist_agent_state(agent_id, "running", _checkpoint_payload(live, spec, "continue"))
+    # plan-20261030-subagent-resume-status：续做同样把子任务拉回 in_progress（同 resume_subagent）
+    await _sync_task(session_id, spec.get("task_id"), "in_progress",
+                     "已在原子代理上下文中继续", agent_id=agent_id)
     live.task = asyncio.create_task(manager._drive(
         live, agent_id=agent_id, task_id=spec.get("task_id"), turn_id=turn_id,
         messages=messages, cancel_event=asyncio.Event(),
@@ -1153,7 +1168,7 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
         await broadcast(session_id, {
             "event": "agent.started",
             "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name or live.task_title,
-                        "turn_id": turn_id, "task_id": spec.get("task_id")},
+                        "turn_id": turn_id, "task_id": spec.get("task_id"), "resumed": True},
         })
     except Exception:
         logger.debug("[subagent] 续做事件广播失败(非阻塞)", exc_info=True)

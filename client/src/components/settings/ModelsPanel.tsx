@@ -15,7 +15,7 @@ import {
   api, type ModelOut, type ProviderCredentialOut, type ProviderOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff } from "../icons";
+import { IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff, IconCopy, IconCheck } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag, Tooltip } from "../ui";
@@ -452,6 +452,8 @@ export function ModelsPanel() {
   /** Esc 已回滚并退出编辑：用来拦掉随后由卸载触发的 onBlur，避免又提交一次 */
   const renameCancelledRef = useRef(false);
   const [showKey, setShowKey] = useState(false);
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [copyingKey, setCopyingKey] = useState(false);
   const [showAllCreds, setShowAllCreds] = useState(false);
 
   const closeConfirm = () => setConfirmDialog((d) => ({ ...d, open: false }));
@@ -597,6 +599,7 @@ export function ModelsPanel() {
   useEffect(() => {
     setRenamingName(false);
     setShowKey(false);
+    setRevealedKey(null);
     setShowAllCreds(false);
     // plan-537-2245：重命名的快照与取消标记同属临时态，切走必须清，
     // 否则上一家的快照会当成下一家改名时的回滚目标
@@ -961,31 +964,71 @@ export function ModelsPanel() {
                   <label>API Key</label>
                   <div className="models-field-ctl">
                     <Input
-                      key={`key-${selected.id}-${primaryCred?.id ?? "new"}`}
+                      key={`key-${selected.id}-${primaryCred?.id ?? "new"}-${showKey ? "revealed" : "masked"}`}
                       type={showKey ? "text" : "password"}
-                      defaultValue={primaryCred?.api_key_preview || ""}
+                      defaultValue={showKey ? (revealedKey || primaryCred?.api_key_preview || "") : (primaryCred?.api_key_preview || "")}
                       placeholder="sk-..."
                       wrapClassName="models-key-wrap"
-                      // plan-537-2245：框里预填的是掩码（前4 + •••• + 后4）。聚焦即全选，
-                      // 任何输入都会整体替换掩码，不会产生"掩码 + 新字符"的混合值。
+                      // plan-537-2245：聚焦即全选，任何输入都会整体替换，不会产生"掩码 + 新字符"的混合值。
                       onFocus={(e) => e.currentTarget.select()}
                       suffix={
-                        <IconButton size="sm" title={showKey ? "隐藏密钥" : "显示密钥"}
-                          icon={showKey ? <IconEyeOff size={14} /> : <IconEye size={14} />}
-                          onClick={() => setShowKey((v) => !v)} />
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                          {primaryCred?.has_api_key && (
+                            <IconButton
+                              size="sm"
+                              title={copyingKey ? "已复制密钥" : "复制密钥"}
+                              icon={copyingKey ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                              onClick={async () => {
+                                try {
+                                  let k = revealedKey;
+                                  if (!k && primaryCred) {
+                                    const res = await api.revealProviderCredentialKey(primaryCred.id);
+                                    k = res.api_key;
+                                    setRevealedKey(k);
+                                  }
+                                  if (k) {
+                                    await navigator.clipboard.writeText(k);
+                                    setCopyingKey(true);
+                                    setTimeout(() => setCopyingKey(false), 1800);
+                                  }
+                                } catch (err) {
+                                  notify(String(err));
+                                }
+                              }}
+                            />
+                          )}
+                          <IconButton
+                            size="sm"
+                            title={showKey ? "隐藏密钥" : "显示明文密钥"}
+                            icon={showKey ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+                            onClick={async () => {
+                              if (showKey) {
+                                setShowKey(false);
+                                return;
+                              }
+                              try {
+                                if (primaryCred?.has_api_key && !revealedKey) {
+                                  const res = await api.revealProviderCredentialKey(primaryCred.id);
+                                  setRevealedKey(res.api_key);
+                                }
+                                setShowKey(true);
+                              } catch (err) {
+                                notify(String(err));
+                              }
+                            }}
+                          />
+                        </div>
                       }
                       onBlur={async (e) => {
                         const v = e.target.value.trim();
-                        // 未改动（含仍是后端返回的掩码）→ 不写库，避免把掩码当成真 key 保存
-                        if (!v || v === (primaryCred?.api_key_preview || "")) return;
-                        // plan-537-2245：兜底——掩码必然含占位符（后端 _mask_key 口径为
-                        // 前4 + "••••" + 后4，U+2022）。在掩码上改几个字符时上面的相等判断
-                        // 拦不住，会把这个混合值当成新 Key 覆盖真 Key，凭据随即失效。
-                        // 含连续两个以上占位符一律不提交；真实 Key 不会出现 • 或 ?。
+                        // 未改动（含仍是后端返回的掩码或与已加载的明文相同）→ 不写库
+                        if (!v || v === (primaryCred?.api_key_preview || "") || (revealedKey && v === revealedKey)) return;
+                        // plan-537-2245：含连续两个以上占位符一律不提交；真实 Key 不会出现 • 或 ?。
                         if (/[•?]{2,}/.test(v)) return;
                         try {
                           if (primaryCred) await api.updateProviderCredential(primaryCred.id, { api_key: v });
                           else await api.createProviderCredential(selected.id, { label: "默认凭据", api_key: v, priority: 0, is_active: true } as never);
+                          setRevealedKey(v);
                           await loadDetail(selected, true, true);
                           await load();
                         } catch (err) { notify(String(err)); }

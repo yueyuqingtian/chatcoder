@@ -282,6 +282,9 @@ class Settings(BaseSettings):
     show_todos: bool = True
     # plan-156-619 S2：消息区搜索入口按钮（左上角）。默认关闭；关闭只隐藏入口，Ctrl+F 仍可唤起搜索条
     show_message_search: bool = False
+    # 任务完成系统通知档位（设置 → 常规）：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭。
+    # 只影响桌面端（Electron Notification）的弹窗行为，与后端任务本身无关。
+    task_notify_mode: str = "unfocused"
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""

@@ -39,6 +39,32 @@ function summaryLine(text: string): string {
     .trim();
 }
 
+/** 子代理用时标签（plan-633-2604）。
+ *  秒级刷新只影响这一段文字：此前 nowMs 是面板组件的 state，运行中每秒 setState 会让
+ *  整个面板树（含同一棵树里的 MessageFlow）重渲染一次，虚拟列表随之重算可见范围并重写各项 top，
+ *  子代理消息流「停止滚动后仍持续抖动」因此被放大。订阅 ticker 收进本子组件后，
+ *  每秒只重渲染这一行文本。 */
+function ElapsedLabel({ startedAt, endedAt, running, visible }: {
+  startedAt: string;
+  endedAt?: string | null;
+  running: boolean;
+  visible: boolean;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running || !visible) return;
+    setNowMs(Date.now()); // 恢复可见时先对齐一次，再开始秒级刷新
+    return subscribeTick((now) => setNowMs(now));
+  }, [running, visible]);
+  const startedMs = parseUtc(startedAt);
+  const endedMs = endedAt ? parseUtc(endedAt) : null;
+  if (startedMs == null) return null;
+  const sec = Math.max(0, Math.round(((endedMs ?? nowMs) - startedMs) / 1000));
+  const min = Math.floor(sec / 60);
+  const label = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
+  return <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{label}</span>;
+}
+
 /** 工作流节点头：第一行是所属路径（完整显示，超出才省略）；第二行是尝试次数、评估结论与“详情”开关；
  * 摘要、计划、验证、评估问题与尝试记录都收在详情里，默认不占消息流的空间 */
 function WorkflowNodeHead({ wf }: { wf: WorkflowNodeBrief }) {
@@ -259,22 +285,10 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
   // v36 (plan-321-1600 M2): 头部“用时”在运行中需每秒刷新（否则计时不动）。
   // S8c：订阅共享秒级 ticker（与 ToolTree / WorkTimer 共用同一个 setInterval）。
   // plan-75-334 阶段3：面板不可见时不订阅——隐藏标签不再每秒 setState。
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!running || !visible) return;
-    setNowMs(Date.now()); // 恢复可见时先对齐一次，再开始秒级刷新
-    return subscribeTick((now) => setNowMs(now));
-  }, [running, visible]);
-
-  // v36: 用时 = 起止时间差（运行中取当前时间；无起始时间时不展示）
-  const startedMs = meta?.startedAt ? parseUtc(meta.startedAt) : null;
-  const endedMs = meta?.endedAt ? parseUtc(meta.endedAt) : null;
-  let elapsedLabel = "";
-  if (startedMs != null) {
-    const sec = Math.max(0, Math.round(((endedMs ?? nowMs) - startedMs) / 1000));
-    const min = Math.floor(sec / 60);
-    elapsedLabel = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
-  }
+  // plan-633-2604：秒级刷新下沉到 <ElapsedLabel>，**不再 set 本组件的 state**。
+  //  此前每秒 setNowMs 会让整个面板（含嵌在同一棵树里的 MessageFlow）每秒重渲染一次：
+  //  虚拟列表在 directDomUpdates 下会重算可见范围并重写各项 top，正是子代理消息流
+  //  「停止滚动后仍持续抖动」的放大器之一。现在只有那一小段文字随秒刷新。
 
   if (threadId == null) return <Empty size="sm" title="未指定子代理" />;
 
@@ -338,9 +352,15 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
                   : meta?.status ?? ""}
               </span>
             </span>
-            {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量 */}
-            {elapsedLabel && (
-              <span className="subagent-panel-meta">{running ? "已用 " : "用时 "}{elapsedLabel}</span>
+            {/* v36 (plan-321-1600 M2): 用时 / 变更文件数 / token 用量
+                plan-633-2604：秒级刷新收进 <ElapsedLabel>，避免整面消息流每秒重渲染 */}
+            {meta?.startedAt && (
+              <ElapsedLabel
+                startedAt={meta.startedAt}
+                endedAt={meta.endedAt}
+                running={running}
+                visible={visible}
+              />
             )}
             <Button size="xs" variant="ghost" onClick={() => setFactsOpen((value) => !value)} aria-expanded={factsOpen}>详情</Button>
             {/* plan-565-2323 G8：运行中才给终止入口；与状态/元信息同组右对齐，不挤占标题行 */}

@@ -337,6 +337,9 @@ interface UiState extends UiPrefs {
   terminalFont: string;
   /** plan-156-619 S2：消息区搜索入口按钮（左上角）；默认关闭，关闭只隐藏入口，Ctrl+F 仍可用 */
   showMessageSearch: boolean;
+  /** 任务完成系统通知档位（设置 → 常规）：always 始终 / unfocused 仅窗口未聚焦时（默认）/ off 关闭。
+   *  chat.ts 在轮次结束时读它决定要不要弹系统通知（仅桌面端生效）。 */
+  taskNotifyMode: "always" | "unfocused" | "off";
   refreshGlobalFlags: () => Promise<void>;
   /** plan-26-126 M5：本次开启玻璃**未即时生效**（极少数环境需重启）——
    *  仅用于设置页一次性提示，不持久化、不常驻。 */
@@ -356,6 +359,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   terminalFont: "",
   // plan-156-619 S2：搜索入口默认关闭（用户要求），由后端全局设置刷新
   showMessageSearch: false,
+  // 任务完成系统通知：默认「窗口未聚焦时」，启动后由后端全局设置刷新
+  taskNotifyMode: "unfocused",
   glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
   glassRestartNotice: false, // 毛玻璃「重启生效」徽标的一次性展示开关
   consumeGlassRestartNotice: () => set({ glassRestartNotice: false }),
@@ -367,6 +372,9 @@ export const useUiStore = create<UiState>((set, get) => ({
       set({
         showTodos: data.show_todos !== false,
         showMessageSearch: data.show_message_search === true,
+        taskNotifyMode: data.task_notify_mode === "always" || data.task_notify_mode === "off"
+          ? data.task_notify_mode
+          : "unfocused",
         terminalFont: data.terminal_font || "",
       });
     } catch { /* 后端不可达时保持默认 */ }

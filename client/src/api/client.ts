@@ -287,7 +287,8 @@ export interface ProjectTreeOut {
  *  且正则无终止符会把整行吞成一个纯文本 token（发送后图标变文字）。
  *  落库结构化副本后，消息流可直接渲染出与输入框一致的带图标芯片。 */
 export interface ComposerRefOut {
-  kind: "file" | "skill" | "mcp" | "plugin";
+  /** plan-633-2604（R3）：新增 "dir"——拖入的文件夹引用（值为目录路径，AI 侧用 fs_list 查看） */
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin";
   value: string;
   label: string;
 }
@@ -1316,6 +1317,8 @@ export const api = {
 
   // ── plan-248-1258 M2.2/M2.3: 供应商凭据（多 Key/多账号）与代理 ──
   listProviderCredentials: (id: number) => get<ProviderCredentialOut[]>(`/providers/${id}/credentials`),
+  revealProviderCredentialKey: (credentialId: number) =>
+    get<{ api_key: string }>(`/credentials/${credentialId}/reveal`),
   createProviderCredential: (id: number, data: {
     label?: string; api_key?: string; token_ref?: string; priority?: number; is_active?: boolean;
   }) => post<ProviderCredentialOut>(`/providers/${id}/credentials`, data),
@@ -1850,6 +1853,8 @@ export interface GlobalSettingsOut {
   browser_headless?: boolean;
   /** 下一步建议卡开关（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词） */
   suggestion_enabled?: boolean;
+  /** 任务完成系统通知：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭 */
+  task_notify_mode?: "always" | "unfocused" | "off";
   /** plan-334-1661: 电脑操控总开关（开启后 desktop_* 工具集可用） */
   desktop_enabled?: boolean;
   /** plan-334-1661: 普通电脑操作子开关 */

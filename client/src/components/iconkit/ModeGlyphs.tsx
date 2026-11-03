@@ -1,85 +1,55 @@
-/** 执行模式 / 权限模式图标（plan-128-518）。
- *  统一规格：24 网格、1.6 描边、圆角端点；主形状 + 一处 .lx-fill 淡面作为层次，颜色全走 currentColor，
- *  由宿主行状态控制（默认次级色、选中主色、危险项错误色）。悬停微动复用 icons.css 的 .lx-* 约定，
- *  只动点睛部件，不位移整枚图标。 */
-import type { ReactNode } from "react";
-import { opticalStroke } from "../icons";
+/** 执行模式 / 权限模式图标（plan-630-2590）。
+ *
+ * 历史：plan-128-518 起为手绘 24 网格线条图标，靠 `svg.lx` + `.lx-*` 类名做悬停微动。
+ *
+ * 为什么要换成 antd 图标（用户明确要求 + 顺手修掉一个真实缺陷）：
+ *  - 视觉统一：主图标库、侧栏、右面板都已是 antd 图形，只剩输入框这两组模式图标还是自绘线条，
+ *    同屏并排时一个是实心面、一个是细线稿，重量明显不一致；
+ *  - 颜色割裂（关键）：styles/icons.css 里有一条祖先态规则会把 `data-state="open"` 浮层内的
+ *    **所有** `svg.lx` 强行染成 `--ic-accent`。模式浮层正是 `data-state="open"`，于是浮层一打开，
+ *    这 8 枚图标就整体偏红/偏橙（暖色主题下尤其明显），而同一菜单里插件/技能/连接器用的是
+ *    `svg.ic`（antd），只继承 `--text-2` 的灰。用户反馈的「一部分红、一部分黑」就是它。
+ *    改用 antd 图形后，这批图标不再带 `lx` 类名，该规则自然不再命中。
+ *
+ * 颜色仍走 `currentColor`：默认次级色、选中主色、危险项错误色全部由宿主（`.pop-item-icon`
+ * / `.cc-accent-chip` / `.is-danger`）决定，本文件不写任何颜色。
+ */
+
+import { AntIcon } from "../antd-icons/AntIcon";
+import { GLYPHS } from "../antd-icons/registry";
 
 type P = { size?: number };
 
-function Glyph({ size = 16, name, children }: P & { name: string; children: ReactNode }) {
-  return (
-    // plan-20261014-fix4：描边改为按尺寸换算的光学线宽，与其余界面图标同一笔触
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={opticalStroke(size)}
-      strokeLinecap="round" strokeLinejoin="round" aria-hidden className={`ic lx lx-${name}`}>
-      {children}
-    </svg>
-  );
+/** 智能体：自主读写的执行主体 */
+export function MgAgent({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.robot} glyphKey="robot" name="mg-agent" size={size} />;
+}
+/** 工作流：多个步骤节点串接成流水线 */
+export function MgWorkflow({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.partition} glyphKey="partition" name="mg-workflow" size={size} />;
+}
+/** 计划：先出方案再动手 */
+export function MgPlan({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.profile} glyphKey="profile" name="mg-plan" size={size} />;
+}
+/** 只读：只读不改 */
+export function MgReadonly({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.eye} glyphKey="eye" name="mg-readonly" size={size} />;
+}
+/** 目标：同心靶心 */
+export function MgGoal({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.aim} glyphKey="aim" name="mg-goal" size={size} />;
 }
 
-/** 智能体：中心实心节点 + 四向短线（自主执行），悬停时射线转 45° */
-export function MgAgent(p: P) {
-  return <Glyph {...p} name="mg-agent">
-    <circle className="lx-fill" cx="12" cy="12" r="4.2" />
-    <g className="lx-spin"><path d="M12 3.5v3M12 17.5v3M3.5 12h3M17.5 12h3" /></g>
-  </Glyph>;
+/** 每次询问：带问号的圆形提示（对应「每次都要问」的语义） */
+export function MgAsk({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.questionCircle} glyphKey="questionCircle" name="mg-ask" size={size} />;
 }
-/** 计划：清单卡片，首行已勾选 */
-export function MgPlan(p: P) {
-  return <Glyph {...p} name="mg-plan">
-    <rect className="lx-fill" x="4.5" y="3.5" width="15" height="17" rx="3" />
-    <path className="lx-draw" d="M8.2 9.2l1.5 1.5 2.7-2.9" />
-    <path d="M14.4 9.6h2M8.2 15h8" />
-  </Glyph>;
+/** 自动审批：闪电表示「不再逐条拦」 */
+export function MgAuto({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.thunderbolt} glyphKey="thunderbolt" name="mg-auto" size={size} />;
 }
-/** 工作流（plan-workflow-collab）：三个步骤节点串成一条链，末端节点为淡面（产出），悬停时末端轻移 */
-export function MgWorkflow(p: P) {
-  return <Glyph {...p} name="mg-workflow">
-    <rect x="3.5" y="4" width="6" height="6" rx="2" />
-    <path d="M9.5 7h2.5a2.5 2.5 0 0 1 2.5 2.5V14" />
-    <path d="M6.5 10v4.5a2.5 2.5 0 0 0 2.5 2.5h1" />
-    <g className="lx-nudge">
-      <rect className="lx-fill" x="10.5" y="14" width="6" height="6" rx="2" />
-      <rect x="10.5" y="14" width="6" height="6" rx="2" />
-    </g>
-  </Glyph>;
-}
-/** 只读：眼睛 + 底部短横（锁定观看），悬停时瞳孔轻移 */
-export function MgReadonly(p: P) {
-  return <Glyph {...p} name="mg-readonly">
-    <path className="lx-fill" d="M3 11.2s3.2-5.7 9-5.7 9 5.7 9 5.7-3.2 5.7-9 5.7-9-5.7-9-5.7z" />
-    <circle className="lx-nudge" cx="12" cy="11.2" r="2.5" />
-    <path d="M8.5 20.5h7" />
-  </Glyph>;
-}
-/** 目标：同心靶环 + 命中的箭，悬停时箭尾弹一下 */
-export function MgGoal(p: P) {
-  return <Glyph {...p} name="mg-goal">
-    <circle className="lx-fill" cx="11" cy="13" r="7.5" />
-    <circle cx="11" cy="13" r="3.6" />
-    <path className="lx-nudge" d="M11 13l7-7M18 6V3.2M18 6h2.8" />
-  </Glyph>;
-}
-
-/** 每次询问：盾牌内问号 */
-export function MgAsk(p: P) {
-  return <Glyph {...p} name="mg-ask">
-    <path className="lx-fill" d="M12 3.4l7 2.7v5.3c0 4.3-2.9 7.5-7 9.2-4.1-1.7-7-4.9-7-9.2V6.1z" />
-    <path className="lx-wiggle" d="M9.9 9.9a2.2 2.2 0 1 1 3.3 1.9c-.8.5-1.2 1-1.2 1.8M12 16.3h.01" />
-  </Glyph>;
-}
-/** 自动审批：盾牌内闪电 */
-export function MgAuto(p: P) {
-  return <Glyph {...p} name="mg-auto">
-    <path className="lx-fill" d="M12 3.4l7 2.7v5.3c0 4.3-2.9 7.5-7 9.2-4.1-1.7-7-4.9-7-9.2V6.1z" />
-    <path className="lx-wiggle" d="M12.8 8.2l-2.7 4h3.6l-1.5 3.6" />
-  </Glyph>;
-}
-/** 完全访问：已打开的锁（危险色由宿主 .is-danger 提供） */
-export function MgFull(p: P) {
-  return <Glyph {...p} name="mg-full">
-    <rect className="lx-fill" x="5" y="11" width="14" height="9" rx="2.6" />
-    <path className="lx-hop" d="M8.5 11V8.4a3.5 3.5 0 0 1 6.7-1.4" />
-    <circle cx="12" cy="15.5" r="1" />
-  </Glyph>;
+/** 完全访问：已打开的锁（危险色由宿主 .is-danger 提供，本文件不写颜色） */
+export function MgFull({ size = 16 }: P) {
+  return <AntIcon glyph={GLYPHS.unlock} glyphKey="unlock" name="mg-full" size={size} />;
 }

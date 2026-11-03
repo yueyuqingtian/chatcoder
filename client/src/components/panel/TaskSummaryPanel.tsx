@@ -1,11 +1,12 @@
-/** 摘要（plan-128-518 重做）：四个固定模块，始终显示，不做动态增删。
+/** 摘要（plan-128-518 建立，plan-633-2604 去卡片化）：四个固定模块，始终显示，不做动态增删。
  *
  *  ① 进度   —— 状态行（图标 + 状态 + 百分比）+ 细进度条 + 步骤列表；方案待确认的「确认执行 / 停止」、目标行也在这里；
  *  ② 产物   —— 本会话产出的文件（点击在文件面板打开），只读展示：不在这里做审核、回滚（那些操作留在消息流的改动条里）；
  *  ③ 子代理 —— 本会话派出的子代理（运行中置顶），点击打开其详情标签；
  *  ④ 拓展   —— 本会话用到的技能 / 插件 / 连接器（来自用户引用与模型调用）。
- *  每个模块是一块封闭的圆角面（一层、不嵌套），模块间只靠留白分隔；无内容时模块内给一行说明，版面保持不变。
- *  折叠状态按「会话 + 模块」写 localStorage（store/tsFold.ts）。 */
+ *  plan-633-2604：分组不再是一张带边框/底色/阴影的卡片，改为「浅灰小标题 + 圆角图标块 + 文字」，
+ *  分组间只靠 18px 留白分隔（四个框在窄面板里把版面切得太碎）。计数也从灰底徽标降为同行淡色小字。
+ *  无内容时模块内给一行说明，版面保持不变。折叠状态按「会话 + 模块」写 localStorage（store/tsFold.ts）。 */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useChatStore } from "../../store/chat";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
@@ -38,8 +39,9 @@ function pathKey(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/\/+$/, "");
 }
 
-/** 模块卡片：整条表头可点折叠。计数与箭头收在表头右侧（计数用统一徽标，与拓展行的计数同款），
- *  折叠只转角度，不挤标题（plan-20261014-summary） */
+/** 模块分组：整条表头可点折叠。计数与折叠箭头收在表头右侧。
+ *  plan-633-2604：分组去掉边框/底色/阴影后不再用灰底计数徽标（在浅灰小标题旁显得过重），
+ *  改为同行淡色小字；折叠只转角度，不挤标题（plan-20261014-summary）。 */
 function SummaryCard({ id, title, icon, count, children }: {
   id: string;
   title: string;
@@ -57,7 +59,7 @@ function SummaryCard({ id, title, icon, count, children }: {
         <span className="ts-card-ic">{icon}</span>
         <span className="ts-card-title">{title}</span>
         <span className="ts-card-end">
-          {count != null && <Badge size="sm" count>{count}</Badge>}
+          {count != null && <span className="ts-card-count">{count}</span>}
           <span className="ts-chev" aria-hidden><IconChevronDown size={14} /></span>
         </span>
       </button>

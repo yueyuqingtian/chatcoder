@@ -18,6 +18,19 @@
  *  .ic-dot    逐个弹跳的点（配合 --d 延迟）
  *
  * 所有过渡只动 transform / opacity，时长走令牌（含 --motion-scale）。
+ *
+ * ── plan-630-2590：本文件中「依赖内部部件」的规则对 antd 图标不生效 ──
+ * 图标图形已统一为 Ant Design（1024 网格实心路径），svg 内部只有 path/rect/circle，
+ * 没有 .ic-fill / .ic-ac / .ic-hand 这些手绘节点。因此下列规则当前匹配不到元素、
+ * 处于空转状态，按用户决策接受降级后**刻意保留**：
+ *   · .ic-fill 悬停双色填充淡入、.ic-ac / .ic-ac-fill 强调色点亮；
+ *   · .ic-spin / .ic-up / .ic-down / .ic-left / .ic-right / .ic-lid / .ic-swing /
+ *     .ic-pop / .ic-tilt / .ic-dot / .ic-hand / .ic-ne / .ic-needle 部件微动；
+ *   · svg.ic[data-open="true"] .ic-pane 面板开合底色。
+ * 保留而不删除的原因：同一文件里还住着 iconkit 的 .lx-* / .st-* / .tg-* 规则，
+ * 且保留等于给「将来想恢复某处动效」留了接口；无匹配元素时是零成本空转。
+ * 仍生效的是挂在**外层 svg 类名**上的整枚旋转（.ic-settings / .ic-refresh /
+ * .ic-rotate-ccw / .ic-globe / .ic-sun）与 svg.ic 自身的布局约束（overflow/flex-shrink）。
  * ═══════════════════════════════════════════════════════════ */
 
 svg.ic { overflow: visible; flex-shrink: 0; }
@@ -219,37 +232,24 @@ svg.ic[data-open="true"] .ic-pane { opacity: var(--ic-fill-active); }
 .sticker:hover .stk-eye { animation: stk-eye 2.4s var(--ease-in-out) infinite; }
 :root[data-motion="reduced"] .sticker * { animation: none !important; }
 
-/* ── 线性交互图标（plan-91-393，参考图5）：按含义各自微动 / 按下回弹 / 选中着主题色 ── */
-svg.lx { transition: transform var(--dur-spring) var(--ease-jelly), color var(--dur-2) var(--ease-standard); }
-svg.lx [class*="lx-"] { transform-box: fill-box; transform-origin: center; transition: transform var(--dur-spring) var(--spring-bouncy), opacity var(--dur-2); }
-svg.lx .lx-fill { fill: currentColor; fill-opacity: 0; transition: fill-opacity var(--dur-3) var(--ease-standard); }
-svg.lx .lx-lid { transform-origin: 0% 50%; }
-svg.lx .lx-draw { stroke-dasharray: 14; stroke-dashoffset: 0; }
-:where(button, a, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings, .ic-host):hover svg.lx {
-  .lx-pop { transform: scale(1.3) rotate(90deg); }
-  .lx-scan { transform: translate(-1px, -1px) rotate(-12deg); }
-  .lx-hop { transform: translateY(-1.5px); }
-  .lx-drop { transform: translateY(1.5px); }
-  .lx-lift { transform: translate(1px, -1px) rotate(0deg); }
-  .lx-spin { transform: rotate(45deg); }
-  .lx-zap { transform: scale(1.12); }
-  .lx-nudge { transform: translate(1px, 1px); }
-  .lx-turn { transform: rotate(300deg); }
-  .lx-turn-back { transform: rotate(-300deg); }
-  .lx-squish { transform: scaleX(0.4); }
-  .lx-lid { transform: rotate(-14deg) translateY(-1px); }
-  .lx-blink { animation: lx-blink 0.9s steps(1) infinite; }
-  .lx-wiggle { animation: lx-wiggle 0.5s var(--ease-spin) 2; }
-  .lx-draw { animation: lx-draw var(--dur-5) var(--ease-emphasized-decel); }
-  .lx-fill { fill-opacity: 0.1; }
-}
-:where(button, [role="button"], [role="tab"], .sb-nav-item, .sb-user-settings):active svg.lx { transform: scale(0.88); transition-duration: var(--dur-1); }
-:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx:not(.ic-duo) { color: var(--ic-accent); }
-:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx .lx-fill { fill-opacity: 0.16; }
+/* ── 线性交互图标（plan-91-393）：已随 plan-630-2590 删除 ──
+ *
+ * 这一组 `svg.lx` / `.lx-*` 规则原服务于手绘线条图标（图标内部路径挂 `lx-scan`、`lx-hop` 等
+ * 类名做悬停微动）。这些图标现已全部改为 Ant Design 图形，内部只有 path/rect/circle、
+ * 不再有任何 `lx-*` 节点，规则 100% 空转。
+ *
+ * 之所以直接删而不是保留：其中一条
+ *   `:is(.active, .is-active, [aria-selected="true"], [aria-current="page"], [data-state="open"]) svg.lx:not(.ic-duo)`
+ * 会把「浮层打开」当成祖先态，把浮层内**所有** `svg.lx` 强行染成 `--ic-accent`。
+ * 模式浮层根节点带 `data-state="open"`，于是执行模式/权限模式的图标一打开菜单就整体偏红偏橙，
+ * 与同一菜单里继承 `--text-2` 灰的 antd 图标形成「一半彩一半黑」（用户反馈的颜色割裂）。
+ * 这批图标改用 antd 后不再带 `lx` 类，规则失效，留着只会让下一个人误以为还有用的地方。
+ */
+
+/* plan-630-2590：`lx-blink` 的关键帧必须保留——flow.css 里工具运行态
+ * （`[data-tool-state="running"] svg.tg .tg-blink`）仍在复用它做光标闪烁。
+ * 上面删掉的是 lx 的**选择器**规则，关键帧是共享资源，不能一起删。 */
 @keyframes lx-blink { 50% { opacity: 0; } }
-@keyframes lx-wiggle { 25% { transform: rotate(-6deg); } 75% { transform: rotate(6deg); } }
-@keyframes lx-draw { from { stroke-dashoffset: 14; } }
-@media (prefers-reduced-motion: reduce) { svg.lx, svg.lx [class*="lx-"] { transition: none; animation: none !important; } }
 
 /* ── 设置导航彩色方块图标（plan-91-393，参考图4） ── */
 .sg-tile {

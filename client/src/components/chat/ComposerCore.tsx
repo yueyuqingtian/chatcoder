@@ -29,6 +29,7 @@ import {
   IconBox,
   IconPlug,
   IconFileText,
+  IconFolder,
   IconRingProgress,
   IconPuzzle,
   IconSparkles,
@@ -54,6 +55,9 @@ import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflo
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { parseRefLines } from "../../utils/refLines";
+// plan-633-2604（R3）：拖入文件夹——取出目录路径后作为 dir 引用交给 AI（AI 侧用 fs_list 查看）
+import { resolveDroppedDir, splitDroppedEntries, type DroppedEntry } from "../../utils/dirDrop";
+import { baseName } from "../iconkit/FileIcon";
 import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
@@ -82,29 +86,47 @@ export interface ComposerCoreProps {
 }
 
 /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
+export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin";
+
 export interface ComposerRef {
-  /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用 */
-  kind: "file" | "skill" | "mcp" | "plugin";
-  /** 原始值：文件为工作区相对路径，技能为技能名，连接器/插件为各自名称 */
+  /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用
+   *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹，值为目录路径，AI 侧用 fs_list 自行查看） */
+  kind: ComposerRefKind;
+  /** 原始值：文件为工作区相对路径，目录为绝对路径，技能为技能名，连接器/插件为各自名称 */
   value: string;
   /** 展示名 */
   label: string;
 }
 
-/** 引用 chips → 随消息文本追加的可读引用行（模型可见；后端仍为纯文本透传）。 */
-export function buildRefsSuffix(refs: ComposerRef[]): string {
+/** 引用 chips → 随消息文本追加的可读引用行（模型可见；后端仍为纯文本透传）。
+ *  plan-633-2604（R3）：`workspaceRoot` 为当前项目根目录，用来标注拖入的目录是否在工作区外
+ *  （只提示、不自动提权，读取仍走审批策略）。 */
+export function buildRefsSuffix(refs: ComposerRef[], workspaceRoot?: string | null): string {
   if (refs.length === 0) return "";
   const files = refs.filter((r) => r.kind === "file").map((r) => `@${r.value}`);
   const skills = refs.filter((r) => r.kind === "skill").map((r) => `$${r.value}`);
   // plan-282-1441（#9）：连接器引用——写明"使用连接器"，引导模型走对应 MCP 工具
   const connectors = refs.filter((r) => r.kind === "mcp").map((r) => r.value);
   const pluginRefs = refs.filter((r) => r.kind === "plugin").map((r) => r.value);
+  // plan-633-2604（R3）：目录引用——写明"可用 fs_list 查看"，否则模型不知道这个路径是可以翻开的
+  const dirs = refs.filter((r) => r.kind === "dir").map((r) => r.value);
   const lines: string[] = [];
   if (files.length > 0) lines.push(`引用文件：${files.join("、")}`);
+  if (dirs.length > 0) lines.push(`引用文件夹：${dirs.map((d) => withOutsideHint(d, workspaceRoot)).join("、")}（可用 fs_list 查看其中内容）`);
   if (skills.length > 0) lines.push(`使用技能：${skills.join("、")}`);
   if (connectors.length > 0) lines.push(`使用连接器：${connectors.join("、")}`);
   if (pluginRefs.length > 0) lines.push(`使用插件：${pluginRefs.join("、")}`);
   return lines.join("\n");
+}
+
+/** plan-633-2604（R3）：拖入的目录不在当前工作区内时加一句提示（不自动提权）。
+ *  用路径前缀比对（统一斜杠 / 大小写，Windows 路径不区分大小写）。 */
+function withOutsideHint(dir: string, workspaceRoot?: string | null): string {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const root = workspaceRoot ? norm(workspaceRoot) : "";
+  if (!root) return dir;
+  const inside = norm(dir) === root || norm(dir).startsWith(`${root}/`);
+  return inside ? dir : `${dir}（该目录在工作区外，读取需按审批流程）`;
 }
 
 export function ComposerCore({ variant = "default", onStarted, followFocusRequest = true }: ComposerCoreProps) {
@@ -506,6 +528,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   const activeProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
   const activeProjectId = currentProjectId;
+  /** plan-633-2604（R3）：当前项目根目录——用于标注拖入的目录是否在工作区外 */
+  const projectRootPath = projects.find((p) => p.id === currentProjectId)?.path ?? null;
 
   const slashCommands = useMemo(
     () => [
@@ -873,15 +897,49 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     [addFiles]
   );
 
+  /** plan-633-2604（R3）：拖入的文件夹 → dir 引用。
+   *  文件夹不走附件上传（拖入的目录会变成 size=0 的 File，后端判 unsupported 直接 415，用户还看不到提示），
+   *  这里只取它的路径作为引用随消息发给模型——模型侧用已有的 fs_list 工具自己翻目录内容。 */
+  const addDirs = useCallback(async (dirs: DroppedEntry[]) => {
+    const resolved: ComposerRef[] = [];
+    let failed = false;
+    for (const d of dirs) {
+      const entry = d.entry as FileSystemDirectoryEntry | null;
+      if (!entry) continue;
+      try {
+        const path = await resolveDroppedDir(entry, d.file);
+        if (path) resolved.push({ kind: "dir", value: path, label: baseName(path) || entry.name });
+      } catch {
+        failed = true;
+      }
+    }
+    if (resolved.length > 0) {
+      setRefs((prev) => {
+        const next = [...prev];
+        for (const r of resolved) {
+          // 同一个目录重复拖入只保留一条
+          if (!next.some((x) => x.kind === "dir" && x.value === r.value)) next.push(r);
+        }
+        return next;
+      });
+    }
+    // 定位失败必须给用户一句话（此前是静默丢弃，用户以为拖成功了）
+    if (failed) {
+      useChatStore.setState({ error: "未定位到该文件夹，请用 @ 手动引用或在桌面版使用" });
+    }
+  }, []);
+
   const handleDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setDragOver(false);
-      if (e.dataTransfer.files?.length) {
-        void addFiles(e.dataTransfer.files);
-      }
+      // plan-633-2604（R3）：必须在事件内同步拆出 entry / File（事件结束后 DataTransfer 会被清空）。
+      // 目录 → dir 引用（交给 AI 用 fs_list 看）；普通文件 → 原有上传附件流程。
+      const { dirs, files } = splitDroppedEntries(e.dataTransfer);
+      if (files.length > 0) void addFiles(files);
+      if (dirs.length > 0) void addDirs(dirs);
     },
-    [addFiles]
+    [addFiles, addDirs]
   );
 
   /** 会话 229: 清掉触发菜单的前缀片段（保留前导空白），光标落回原位置。
@@ -1084,7 +1142,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   };
 
 
-  const canSend = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0);
+  // plan-633-2604（R3）：只有引用 chips（典型是刚拖进来的文件夹）也算有话可说——
+  // 发送时引用会被拼成「可查看目录：…」引用行，模型据此去看目录，正文可以是空的。
+  const canSend = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
 
   const handleCancel = () => {
     // 停止 = 中断本会话的一切执行：运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）
@@ -1118,7 +1178,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       }
       refTextParts.push(lines.join("\n"));
     }
-    const refsSuffix = buildRefsSuffix(refs);
+    const refsSuffix = buildRefsSuffix(refs, projectRootPath);
     // plan-308-1542 需求2：引用芯片的**结构化**副本——随消息落库，消息流据此渲染
     // 与输入框一致的带图标芯片（纯文本后缀继续保留，模型上下文不变）。
     const refPayload = refs.map((r) => ({ kind: r.kind, value: r.value, label: r.label }));
@@ -1405,7 +1465,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           {dragOver && (
             <div className="composer-drop-hint">
               <IconPaperclip size={16} />
-              <span>松开以添加附件</span>
+              {/* plan-633-2604（R3）：明确支持拖文件夹（此前只写"添加附件"，用户不会想到可以拖目录） */}
+              <span>松开以添加文件或文件夹</span>
             </div>
           )}
           {/* 紧凑内嵌浏览器标注胶囊块：小巧精致不占空间，点击弹出详情预览 Modal（对齐图 2）
@@ -1567,6 +1628,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             <div className="composer-refs">
               {refs.map((r, i) => {
                 const removeTip = r.kind === "file" ? "移除文件引用"
+                  : r.kind === "dir" ? "移除文件夹引用"
                   : r.kind === "mcp" ? "移除连接器引用"
                   : r.kind === "plugin" ? "移除插件引用"
                   : "移除技能引用";
@@ -1576,8 +1638,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                       className={`composer-ref-chip composer-ref-${r.kind}`}
                     >
                       <span className="composer-ref-icon">
-                        {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件） */}
+                        {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件）
+                            plan-633-2604（R3）：拖入的文件夹用文件夹图标 */}
                         {r.kind === "file" ? <IconFileText size={12} />
+                          : r.kind === "dir" ? <IconFolder size={12} />
                           : r.kind === "mcp" ? <IconPlug size={12} />
                           : r.kind === "plugin" ? <IconPuzzle size={12} />
                           : <IconSparkles size={12} />}

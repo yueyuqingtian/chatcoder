@@ -679,6 +679,38 @@ async def list_messages(session_id: int, thread_id: int | None = None,
     ]
 
 
+# agents.status → 展示状态（tasks 表没有 paused，只能落 failed，需要单独翻译）
+_AGENT_STATUS_LABEL = {
+    "running": "running", "done": "done", "failed": "failed",
+    "terminated": "terminated", "paused": "paused", "idle": "terminated",
+}
+
+
+def _subagent_display_status(agent_status: str | None, task_status: str | None, handle) -> str:
+    """子代理的展示状态（plan-20261030-subagent-resume-status）。
+
+    权威顺序：内存 handle（真正在跑的那个）→ tasks 行 → agents 行。
+
+    为什么不能让任务行一票决定：tasks 表没有 paused 态，暂停时只能写 failed；续跑虽然会把
+    任务拉回 in_progress，但事件错过、进程重启或续跑发生在列表请求之后时，任务行仍是 failed，
+    界面就把正在续跑的子代理继续画成红色失败（用户反馈「消息流在更新、状态还是失败」）。
+    仅在任务行报 failed、而 agents.status 已明确是 running / paused 时才改以 agents 为准；
+    反过来，库里残留的 agents.status=running 绝不能覆盖已结束的任务行。
+    """
+    if handle is not None:
+        live = str(getattr(handle, "status", "") or "")
+        if live == "running":
+            return "running"
+        if live == "paused" and task_status in (None, "failed"):
+            return "paused"
+    if task_status:
+        agent_label = _AGENT_STATUS_LABEL.get(str(agent_status or ""), str(agent_status or ""))
+        if task_status == "failed" and agent_label in ("running", "paused"):
+            return agent_label
+        return task_status
+    return _AGENT_STATUS_LABEL.get(str(agent_status or ""), str(agent_status or "") or "terminated")
+
+
 @router.get("/sessions/{session_id}/subagents", response_model=list[dict])
 async def list_session_subagents(session_id: int, turn_id: int | None = None,
                                  db: AsyncSession = Depends(get_db)):
@@ -748,7 +780,12 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "turn_status": turn_status_map.get(int(agent.turn_id)) if agent.turn_id else None,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
-            "status": (task.status if task else None) or ({"running": "running", "done": "done", "failed": "failed", "terminated": "terminated"}.get(agent.status, agent.status or "terminated")),
+            # plan-20261030-subagent-resume-status：tasks 表没有 paused 态——暂停时任务行
+            # 只能落 failed，续跑后也不保证立即回写。因此「任务行报失败、但 agents.status
+            # 已是 running/paused」时以 agents.status 为准，否则界面会把正在续跑的子代理
+            # 继续画成红色失败（用户看到的正是「消息流在更新、状态还是失败」）。
+            # 其余情况仍以任务行为准：重启后残留的 agents.status=running 不能覆盖已结束的任务。
+            "status": _subagent_display_status(agent.status, task.status if task else None, _h),
             # v36: 头部展示字段（created_at→updated_at 即任务起止，前端据此算用时）
             # plan-156-624：没有关联任务行时回退子代理自身的创建时刻——否则面板完全没有用时
             # 数据。结束时刻仍只认 task.updated_at（终态才由前端采用），不拿 agents.created_at 冒充。
