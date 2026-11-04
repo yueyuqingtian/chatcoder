@@ -33,6 +33,10 @@ class Session(Base):
     approval_mode: Mapped[str] = mapped_column(
         String(20), default="ask", server_default="ask", nullable=False
     )
+    # plan-20261103-fork：快照与请求标识独立持久化，避免依赖来源会话存活。
+    fork_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    fork_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    fork_request_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     fork_parent_id: Mapped[int | None] = mapped_column(BigInteger)  # 分支来源会话 id
     # 侧边会话（子会话）：指向所属主会话 id。子会话不进入会话列表，只由主会话的侧边面板访问；
     # 子会话仍是完整会话，turn 流水线与工具展示与主会话一致（plan-20261017-side-session P4）。

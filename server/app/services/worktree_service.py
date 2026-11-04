@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = 30
 
 
-def _purge_tool_outputs_of(session_ids: list[int]) -> None:
+async def _purge_tool_outputs_of(session_ids: list[int]) -> None:
     """清理这些会话的长工具输出落盘目录（plan-560-2311 E1）。
 
     本模块的级联删除走 `purge_session_children` 而非 `delete_session_permanent`，
@@ -22,7 +22,7 @@ def _purge_tool_outputs_of(session_ids: list[int]) -> None:
     """
     for sid in session_ids:
         try:
-            session_service.purge_session_tool_outputs(int(sid))
+            await session_service.purge_session_tool_outputs(int(sid))
         except Exception:  # noqa: BLE001
             logger.debug("[worktree] 清理工具输出目录失败 sid=%s", sid, exc_info=True)
 
@@ -918,7 +918,7 @@ async def remove_worktree_project(db: AsyncSession, worktree_project_id: int, *,
         # plan-562-2318 H4：兜底分支同样要清运行态——漏掉的话后台命令仍占端口、
         # 工作流运行时仍挂着已删的行，read_cache 也按已删 id 残留。
         await session_service.prepare_session_removal(leftover_sessions)
-    _purge_tool_outputs_of(leftover_sessions)
+    await _purge_tool_outputs_of(leftover_sessions)
 
     logger.info("工作树已删除: id=%s path=%s branch=%s(删除=%s) 级联会话=%d",
                 worktree_project_id, wt.path, branch, branch_deleted, deleted_sessions)
@@ -1028,7 +1028,7 @@ async def cleanup_stale_worktrees(db: AsyncSession) -> dict:
         # 事务里才发现的会话（执行期间新建）也补一次运行态清理
         await session_service.prepare_session_removal(late)
     # plan-560-2311 E1：同上，写事务外清工具输出目录
-    _purge_tool_outputs_of(purged_sessions)
+    await _purge_tool_outputs_of(purged_sessions)
 
     logger.info("[worktree] 已自愈失效工作树 %d 个: %s", len(stale),
                 [(w[1], w[2]) for w in stale])

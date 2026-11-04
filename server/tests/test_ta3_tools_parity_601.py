@@ -389,13 +389,21 @@ def test_restore_ask_user_object_options():
             "allowCustom": False, "multiple": True,
         }],
     })
+    # multiple 必须保留：官方 ask_user 有该参数，前端据此渲染多选题型
     assert out == {"questions": [{
         "question": "用哪种存储？\n影响部署",
         "options": ["SQLite — 零依赖", "PG"],
         "allow_custom": False,
+        "multiple": True,
     }]}
-    # allowCustom 缺省时不写（工具侧默认允许自定义）
-    assert "allow_custom" not in restore_args("ask_user", {"questions": [{"question": "q"}]})["questions"][0]
+    # allowCustom 缺省时不写（工具侧默认允许自定义）；multiple 缺省也不写（默认单选）
+    plain = restore_args("ask_user", {"questions": [{"question": "q"}]})["questions"][0]
+    assert "allow_custom" not in plain
+    assert "multiple" not in plain
+    # multiSelect（模型按 Claude 习惯写的别名）同样换算成 multiple
+    assert restore_args("ask_user", {"questions": [{"question": "q", "multiSelect": "true"}]})["questions"][0] == {
+        "question": "q", "multiple": True,
+    }
 
 
 def test_restore_ask_user_output_accepted_by_real_tool():

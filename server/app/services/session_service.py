@@ -43,6 +43,7 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
                          model_id: int | None = None, fork_parent_id: int | None = None,
                          permission_mode: str | None = None,
                          approval_mode: str | None = None,
+                         reasoning_effort: str | None = None,
                          goal_text: str | None = None,
                          side_parent_id: int | None = None,
                          side_kind: str | None = None,
@@ -90,6 +91,8 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
             ("side_parent_id", side_parent_id),
             # plan-156-620：挂靠会话的种类（side 侧边对话 / sub 执行子会话）
             ("side_kind", side_kind if side_parent_id is not None else None),
+            # 会话级思考深度（旧库走显式 INSERT 时同样要带上，否则该列保持 NULL）
+            ("reasoning_effort", (reasoning_effort or "").strip()[:20] or None),
             # plan-676: 首页目标随创建一次落准（对齐 set_goal 端点写法；空时维持默认 none）
             ("goal_text", goal_text.strip()[:2000] if goal_active else None),
             ("goal_status", "active" if goal_active else None),
@@ -142,6 +145,8 @@ async def create_session(db: AsyncSession, *, project_id: int, title: str | None
             # permission_mode 一并改用归一化值（原本写的 "default" 是已废弃的旧名）。
             permission_mode=normalize_execution_mode(permission_mode),
             approval_mode=normalize_approval_mode(approval_mode),
+            # 会话级思考深度：随创建一次落准（空 = 未设置，前端取模型默认档位）
+            reasoning_effort=(reasoning_effort or "").strip()[:20] or None,
             **(
                 {
                     "goal_text": goal_text.strip()[:2000],
@@ -567,22 +572,37 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
 
     result = await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
     if result is not None:
-        _purge_tool_outputs(session_id)
+        await purge_session_tool_outputs(session_id)
         result["files_removed"] = await _remove_session_assets(attachments, checkpoints)
     return result
 
 
-def purge_session_tool_outputs(session_id: int) -> None:
+async def purge_session_tool_outputs(session_id: int) -> None:
     """公开入口：清理会话的长工具输出落盘目录。
 
     plan-560-2311 E1：`archive_service` 与 `worktree_service` 的批量永久删除绕开了
     `delete_session_permanent` 直接调 `purge_session_children`，于是 `uploads/_tool_outputs/{sid}`
     无人清理、按已删会话 id 一直累积。它们跨模块调用，走这个公开入口而不是私有函数。
     """
-    _purge_tool_outputs(session_id)
+    await _purge_tool_outputs(session_id)
+    # plan-20261103-fork：最后一个分支删除时回收此前因引用保留的输出目录。
+    from pathlib import Path
+    from app.core.config import settings
+    from app.orchestration.output_paging import SPILL_DIRNAME
+    from app.persistence.database import async_session_factory
+    root = Path(settings.uploads_dir).resolve() / SPILL_DIRNAME
+    if not root.is_dir():
+        return
+    async with async_session_factory() as db:
+        live = set((await db.scalars(select(Session.id))).all())
+        infos = (await db.scalars(select(Session.fork_info).where(Session.fork_info.is_not(None)))).all()
+    referenced = {sid for info in infos for sid in (info or {}).get("output_sources", [])}
+    for folder in root.iterdir():
+        if folder.is_dir() and folder.name.isdigit() and int(folder.name) not in live | referenced:
+            await _purge_tool_outputs(int(folder.name))
 
 
-def _purge_tool_outputs(session_id: int) -> None:
+async def _purge_tool_outputs(session_id: int) -> None:
     """plan-156-621：删除会话时清理它的长工具输出落盘目录。
 
     落盘文件名带 uuid，无法按会话内消息反查；不跟随会话删除会一直累积
@@ -595,6 +615,12 @@ def _purge_tool_outputs(session_id: int) -> None:
         from app.core.config import settings
         from app.orchestration.output_paging import SPILL_DIRNAME
 
+        # plan-20261103-fork：源会话删除后分支仍需按原路径续读长输出。
+        from app.persistence.database import async_session_factory
+        async with async_session_factory() as read_db:
+            infos = (await read_db.scalars(select(Session.fork_info).where(Session.fork_info.is_not(None)))).all()
+            if any(session_id in (info or {}).get("output_sources", []) for info in infos):
+                return
         folder = Path(settings.uploads_dir).resolve() / SPILL_DIRNAME / str(session_id)
         if folder.is_dir():
             shutil.rmtree(folder, ignore_errors=True)
@@ -760,54 +786,14 @@ async def _remove_session_assets(attachments: set[str], checkpoints: set[str]) -
 
 
 
-async def fork_session(db: AsyncSession, session_id: int, title: str | None = None) -> int:
-    """复制会话（仅复制元数据与消息，任务/子代理不复制；写引擎单写线程）。"""
-    from app.orchestration.approval_policy import (
-        normalize_approval_mode, normalize_execution_mode,
-    )
+async def fork_session(db: AsyncSession, session_id: int, title: str | None = None,
+                       request_id: str | None = None) -> int:
+    """plan-20261103-fork：复制完整历史快照，执行态由新会话自行建立。"""
     from app.persistence.database import run_write_locked
+    from app.services.fork_service import copy_snapshot
 
-    def patch(s):
-        src = s.get(Session, session_id)
-        if src is None:
-            raise ValueError("session not found")
-        new_session = Session(
-            project_id=src.project_id,
-            title=title or f"{src.title or '会话'} · 分支",
-            # plan-156-619 S8：fork 出的会话标题是正式名称（分支名），
-            # 标 named 避免被首条消息的自动归纳覆盖。
-            title_source="named",
-            model_id=src.model_id,
-            fork_parent_id=session_id,
-            status="active",
-            # plan-75-332 R3 修复：分支会话必须继承源会话的两种模式——
-            # 此前未复制，fork 出来一律回到 ORM 默认（agent + 询问审批），
-            # 用「完全访问」的分支会突然开始弹审批。
-            # R7：继承时经归一化，避免旧值（default / accept_edits）随分支继续扩散。
-            permission_mode=normalize_execution_mode(src.permission_mode),
-            approval_mode=normalize_approval_mode(src.approval_mode),
-        )
-        s.add(new_session)
-        s.flush()
-        # 复制消息
-        rows = s.execute(
-            select(Message).where(Message.session_id == session_id, Message.deleted == False)  # noqa: E712
-        ).scalars().all()
-        for m in rows:
-            s.add(Message(
-                session_id=new_session.id,
-                turn_id=None,
-                thread_id=None,
-                sender_type=m.sender_type,
-                sender_id=m.sender_id,
-                msg_type=m.msg_type,
-                content=m.content,
-                token_usage=m.token_usage,
-            ))
-        s.commit()
-        return new_session.id
-
-    return await run_write_locked(patch, label="session.fork")
+    return await run_write_locked(
+        lambda s: copy_snapshot(s, session_id, title, request_id), label="session.fork")
 
 
 async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> int:

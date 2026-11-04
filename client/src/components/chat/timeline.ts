@@ -443,6 +443,8 @@ export function pruneModelDividers(messages: MessageOut[]): MessageOut[] {
   let dividers = 0;
   let hasDialog = false;
   for (const m of messages) {
+    // plan-20261103-fork-ui：兼容隐藏旧版本已持久化的分支分隔信息。
+    if (m.sender_type === SenderType.System && m.content?.divider === "fork") continue;
     if (isDivider(m)) dividers++;
     else if (m.sender_type !== SenderType.System && m.thread_id == null) hasDialog = true;
   }
@@ -451,6 +453,8 @@ export function pruneModelDividers(messages: MessageOut[]): MessageOut[] {
   let drop: Set<number> | null = null;
   let pending: MessageOut | null = null;
   for (const m of messages) {
+    // plan-20261103-fork-ui：兼容隐藏旧版本已持久化的分支分隔信息。
+    if (m.sender_type === SenderType.System && m.content?.divider === "fork") continue;
     if (isDivider(m)) {
       if (pending) (drop ??= new Set()).add(pending.id);
       pending = m;
@@ -480,6 +484,8 @@ export function buildTimeline(messages: MessageOut[]): TimelineEntry[] {
   let lastTurnId: number | null = null;
 
   for (const m of messages) {
+    // plan-20261103-fork-ui：兼容隐藏旧版本已持久化的分支分隔信息。
+    if (m.sender_type === SenderType.System && m.content?.divider === "fork") continue;
     const tid = m.turn_id ?? null;
     if (tid != null) {
       if (!turnMap.has(tid)) {
@@ -560,6 +566,8 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
     let scanLastTid: number | null = null;
 
     for (const m of messages) {
+      // plan-20261103-fork-ui：兼容隐藏旧版本已持久化的分支分隔信息。
+      if (m.sender_type === SenderType.System && m.content?.divider === "fork") continue;
       const tid = m.turn_id ?? null;
       if (tid != null) {
         let arr = turnMsgs.get(tid);
@@ -642,6 +650,7 @@ export function createTimelineBuilder(): (messages: MessageOut[]) => TimelineEnt
 
     for (let i = oldLen; i < messages.length; i++) {
       const m = messages[i];
+      if (m.sender_type === SenderType.System && m.content?.divider === "fork") continue;
       const tid = m.turn_id ?? null;
       if (tid != null) {
         if (tid === fastLastTid) {
@@ -742,7 +751,7 @@ function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, Messa
   for (const call of calls) {
     const cc = call.content as Record<string, unknown>;
     const tool = String(cc.tool ?? "");
-    if (!WORKFLOW_CARD_TOOLS.has(tool)) continue;
+    if (cc.fork_history === true || !WORKFLOW_CARD_TOOLS.has(tool)) continue;
     let programId = 0;
     if (tool === "plan_workflow") {
       const result = resultsByKey.get(String(cc.call_key ?? call.id));
@@ -1024,6 +1033,12 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       continue;
     }
     const c = m.content as Record<string, unknown>;
+    // plan-20261103-fork：历史通知保留文本，不能解析出可操作的源会话入口。
+    if (c.fork_history === true && m.sender_type === SenderType.System && m.msg_type === MsgType.Text) {
+      flushTools();
+      items.push({ kind: "text", msg: m });
+      continue;
+    }
     // plan-549-2281 复盘修复：子代理三类通知先于子会话分支判定（见 isSubagentQuestion
     // 处的说明——它们与子会话通知共用 content.subsession_report 回放标记）。
     if (isSubagentQuestion(c)) {

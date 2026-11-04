@@ -24,6 +24,8 @@ from app.services.doc_parser import MAX_FILE_SIZE, parse_file
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+from app.gateway.routers.preview import router as preview_router
+router.include_router(preview_router)
 
 
 def uploads_root() -> Path:
@@ -58,7 +60,7 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
     if len(data) > MAX_FILE_SIZE:
         raise HTTPException(413, f"文件过大: {len(data) // 1024}KB, 超过 {MAX_FILE_SIZE // 1024 // 1024}MB 限制")
     filename = (file.filename or "unknown").strip()
-    if not filename or filename in {".", ".."}:
+    if not filename or filename in {".", ".."} or any(c in filename for c in ("/", "\\", ":", "\x00")):
         raise HTTPException(400, "非法文件名")
 
     parsed = parse_file(filename, data)
@@ -71,7 +73,7 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
 
-    mime_type = parsed.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     result = {
         "file_id": file_id,
         "filename": filename,

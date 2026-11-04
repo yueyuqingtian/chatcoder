@@ -62,6 +62,7 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
   };
 
   if (actions === "none") return null;
+  const inherited = entry.kind === "turn" && entry.items.some((it) => "msg" in it && it.msg.content?.fork_history === true);
   const copyOnly = actions === "copy-only";
 
   const cls = [
@@ -77,9 +78,9 @@ export const MessageActions = memo(function MessageActions({ entry, onRollback, 
           {copied ? <IconCheck size={13} /> : <IxCopy size={14} />}
         </button>
       </Tooltip>
-      {!copyOnly && scope === "user" && onRollback && (
+      {!copyOnly && scope === "user" && (onRollback || inherited) && (
         <Tooltip title="回滚此消息及其后的更改" side="top">
-          <button className="msg-action danger" aria-label="回滚此消息及其后的更改" onClick={onRollback}>
+          <button className="msg-action danger" aria-label="回滚此消息及其后的更改" disabled={inherited} onClick={inherited ? undefined : onRollback}>
             <IxRollback size={14} />
           </button>
         </Tooltip>

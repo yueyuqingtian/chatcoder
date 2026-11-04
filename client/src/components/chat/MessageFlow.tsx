@@ -6,11 +6,11 @@
  * 与参考项目「同一渲染引擎 + 数据注入」对齐——中间面板与右面板共用同一注册插件。
  */
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useId, memo, type ReactNode } from "react";
-import { elementScroll, measureElement as defaultMeasureElement, useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
+import { elementScroll, observeElementOffset, measureElement as defaultMeasureElement, useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 import type { TimelineEntry, ToolNode, TurnItem } from "./timeline";
 import { createTimelineBuilder, createRoundMerger, msgText, lastPersistedText, getTurnById, tailRoundIndex, pruneModelDividers } from "./timeline";
 import { isBusy, subscribe } from "../../perf/bus";
-import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
+import { registerReconcileTask, runReconcile, isReconcilePending, RECONCILE_ORDER } from "../../perf/reconcile";
 import { recordComponentRender, recordDerivation } from "../../perf/metrics";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
@@ -35,6 +35,9 @@ import { Button, Empty, Tooltip } from "../ui";
 import { StickyBottom } from "./stickyBottom";
 import { FlowVisibilityContext } from "./useRunningTicker";
 import { advanceUserSendSignal, type UserSendSignal } from "../../utils/userSendSignal";
+import { FlowViewportVisibility } from "../ui/ViewportBlock";
+import { updateFlowViewport, recordFlowDiagnostic, registerFlowInspector } from "../../perf/flowViewport";
+import { captureReadingAnchor, findAnchorIndex, visibleFlowItems, refreshFlowMeasurements, resolveFlowItemSize, saveFlowPosition, getFlowPosition, type ReadingAnchor } from "../../perf/flowGeometry";
 
 /** plan-31-152 S5-4：运动期（拖分隔条/窗口缩放）视口 rect 的提交节流间隔（毫秒）。
  *  逐帧提交会让虚拟器每帧 setState → 整棵可见消息树 React 重渲染（含 markdown/工具树），
@@ -57,21 +60,6 @@ const JUMP_HOLD_MS = 700;
  *  宁可先揭示再由贴底内核纠正，也不允许内容被永久隐藏。 */
 const FIRST_FRAME_SETTLE_MAX_FRAMES = 12;
 const FIRST_FRAME_SETTLE_MAX_MS = 500;
-
-/** plan-20261115-firstframe-geometry：取内容容器里「真实末项底」——末项已挂载则返回它的坐标，否则 null。
- *
- *  为什么需要它：虚拟容器的 height 由虚拟器按 `getTotalSize()` 写，而 getTotalSize 对**尚未挂载**
- *  的项用的是 estimateSize。贴底时若末项未进渲染窗口（首帧尤其如此），尾部就按估算值占位：
- *  估算偏高 ⇒ 最后一条消息下面多出一段空白（且它是可滚动区的一部分，表现就是「已经到底了、
- *  下面还空一截」）；估算偏低则末项被裁。末项一旦挂载，真实高度就已知，就能直接算出正确的总高。 */
-function bottomGeometryOf(inner: HTMLElement, totalCount: number): number | null {
-  if (totalCount <= 0) return null;
-  const tail = inner.querySelector<HTMLElement>(`[data-index="${totalCount - 1}"]`);
-  if (!(tail instanceof HTMLElement)) return null;
-  // 项是 inner 的绝对定位子项（directDomUpdates 的 position 模式），offsetParent 即 inner
-  const bottom = tail.offsetTop + tail.offsetHeight;
-  return Number.isFinite(bottom) && bottom > 0 ? bottom : null;
-}
 
 /* plan-549-2281（第13项）：定位的丝滑缓动参数。
  *
@@ -272,6 +260,7 @@ const StandaloneEntry = memo(function StandaloneEntry({ entry }: { entry: Timeli
 /** v20: 消息流共享内核——虚拟化 + 贴底滚动跟随 + 跳底按钮 + 入场动画 + 搜索 + JumpDots。
  * 主会话与子代理面板共用；宿主差异（数据源/功能开关/空态文案）经 props 注入。 */
 interface MessageFlowCoreProps {
+  visible?: boolean;
   historySessionId?: number | null;
   historyThreadId?: number;
   entries: TimelineEntry[];
@@ -319,6 +308,7 @@ const HighlightedItem = memo(function HighlightedItem({ keyword, active, childre
 });
 
 function MessageFlowCore({
+  visible = true,
   historySessionId,
   historyThreadId,
   entries,
@@ -346,6 +336,7 @@ function MessageFlowCore({
   const instanceId = useId();
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const [savedPosition] = useState(() => getFlowPosition(sessionKey));
   const history = useMessageHistory(historySessionId ?? null, historyThreadId);
   const prependAnchor = useRef<{ key: string | number | bigint; offset: number; messageId?: string; messageOffset?: number } | null>(null);
   const loadingOlder = useRef(false);
@@ -358,24 +349,34 @@ function MessageFlowCore({
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
   const innerRef = useRef<HTMLDivElement | null>(null);
-  /** plan-20261115-firstframe-geometry：容器高度校正用的末项下标镜像。
-   *  虚拟器选项闭包与 scrollToFn 里读不到最新的 totalCount，用它在这些闭包里取当前末项下标。
-   *  由下方 effect 同步（不能在渲染期直接赋值：totalCount 在文件更靠后的位置才声明）。 */
-  const innerRefTailIndex = useRef(0);
   const scrollIdleTimerRef = useRef(0);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   /** plan-20261020-pts：贴底跟随内核。每个实例一份（切会话时宿主按会话 key 重建本组件，
    *  新会话天然从「跟随」开始）；跟随状态只由用户意图改变，详见 stickyBottom.ts。 */
-  const [sticky] = useState(() => new StickyBottom({ onJumpChange: setShowScrollBottom }));
+  const [sticky] = useState(() => {
+    const instance = new StickyBottom({ onJumpChange: setShowScrollBottom });
+    if (savedPosition && !savedPosition.following) instance.release();
+    return instance;
+  });
 
   /** plan-282-1441（#2）：宽度变化时的"视口锚点"。
    *  拖拽面板分隔条会改变消息列宽度 → 文本重排 → 每条消息高度变化 → 虚拟列表重新测量
    *  → 总高度变化 → 同一个 scrollTop 对应的内容整体位移（"拖宽时消息位置漂移"）。
    *  plan-20261020-pts：只在**不跟随**时记录"首条可见项 + 其相对视口偏移"，重测收敛后
    *  让那条消息停回原来的视口位置；跟随中由 StickyBottom 在每次尺寸变化时当帧贴底。 */
-  const widthAnchorRef = useRef<
-    { index: number; offset: number; ratio: number; untrusted: boolean } | null
-  >(null);
+  const widthAnchorRef = useRef<ReadingAnchor | null>(null);
+  const readingAnchorRef = useRef<ReadingAnchor | null>(savedPosition?.anchor ?? null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  const requestGeometryCheck = useRef<() => void>(() => {});
+  const captureReadingPosition = useRef<() => void>(() => {});
+  const measurementDirty = useRef(true);
+  const settleOffsetRef = useRef<((force?: boolean) => void) | null>(null);
+  const needsRestore = useRef(false);
+  const lastValidTop = useRef(savedPosition?.top ?? 0);
+  const restoreToken = useRef(0);
+  const restoreFrame = useRef(0);
   const lastWidthRef = useRef(0);
   /** plan-20261118-width-epoch：消息列宽度每变化一次就 +1。
    *  收敛序列据此判断「屏外项的缓存高度是否已过期」——宽度变了，旧宽度下的实测高度就不再是
@@ -409,41 +410,10 @@ function MessageFlowCore({
   const hasStreaming = Boolean(running && streamingNode);
   const hasTrailing = Boolean(trailingNode);
   const totalCount = entries.length + (hasStreaming ? 1 : 0) + (hasTrailing ? 1 : 0);
-  // plan-20261115-firstframe-geometry：把「当前末项下标」同步给只能在闭包里读 ref 的地方
-  // （虚拟器选项 / scrollToFn）。渲染期赋值即可，它只影响下一次布局写入。
-  innerRefTailIndex.current = totalCount > 0 ? totalCount - 1 : 0;
 
-  /** plan-282-1434（B6）+ plan-282-1444：首帧定位状态。
-   *  此前：虚拟列表初始 scrollOffset=0 → 先渲染顶部若干项，再由 useLayoutEffect 把
-   *  scrollTop 推到底，多帧叠加后表现为"点击会话后从上往下滚一遍"。
-   *  现在：① initialOffset 按末项估算位置给出初始偏移，首帧即落在底部区域；
-   *        ② 定位**收敛**（总高连续稳定）前用 .is-positioning 隐藏内容。 */
-
-
+  // plan-20261103-flow-blank：首次定位只暂时隐藏，范围对齐后揭示内容。
   const [positioned, setPositioned] = useState(false);
   const EST_ITEM_H = 140;
-  /* plan-20261115-firstframe-geometry：首帧「估算 → 实测」为什么必须在揭示前完成。
-   *
-   *  ── 修的根因 ──
-   *  切会话 / 重新进入子代理面板时 MessageFlowCore 被重建（`key={currentSessionId}`），
-   *  虚拟器的 itemSizeCache 清空，只剩 estimateSize；旧实现又用估算值初始化 `initialOffset`，
-   *  而 DOM 的 scrollTop 仍是 0。两者只在**第一个 scroll 事件**后才对齐，而这个事件只有用户
-   *  滚动才会产生。在此之前：补偿谓词拿估算偏移判「项在视口上方」→ scrollToFn 把 scrollTop
-   *  写到数万像素再被真实 scrollHeight 钳制；内容容器被撑到估算总高；而 is-positioning 的揭示
-   *  判据只看「总高稳定」，正好在这个中间态之后揭示 ⇒ 露出上下大片空白，滚一下才对齐。
-   *
-   *  ── 现在 ──
-   *  首帧不再由估算值决定任何可见几何：DOM scrollTop 直接写真实 scrollHeight，虚拟器偏移在同一帧
-   *  显式对齐；揭示改为「几何真的对齐」后才执行（判据见下方 useLayoutEffect）。
-   *
-   *  注意：**不得**改回「用估算总高初始化偏移」——那是这一系列问题的起点。 */
-
-  /** S9a（plan-329-1647）：按条目类型的**实测高度**分桶估算，替代固定 140。
-   *
-   *  为何分桶：条目真实高度差异极大——单行用户消息 ~60px，含长文 + 工具树的 turn 可达上千 px。
-   *  统一按 140 估算会让「估算 → 实测」跳变很大，表现为长会话首屏收敛慢、滚动中总高反复变化。
-   *  采样来源**零额外 DOM 读取**：直接取虚拟器当前可见项的 size（可见项在视口内必已挂载，
-   *  挂载即被 measureElement 测过），取中位数抗异常项。 */
   const heightEstRef = useRef({ turn: EST_ITEM_H, standalone: EST_ITEM_H, stream: EST_ITEM_H, trailing: EST_ITEM_H });
   /** 条目 index → 估算桶（槽位顺序与渲染顺序一致：已落库 entries → 流式段 → 尾部卡片）。 */
   const estBucketOf = useCallback((index: number): "turn" | "standalone" | "stream" | "trailing" => {
@@ -485,23 +455,21 @@ function MessageFlowCore({
   const measureElementCb = useCallback(
     (el: Element, entry: ResizeObserverEntry | undefined, instance: Virtualizer<HTMLDivElement, Element>): number => {
       const index = instance.indexFromElement(el);
+      const key = instance.options.getItemKey(index);
+      const root = instance.scrollElement;
+      const laidOut = visibleRef.current && el.isConnected && root != null && root.isConnected && root.clientWidth > 0 && root.clientHeight > 0;
+      if (!laidOut) return resolveFlowItemSize(0, instance.itemSizeCache.get(key), instance.options.estimateSize(index), false);
       if (isBusy() && shouldSkipMeasurement(index, instance, visibleIndexSetRef.current)) {
         skippedDuringMotionRef.current.add(index);
         recordDerivation("virtualMeasureSkipped");
         const key = instance.options.getItemKey(index);
         return instance.itemSizeCache.get(key) ?? instance.options.estimateSize(index);
       }
-      /* plan-633-2604：0 高度保护。
-       * 默认测量直接取 borderBoxSize.blockSize，没有 0 值防护。右面板用 display:none 保活非激活标签，
-       * 子树尺寸归零时逐项 RO 会以 blockSize=0 回调 → 尺寸被写成 0 → 这些项的 start 全部相等，
-       * 表现为整片空白（总高塌陷）或多项叠在同一位置。
-       * 这里对 0 高度一律回退到「缓存值，其次估算值」：真实高度为 0 的条目本来也不会被用户看到，
-       * 而错把 0 写进缓存会让后续所有项的位置一起错。 */
+      // plan-20261103-flow-tail-gap：这里只保护无效测量；有效布局中的空项不能沿用估高。
       const measured = defaultMeasureElement(el, entry, instance);
-      if (!Number.isFinite(measured) || measured <= 0) {
+      if (!Number.isFinite(measured) || measured < 0) {
         recordDerivation("virtualMeasureZero");
-        const key = instance.options.getItemKey(index);
-        return instance.itemSizeCache.get(key) ?? instance.options.estimateSize(index);
+        return resolveFlowItemSize(measured, instance.itemSizeCache.get(key), instance.options.estimateSize(index), true);
       }
       recordDerivation("virtualMeasure");
       return measured;
@@ -535,15 +503,7 @@ function MessageFlowCore({
     count: totalCount,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => heightEstRef.current[estBucketOf(index)],
-    /* plan-20261115-firstframe-geometry：**不**再用估算值初始化内部偏移。
-     *
-     * 此前这里是 `(totalCount - 1) * estimateSize(末项)`：它只写虚拟器内部变量，不改 DOM，
-     * 于是首帧渲染范围按「估算的底部」算、实际 scrollTop 是 0，两者在第一个 scroll 事件前不等。
-     * 由此派生的空白链条见 geometryAlignedRef 的注释。
-     *
-     * 现在从 0 起，但 0 不是「显示在顶部」——首帧的贴底由 layoutEffect 直接写 DOM
-     * （见 startFirstFrameGeometry），虚拟器随后的 scroll 回调把内部偏移同步成真实值。
-     * 必须保留这个选项（传 0）而不是删掉：删掉会让库回落到它自己的默认 0，语义相同但少一层显式说明。 */
+    // plan-20261103-flow-blank：初始偏移与 DOM 一致，通过公开定位及观察回调恢复位置。
     initialOffset: 0,
     overscan,
     /* plan-586-2374 §2.1：测量门控。注意渲染处的 ref 仍用实例方法
@@ -565,28 +525,28 @@ function MessageFlowCore({
     // 消息数较多时默认 transform 会让每个可视虚拟项进入合成层；切为 top 定位，
     // 避免窗口动画/滚动时维护大量图层。绝对定位项已满足 position 模式契约。
     directDomUpdatesMode: "position",
-    /* plan-20261021-scroll-comp：补偿写 scrollTop 之前先把内容容器撑到新总高。
-       directDomUpdates 下容器高度要等 onChange 才写入，而补偿发生在它之前：视口离底部不足补偿量时，
-       浏览器会按旧高度钳制 scrollTop，补偿被截断，剩下的部分又露成位移；
-       钳制到底部还会让贴底内核误判成「回到了底部」。 */
-    scrollToFn: (offset, options, instance) => {
-      const inner = innerRef.current;
-      /* plan-20261115-firstframe-geometry：容器高度优先用「真实末项底」，不再无条件写估算总高。
-       *
-       * 直接写 `getTotalSize()` 的问题：末项尚未挂载时它是估算值，写进容器就成了一段多余的
-       * 滚动空间——表现就是「已经到底了，下面还空一截」。而预撑高本身仍必须保留，否则靠近底部
-       * 时补偿会被旧高度钳制（见上方注释）。能算出真实末项底就用真实的，否则回落到估算值。 */
-      if (inner) {
-        const realBottom = bottomGeometryOf(inner, innerRefTailIndex.current + 1);
-        inner.style.height = `${realBottom ?? instance.getTotalSize()}px`;
-      }
-      elementScroll(offset, options, instance);
+    // plan-20261103-flow-blank：总高和主轴位置只由适配器写入，应用不覆盖其内部 lastSize。
+    scrollToFn: elementScroll,
+    observeElementOffset: (instance, callback) => {
+      const report = (offset: number, scrolling: boolean) => {
+        const element = instance.scrollElement;
+        if (visibleRef.current && element && element.clientWidth > 0 && element.clientHeight > 0) callback(offset, scrolling);
+      };
+      const off = observeElementOffset(instance, report);
+      // plan-20261103-flow-blank：恢复时 scrollTop 可能没变，浏览器不会再派 scroll，必须走观察回调提交。
+      const settle = (force = false) => {
+        const element = instance.scrollElement;
+        if (element && (force || instance.scrollOffset == null || Math.abs(instance.scrollOffset - element.scrollTop) > 0.5)) {
+          report(element.scrollTop, false);
+        }
+      };
+      settleOffsetRef.current = settle;
+      return () => { if (settleOffsetRef.current === settle) settleOffsetRef.current = null; off?.(); };
     },
-    // plan-20261020-pts：测量回调里条目尺寸 / 位置 / 总高刚写入 DOM，此时请求贴底可在同一帧完成
-    // （上方条目变高时尾项尺寸不变，容器高度的尺寸通知又要晚一帧，只靠尺寸观察会露出一帧未贴底）
     onChange: () => {
       sticky.requestPin();
-      scheduleBottomGeometryFix();
+      updateFlowViewport(parentRef.current);
+      requestGeometryCheck.current();
     },
     // plan-31-152 S5-4（用户反馈"拖左右侧面板卡顿，空态首页不卡"）：
     //   拖拽期间容器宽度每帧在变，若每帧都 cb 提交 rect → 虚拟器 setState →
@@ -601,18 +561,29 @@ function MessageFlowCore({
       const el = instance.scrollElement;
       if (!el) return;
       const readFinalRect = () => ({ width: Math.round(el.clientWidth), height: Math.round(el.clientHeight) });
-      cb(readFinalRect()); // 首帧立即提交
-      let lastWidth = el.clientWidth;
-      let lastHeight = el.clientHeight;
+      let lastWidth = 0, lastHeight = 0, hadInvalid = true;
+      if (visibleRef.current && el.clientWidth > 0 && el.clientHeight > 0) {
+        const rect = readFinalRect(); lastWidth = rect.width; lastHeight = rect.height; hadInvalid = false; cb(rect);
+      }
       let raf = 0;
       let throttleTimer = 0;
-      const commit = () => {
+      const commit = (force = false) => {
         const width = el.clientWidth;
         const height = el.clientHeight;
-        if (width === lastWidth && height === lastHeight) return;
-        lastWidth = width;
-        lastHeight = height;
+        if (!visibleRef.current || width <= 0 || height <= 0) { hadInvalid = true; return; }
+        if (!force && !hadInvalid && width === lastWidth && height === lastHeight) return;
+        const waking = hadInvalid;
+        hadInvalid = false; lastWidth = width; lastHeight = height;
         cb({ width: Math.round(width), height: Math.round(height) });
+        settleOffsetRef.current?.(waking);
+        setLayoutEpoch((epoch) => epoch + 1);
+        updateFlowViewport(el);
+        requestGeometryCheck.current();
+        if (waking) {
+          measurementDirty.current = true; needsRestore.current = true;
+          widthAnchorRef.current = readingAnchorRef.current;
+          if (!isReconcilePending()) runReconcile();
+        }
       };
       const scheduleNotify = () => {
         if (isBusy()) {
@@ -636,9 +607,7 @@ function MessageFlowCore({
         // 收敛序列（order 20）调用：取消所有 pending，立即提交最终 rect
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
         if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = 0; }
-        lastWidth = el.clientWidth;
-        lastHeight = el.clientHeight;
-        cb({ width: Math.round(lastWidth), height: Math.round(lastHeight) });
+        commit(true);
       };
       settleRectRef.current = settle; // 供收敛序列（order 20）调用
       return () => {
@@ -834,17 +803,7 @@ function MessageFlowCore({
   useLayoutEffect(() => {
     const anchor = prependAnchor.current;
     if (!anchor) return;
-    /* plan-20261115-firstframe-geometry：直写 scrollTop 之前先把容器撑到新总高。
-     *
-     * `scrollToOffset` 走 scrollToFn（自带撑高），但下面这两处纠偏是**直接写 el.scrollTop**，
-     * 不经过它——旧高度会先把写入钳制住，剩下那段位移就露成「加载更早消息后顶部/底部缺口 」
-     * （plan-630-2590 只把差值阈值收到 0.5px，没有处理钳制本身）。prepend 之后末项位置不变，
-     * 所以这里优先用真实末项底，取不到才用估算总高。 */
-    const inner = innerRef.current;
-    if (inner) {
-      const realBottom = bottomGeometryOf(inner, totalCount);
-      inner.style.height = `${realBottom ?? virtualizer.getTotalSize()}px`;
-    }
+    // plan-20261103-flow-blank：分页只恢复阅读锚点，不写虚拟容器高度。
     const item = virtualizer.measurementsCache.find((value) => value.key === anchor.key);
     if (item) virtualizer.scrollToOffset(item.start + anchor.offset);
     const el = parentRef.current;
@@ -858,7 +817,7 @@ function MessageFlowCore({
        * 差值在半像素以内时说明第一次已经对齐，跳过写入即可断开这条无谓的写入链。 */
       if (node) {
         const delta = node.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.messageOffset;
-        if (Math.abs(delta) > 0.5) el.scrollTop += delta;
+        if (Math.abs(delta) > 0.5) virtualizer.scrollToOffset(el.scrollTop + delta);
       }
     }
     prependAnchor.current = null;
@@ -875,6 +834,10 @@ function MessageFlowCore({
     }, 700);
     scheduleSpy();
     scheduleVisibleRefresh();
+    if (visibleRef.current && !isBusy() && el.clientWidth > 0 && el.clientHeight > 0) {
+      lastValidTop.current = el.scrollTop;
+      captureReadingPosition.current();
+    }
     /* plan-630-2590：接近顶部才自动加载更早的消息。
      *
      * 原实现用绝对阈值 `scrollTop < 400`：子代理面板视口本身不高（容器窄、头部还会周期性变高），
@@ -944,495 +907,238 @@ function MessageFlowCore({
      ResizeObserver 回调发生在布局之后，此时读 scrollHeight 不会额外触发重排）；
      按距底距离同步跟随态正是「贴底被误判成离开底部」的来源，不再保留。 */
 
-  /** plan-282-1441（#2）：宽度变化 → 锚点补偿（仅不跟随时）。
-   *
-   *  分工：跟随中由贴底内核在尺寸变化时当帧贴底；本 effect 只负责「**不跟随**时容器宽度变化，
-   *  保持用户正在看的那条消息停在原位」（拖拽分隔条 / 折叠展开面板 / 窗口缩放）。
-   *
-   *  必须在宽度变化**当帧**记录锚点（此时还没重排），否则记录到的偏移已被污染。 */
-  useEffect(() => {
+  /** plan-20261103-flow-blank：几何失效、重测、锚点还原只有这一条恢复路径。 */
+  useLayoutEffect(() => {
     const el = parentRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-
+    if (!el) return;
+    const ready = () => visibleRef.current && el.isConnected && el.clientWidth > 0 && el.clientHeight > 0;
+    let disposed = false;
+    let captureFrame = 0;
     const capture = () => {
-      // plan-20261020-pts：跟随中不记锚点——贴底内核会在每次尺寸变化时当帧贴底，
-      // 这里再按锚点还原只会和它抢位置。
-      if (sticky.isFollowing()) {
-        widthAnchorRef.current = null;
-        return;
-      }
-      const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-index]"));
-      const viewportTop = el.getBoundingClientRect().top + el.clientTop;
-      const firstNode = nodes.find((node) => node.getBoundingClientRect().bottom > viewportTop);
-      const firstIndex = firstNode ? Number(firstNode.dataset.index) : -1;
-      const first = Number.isFinite(firstIndex) && firstIndex >= 0
-        ? { index: firstIndex, start: el.scrollTop + firstNode!.getBoundingClientRect().top - viewportTop }
-        : null;
-      // plan-387-1825 A7：宽度为 0（折叠态）或拿不到虚拟项时几何处于塌缩状态，
-      // 只记比例、标记 untrusted，还原时按比例保持，不做逐项定位。
-      const max = el.scrollHeight - el.clientHeight;
-      if (el.clientWidth === 0 || !first) {
-        widthAnchorRef.current = {
-          index: -1, offset: 0,
-          untrusted: true,
-          ratio: max > 0 ? el.scrollTop / max : 0,
-        };
-        return;
-      }
-      widthAnchorRef.current = {
-        index: first.index,
-        // 首条可见项相对视口顶部的偏移：还原时用它把同一条放回原位
-        offset: (() => {
-          const node = el.querySelector(`[data-index="${first.index}"]`);
-          return node instanceof HTMLElement
-            ? node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop
-            : first.start - el.scrollTop;
-        })(),
-        untrusted: false,
-        ratio: max > 0 ? el.scrollTop / max : 0,
-      };
+      if (!ready() || sticky.isFollowing()) return;
+      const anchor = captureReadingAnchor(el, virtualizer);
+      if (anchor) { readingAnchorRef.current = anchor; widthAnchorRef.current = anchor; }
     };
-
-    /* plan-20261020-pts：还原只负责位置，不再改写跟随状态（原 finishRestore 按还原后的几何
-       重算跟随，测量尚未收敛时会把贴底误判成离开底部）。还原途中若用户又开始跟随，立即让位。 */
+    captureReadingPosition.current = () => {
+      if (!captureFrame) captureFrame = requestAnimationFrame(() => { captureFrame = 0; capture(); });
+    };
     const restore = () => {
-      const anchor = widthAnchorRef.current;
-      const el2 = parentRef.current;
-      if (!anchor || !el2 || sticky.isFollowing()) return;
-      /* plan-20261115-firstframe-geometry：直写 scrollTop 前先把容器撑到正确总高。
-       * 这里 ①② 都是直接写 el2.scrollTop（不走 scrollToFn，没有预撑高）：宽度变化后总高
-       * 会先按估算值排一遍，旧高度会把写入钳制住，剩下的位移就留成内容上方的空隙，
-       * 而 ② 的像素级校正又是「先读位置再增量写」，被钳制时增量写不进去、下一帧 continue，
-       * 表现成「拖完侧栏后消息停在中间、上下都留白」。 */
-      const innerEl = innerRef.current;
-      if (innerEl) {
-        const realBottom = bottomGeometryOf(innerEl, totalCount);
-        innerEl.style.height = `${realBottom ?? virtualizer.getTotalSize()}px`;
-      }
-      const max = el2.scrollHeight - el2.clientHeight;
-      if (anchor.index >= 0) {
-        // ① 粗还原：按虚拟器几何把锚点项放回它原来的视口偏移。
-        const offsetTop = virtualizer.getOffsetForIndex(anchor.index)?.[0];
-        if (typeof offsetTop === "number") {
-          el2.scrollTop = Math.max(0, offsetTop - anchor.offset);
-        } else if (max > 0) {
-          el2.scrollTop = anchor.ratio * max;
-        }
-        // ② 精确校正（本轮新增，针对性修「位置偏差非常大」）：
-        //    getOffsetForIndex 对**尚未测量**的项用的是 estimateSize（按类型分桶取中位数），
-        //    长会话中锚点项之前有大量离屏项时，估算累计误差可达数百像素 —— 粗还原因此偏得很远，
-        //    且偏移量随会话长度增长（这正是用户说的"偏差非常大"，而不是几像素的抖动）。
-        //    锚点项此刻必然已挂载（上一步刚把它定位进视口），直接量它的真实位置做像素级校正，
-        //    等价于用实测值覆盖估算值。虚拟项自带 data-index（见渲染处 data-index={item.index}）。
-        const correctAnchor = (remaining: number) => {
-          if (sticky.isFollowing()) return;
-          const node = el2.querySelector(`[data-index="${anchor.index}"]`);
-          if (!(node instanceof HTMLElement) && remaining > 0) {
-            virtualizer.scrollToIndex(anchor.index, { align: "start", behavior: "auto" });
-            requestAnimationFrame(() => correctAnchor(remaining - 1));
-            return;
-          }
-          if (node instanceof HTMLElement) {
-            const actual = node.getBoundingClientRect().top - el2.getBoundingClientRect().top - el2.clientTop;
-            const delta = actual - anchor.offset;
-            if (Math.abs(delta) > 1) el2.scrollTop += delta;
-          }
-          if (remaining > 0) requestAnimationFrame(() => correctAnchor(remaining - 1));
-        };
-        requestAnimationFrame(() => correctAnchor(5));
-      } else if (max > 0) {
-        el2.scrollTop = anchor.ratio * max;
-      }
-    };
-
-    lastWidthRef.current = el.clientWidth;
-    // plan-31-151 S4：锚点 capture 时机修正——拖拽期间 RO 回调里 capture 时布局已被改写，
-    //   捕获到的是污染锚点。改为在 ResizeHandle 的 mousedown（拖拽开始前）派发的
-    //   chatcoder:panel-drag-start 事件里捕获（此时布局尚未变）；窗口 resize 路径
-    //   仍在 RO 回调第一帧捕获（此时是窗口几何驱动，布局同样尚未变）。
-    let pendingRestore = 0;
-    let missedDuringMotion = false;
-    const inMotion = () => isBusy(); // PerfBus（S3）
-    // plan-387-1825 A13：还原时机 = 「容器宽度已落定」，并以 400ms 硬兜底。
-    //
-    // 演进记录（前两版都不对，这里写明为什么最终这样写）：
-    //   · 最初「固定重试 3 次」≈96ms —— 短于折叠/展开的 `--dur-pane`（260ms）CSS 过渡，
-    //     restore 读到**半程布局**并随即清空锚点，过渡结束后再无补偿 → 位置错位。
-    //   · 上一版「宽度与总高连续 3 帧都不变」—— 虚拟器重排期间总高会持续微调，
-    //     判据过严导致长期不满足，被 800ms 兜底强制还原时位置已经漂了。
-    //   现在只用一个判据：**宽度连续两帧一致且非 0**。
-    //     拖拽 → 宽度瞬时到位，4 帧内即还原；
-    //     折叠/展开 → 宽度在 260ms 过渡中持续变化，自然等到过渡走完才还原。
-    //   测量缓存的新旧不再影响准确性 —— restore 末尾会用 DOM 实测做像素级校正。
-    const RESTORE_MAX_WAIT_MS = 400;
-    let lastProbeW = -1;
-    let restoreStartedAt = 0;
-    const scheduleRestore = () => {
-      if (!restoreStartedAt) restoreStartedAt = performance.now();
-      if (pendingRestore) cancelAnimationFrame(pendingRestore);
-      pendingRestore = requestAnimationFrame(() => {
-        pendingRestore = requestAnimationFrame(() => {
-          pendingRestore = 0;
-          const el2 = parentRef.current;
-          if (!el2) {
-            widthAnchorRef.current = null;
-            missedDuringMotion = false;
-            restoreStartedAt = 0;
-            lastProbeW = -1;
-            return;
-          }
-          const w = el2.clientWidth;
-          const widthSettled = w > 0 && Math.abs(w - lastProbeW) < 1;
-          lastProbeW = w;
-          const timedOut = performance.now() - restoreStartedAt > RESTORE_MAX_WAIT_MS;
-          if (!widthSettled && !timedOut) {
-            scheduleRestore(); // 继续等，不消耗锚点
-            return;
-          }
-          restoreStartedAt = 0;
-          lastProbeW = -1;
-          restore();
-          widthAnchorRef.current = null;
-          missedDuringMotion = false;
-        });
+      if (!ready() || !needsRestore.current) return;
+      needsRestore.current = false;
+      updateFlowViewport(el, true);
+      if (sticky.isFollowing()) { sticky.pin(); return; }
+      const anchor = widthAnchorRef.current ?? readingAnchorRef.current;
+      if (!anchor) { virtualizer.scrollToOffset(lastValidTop.current); return; }
+      const index = findAnchorIndex(virtualizer.options.count, virtualizer.options.getItemKey, anchor);
+      const target = index >= 0 ? virtualizer.getOffsetForIndex(index, "start")?.[0] : undefined;
+      virtualizer.scrollToOffset(target == null ? anchor.top : Math.max(0, target - anchor.offset));
+      const token = ++restoreToken.current;
+      cancelAnimationFrame(restoreFrame.current);
+      restoreFrame.current = requestAnimationFrame(() => {
+        restoreFrame.current = 0;
+        if (disposed || token !== restoreToken.current || !ready() || sticky.isFollowing()) return;
+        const nodes = Array.from(el.querySelectorAll<HTMLElement>(anchor.messageId ? "[data-message-id]" : ".message-flow-virtual-item"));
+        const node = nodes.find((value) => anchor.messageId ? value.dataset.messageId === anchor.messageId
+          : Number(value.dataset.index) === index);
+        if (!node) return;
+        const wanted = anchor.messageId && anchor.messageOffset != null ? anchor.messageOffset : anchor.offset;
+        const delta = node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop - wanted;
+        if (Math.abs(delta) > 1) virtualizer.scrollToOffset(el.scrollTop + delta);
+        requestGeometryCheck.current();
       });
+      widthAnchorRef.current = null;
     };
-    /** 运动结束后收尾：补一次锚点还原。 */
-    const settleAfterMotion = () => {
-      if (!missedDuringMotion) return;
-      scheduleRestore();
-    };
-    /* plan-586-2374 §2.2：运动结束补测——把运动期被跳过的屏外项一次性写回真实高度。
-     *
-     * 为什么不用 virtualizer.measure()：直接全量清缓存会与 directDomUpdates 下的 RO 重测
-     * 竞争、导致项重叠（见 reconcile.ts 中 RECONCILE_ORDER.virtualizerMeasure 的沿革注释）。
-     * 这里逐项 resizeItem 是幂等写——视口内项的缓存本来已是最新，delta 为 0，不产生任何动作。
-     * 先读齐再写：避免 getBoundingClientRect 与 resizeItem 的 scrollTop 补偿交替，把一次
-     * 布局读变成 N 次强制同步布局。 */
-    const remeasureSkippedItems = () => {
-      const skipped = skippedDuringMotionRef.current;
-      /* plan-20261118-width-epoch：宽度纪元的失效**不在这里做**——本任务是 order 40，
-       *  而锚点还原是 order 30，先执行。若把失效挪到这里，锚点还原读到的仍是「新旧宽度混算」
-       *  的总高，还原目标本身就错，改动等于没生效。失效已抽成 invalidateOnWidthChange()，
-       *  注册在 RECONCILE_ORDER.widthInvalidate（25，rect 之后、锚点还原之前）。 */
-      if (skipped.size === 0) return;
-      const pending: Array<{ index: number; height: number }> = [];
-      // plan-633-2604：补到的 index 从集合里摘除；集合里剩下的就是「运动期挂载过、
-      // 补测时已卸载」的项——它们必须显式失效，否则会一直按旧尺寸占位（大片空白）。
-      const unresolved = new Set(skipped);
-      virtualizer.elementsCache.forEach((el) => {
-        if (!el.isConnected) return;
-        const index = virtualizer.indexFromElement(el);
-        if (index < 0) return;
-        const height = Math.round(el.getBoundingClientRect().height);
-        // 未布局 / 已隐藏的项读不到高度，跳过它但不影响其余项（forEach 里的 return 即 continue）。
-        if (!Number.isFinite(height) || height <= 0) return;
-        unresolved.delete(index);
-        /* plan-630-2590：与缓存一致的项不再 push。
-         *
-         * resizeItem 会推进 itemSizeCacheVersion 并触发 scrollTop 补偿；对一个本来就没变的项
-         * 反复写同值，等于在收敛序列里制造无谓的重排，与贴底内核抢同一帧。缓存已经是正确值时
-         * 直接跳过，把写入集中到真正需要纠正的项上。 */
-        const cached = virtualizer.itemSizeCache.get(virtualizer.options.getItemKey(index));
-        if (cached != null && Math.abs(cached - height) < 1) return;
-        pending.push({ index, height });
-      });
-      skipped.clear();
-      for (const p of pending) virtualizer.resizeItem(p.index, p.height);
-      /* plan-20261118-width-epoch：未解析项**不再写回估算值**，改为从缓存删除。
-       *
-       *  plan-633-2604 当年写「估算值」是为了打断旧缓存，但写进去之后
-       *  `shouldSkipMeasurement` 的「从未测过必须真测」守卫（判据是 itemSizeCache.has）
-       *  就不再放行——该项下次挂载本会真测，却因为这行写入被判成「已测过」而沿用估算值，
-       *  于是这一项的高度误差要等下一次滚动/重挂载才被纠正，正是「中间一片空白、滚几下才好」。
-       *
-       *  删除则同时满足两个目标：断开了旧缓存（Map 里没有该 key → 回到 estimateSize），
-       *  又保住了「未测过必须真测」的语义（下次挂载立即真测）。
-       *  这里不能用 virtualizer.measure()：那会清掉视口内刚测好的正确值，
-       *  而本任务（order 40）执行时锚点还原已经完成，再全清会让位置二次跳。 */
-      for (const index of unresolved) {
-        virtualizer.itemSizeCache.delete(virtualizer.options.getItemKey(index));
-      }
-      if (pending.length === 0 && unresolved.size === 0) return;
-      // 高度已变 → 可见范围与贴底同步跟上，避免收敛后露出半帧偏差
-      refreshVisibleIndexes();
-      sticky.pin();
-    };
-    /* plan-20261118-width-epoch：宽度纪元失效（修「展开右面板 → 拖宽度 → 折叠右面板」后的空白）。
-     *
-     *  ── 根因 ──
-     *  过渡期间消息列宽度持续变化，已挂载项的文本逐帧重新折行、真实高度跟着变；但**屏外项
-     *  不会被重测**：`measureElement` 在运动期对「视口 ± 1 屏之外」直接返回缓存值
-     *  （shouldSkipMeasurement），而运动结束的补测只覆盖「补测时仍挂载」的项——拖动结束时
-     *  它们早已卸载。于是缓存高度停在**旧宽度**的实测值，视口内却是**新宽度**的实测值：
-     *  总高 = 新旧宽度混算，项位置由 start 累计，失真总高把后续内容整体推偏，露出的就是
-     *  消息之间/末条下方那片空白。滚动让项重新挂载并被真测，于是「滚几下就恢复」。
-     *
-     *  ── 为什么必须排在锚点还原之前（order 25 < 30）──
-     *  锚点还原要用「总高与各项 start」算出目标 scrollTop。若先还原、后失效，还原用的就是
-     *  那个混算总高，目标位置本身就是错的，等于白改。所以顺序必须是：
-     *  提交视口 rect（20）→ **失效并重测（25）** → 还原锚点 / 贴底（30）。
-     *
-     *  ── 为什么用 measure() 而不是逐项 resizeItem ──
-     *  `measure()` 是官方语义的「所有项回到 estimateSize」：清 itemSizeCache、pendingMin 归零、
-     *  推进 itemSizeCacheVersion、notify(false)。逐项 resizeItem 会按补偿谓词一百多次写
-     *  scrollTop，与贴底/锚点三方互抢；而直接改 itemSizeCache + 手写版本号会踩 private 字段
-     *  （版本号不推进则 getMeasurements 继续返回旧 flat 数组）。
-     *  失效后立刻把**仍挂载**项的实测高度写回：它们已完成折行，量到的就是新布局真值，
-     *  视口内不会先渲染一帧估算排版再跳；屏外项保持无缓存，下次挂载时由 measureElement 真测。 */
-    const invalidateOnWidthChange = () => {
-      if (widthEpochRef.current === appliedWidthEpochRef.current) return;
+    const remeasure = () => {
+      if (!ready()) return;
+      if (!measurementDirty.current && appliedWidthEpochRef.current === widthEpochRef.current && !skippedDuringMotionRef.current.size) return;
+      measurementDirty.current = false;
+      needsRestore.current = true;
       appliedWidthEpochRef.current = widthEpochRef.current;
       skippedDuringMotionRef.current.clear();
-      virtualizer.measure();
-      const pending: Array<{ index: number; height: number }> = [];
-      virtualizer.elementsCache.forEach((el) => {
-        if (!el.isConnected) return;
-        const index = virtualizer.indexFromElement(el);
-        if (index < 0 || index >= virtualizer.options.count) return;
-        const height = Math.round(el.getBoundingClientRect().height);
-        if (!Number.isFinite(height) || height <= 0) return;
-        pending.push({ index, height });
-      });
-      // 先读齐再写：resizeItem 会按 delta 补偿 scrollTop，边读边写会退化成 N 次强制同步布局
-      for (const p of pending) virtualizer.resizeItem(p.index, p.height);
-      refreshVisibleIndexes();
-      /* 重测后库的总高按新尺寸重算，但 directDomUpdates 的容器高度要等它的 onChange 才写；
-       * 这里直接把容器校正一次，避免「总高已变、容器还是旧的」这段时间里贴底算到错的底部
-       * （末条下方留白）。校正取真实末项底，末项未挂载时退回虚拟器总高。 */
-      const innerEl = innerRef.current;
-      if (innerEl) {
-        const realBottom = bottomGeometryOf(innerEl, totalCount);
-        innerEl.style.height = `${realBottom ?? virtualizer.getTotalSize()}px`;
-      }
-    };
-    // plan-31-151 S4：锚点收尾路径去重——删除 pointerup 捕获监听与 panel-drag-end 事件，
-    //   只保留 reconcile order 30 一条路径；窗口 resize 路径仍走 chatcoder:window-motion。
-    const offWidth = registerReconcileTask(`mf-width-invalidate:${instanceId}`,
-      RECONCILE_ORDER.widthInvalidate, "宽度变化后让屏外项高度失效", () => invalidateOnWidthChange());
-    const offRect = registerReconcileTask(`mf-virtualizer-rect:${instanceId}`, RECONCILE_ORDER.virtualizerRect,
-      "提交虚拟器视口尺寸", () => settleRectRef.current?.());
-    const offAnchor = registerReconcileTask(`mf-scroll-anchor:${instanceId}`, RECONCILE_ORDER.scrollAnchor,
-      "还原滚动锚点", () => settleAfterMotion());
-    /* plan-586-2374 §2.2：运动期跳过的项在收敛序列里补测（order 40 在 rect / 锚点之后，
-       此时宽度已落定，量到的是终态高度）。没发生过跳过时整个任务是一次布尔判断。 */
-    const offRemeasure = registerReconcileTask(`mf-virtualizer-remeasure:${instanceId}`,
-      RECONCILE_ORDER.virtualizerMeasure, "补测运动期跳过的项", () => remeasureSkippedItems());
-    const onMotionEnd = (e: Event) => {
-      const active = (e as CustomEvent<{ active?: boolean }>).detail?.active;
-      if (active === false) {
-        // 窗口缩放路径不经过 runReconcile（App.tsx 只广播事件），此处补上同一份补测。
-        // plan-20261118-width-epoch：同样要在这里做宽度失效——否则「窗口缩放」这条路径
-        // 的屏外项仍停在旧宽度高度（reconcile 任务根本没被调用）。
-        invalidateOnWidthChange();
-        remeasureSkippedItems();
-        settleAfterMotion();
-        return;
-      }
-      // plan-586-2374：窗口缩放（IPC window:motion active=true）不派发 panel-drag-start /
-      // pane-change-start，白名单需要在这里单独重建。主进程在改窗口几何**之前**同步发来该事件，
-      // 此时读到的 scrollTop / clientHeight 还是运动前的干净几何。
-      //
-      // 注意**不要**在这里清 `skippedDuringMotionRef`：标记归属「单次运动」，而本事件是
-      // 窗口几何运动源的开始信号。若用户正拖分隔条（panel-drag 已置 true）期间窗口又收到
-      // resize/move，无条件清零会让拖拽收尾的补测变成 no-op，屏外项停在旧高度。
-      // 各运动源在**自己的开始处**归零（onDragStart / onPaneChangeStart / 本分支的前一次收尾）。
+      refreshFlowMeasurements(el, virtualizer);
+      updateFlowViewport(el, true);
       refreshVisibleIndexes();
     };
-    window.addEventListener("chatcoder:window-motion", onMotionEnd);
-    // plan-31-151 S4：拖拽开始前捕获锚点（ResizeHandle mousedown 派发，此时布局尚未变）。
-    const onDragStart = () => {
-      if (!inMotion()) return; // 非拖拽路径不捕获（窗口 resize 走 RO 第一帧）
-      lastWidthRef.current = el.clientWidth;
+    const start = () => {
+      if (!ready()) return;
+      restoreToken.current += 1;
+      needsRestore.current = true;
       capture();
-      missedDuringMotion = true;
-      // plan-586-2374：运动开始 = 布局尚未改写，此刻刷新的「视口 ± 1 屏」最干净；
-      // 运动期不再刷新（避免读布局），整个 260ms 门控都用这份集合。
-      refreshVisibleIndexes();
-      // plan-633-2604：集合按「单次运动」归零（记 index，供收尾逐项补测/失效）。
-      skippedDuringMotionRef.current.clear();
-    };
-    window.addEventListener("chatcoder:panel-drag-start", onDragStart);
-    // plan-387-1825 B1：折叠/展开按钮的几何变更。applyPaneUpdate 在 acquire("panel-anim")
-    // 之后、提交布局之前派发本事件 —— 与分隔条 mousedown 同一时机语义（布局尚未改写），
-    // 捕获到的锚点是干净的。此处**不能**沿用 onDragStart 的 inMotion 守卫的早退逻辑：
-    // 折叠时 isBusy() 恰为真（panel-anim 已登记），但事件本身正是我们要的触发点。
-    const onPaneChangeStart = () => {
       lastWidthRef.current = el.clientWidth;
-      capture();
-      missedDuringMotion = true;
-      refreshVisibleIndexes();
-      // plan-633-2604：同 onDragStart，按运动源归零本次运动要记录的跳过项。
-      skippedDuringMotionRef.current.clear();
     };
-    window.addEventListener("chatcoder:pane-change-start", onPaneChangeStart);
-    const ro = new ResizeObserver(() => {
-      const el2 = parentRef.current;
-      if (!el2) return;
-      // plan-20261118-width-epoch：宽度确实变了就记一个纪元，收敛期据此让屏外项高度失效。
-      // 放在 isBusy 早退之前——运动期的宽度变化同样会让缓存高度过期，这正是要修的路径。
-      const wNow = el2.clientWidth;
-      if (wNow > 0 && Math.abs(wNow - lastWidthRef.current) >= 1) {
+    const interrupt = () => { restoreToken.current += 1; widthAnchorRef.current = null; needsRestore.current = false; };
+    const onMotion = (event: Event) => {
+      if ((event as CustomEvent<{ active?: boolean }>).detail?.active === false) runReconcile();
+      else start();
+    };
+    const onResize = () => {
+      if (!ready()) return;
+      if (Math.abs(el.clientWidth - lastWidthRef.current) >= 1) {
+        if (!widthAnchorRef.current) widthAnchorRef.current = readingAnchorRef.current;
+        lastWidthRef.current = el.clientWidth;
         widthEpochRef.current += 1;
+        measurementDirty.current = true;
+        runReconcile();
       }
-      // 运动期：锚点已在 drag-start 事件里捕获（拖拽路径），或在 RO 第一帧捕获（窗口 resize）。
-      //   这里只记账，不再重复 capture（避免在已改写的布局上捕获污染锚点）。
-      if (inMotion()) {
-        missedDuringMotion = true;
-        return;
-      }
-      const w = el2.clientWidth;
-      if (Math.abs(w - lastWidthRef.current) < 1) return; // 高度抖动不参与
-      lastWidthRef.current = w;
-      // 运动期钉住了内容宽度，松手解冻后这次 RO 仍应使用运动前的锚点，
-      //   不能在内容折行后的新布局上重新 capture（否则就是把漂移后的偏移当作目标）。
-      if (missedDuringMotion) {
-        scheduleRestore();
-        return;
-      }
-      // 非运动路径（窗口 resize 的第一帧 RO）：此时布局尚未变，可安全捕获。
-      capture();
-      scheduleRestore();
-    });
-    ro.observe(el);
-    return () => {
-      offRect(); offAnchor(); offRemeasure(); offWidth();
-      if (pendingRestore) cancelAnimationFrame(pendingRestore);
-      window.removeEventListener("chatcoder:window-motion", onMotionEnd);
-      window.removeEventListener("chatcoder:panel-drag-start", onDragStart);
-      window.removeEventListener("chatcoder:pane-change-start", onPaneChangeStart);
-      ro.disconnect();
     };
-  }, [virtualizer, instanceId, sticky, refreshVisibleIndexes]);
+    lastWidthRef.current = el.clientWidth;
+    const offRect = registerReconcileTask(`mf-virtualizer-rect:${instanceId}`, RECONCILE_ORDER.virtualizerRect,
+      "提交有效视口尺寸", () => { if (ready()) { settleRectRef.current?.(); settleOffsetRef.current?.(true); } });
+    const offMeasure = registerReconcileTask(`mf-measure:${instanceId}`, RECONCILE_ORDER.widthInvalidate, "更新测量纪元", remeasure);
+    const offAnchor = registerReconcileTask(`mf-scroll-anchor:${instanceId}`, RECONCILE_ORDER.scrollAnchor, "恢复阅读位置", restore);
+    const offCheck = registerReconcileTask(`mf-coverage:${instanceId}`, 90, "检查可见内容", () => requestGeometryCheck.current());
+    const observer = new ResizeObserver(onResize);
+    observer.observe(el);
+    window.addEventListener("chatcoder:panel-drag-start", start);
+    window.addEventListener("chatcoder:pane-change-start", start);
+    window.addEventListener("chatcoder:window-motion", onMotion);
+    el.addEventListener("wheel", interrupt, { passive: true });
+    el.addEventListener("pointerdown", interrupt, { passive: true });
+    return () => {
+      saveFlowPosition(sessionKey, { anchor: readingAnchorRef.current, top: lastValidTop.current, following: sticky.isFollowing() });
+      disposed = true; captureReadingPosition.current = () => {};
+      restoreToken.current += 1; cancelAnimationFrame(restoreFrame.current); cancelAnimationFrame(captureFrame);
+      offRect(); offMeasure(); offAnchor(); offCheck(); observer.disconnect();
+      window.removeEventListener("chatcoder:panel-drag-start", start);
+      window.removeEventListener("chatcoder:pane-change-start", start);
+      window.removeEventListener("chatcoder:window-motion", onMotion);
+      el.removeEventListener("wheel", interrupt); el.removeEventListener("pointerdown", interrupt);
+    };
+  }, [virtualizer, instanceId, sticky, refreshVisibleIndexes, sessionKey]);
 
   /** 已做过"会话首次填充贴底"的会话标识（切换会话时重新进入首次填充分支） */
   const initSessionKeyRef = useRef<string | number | null>(null);
   /** plan-282-1444：首次定位的收敛轮询句柄（切会话/卸载时取消） */
   const settleRafRef = useRef(0);
 
-  /** plan-20261115-firstframe-geometry：把内容容器的总高校正到「真实末项底」。返回末项是否已实测。
-   *
-   *  ── 修的是什么（底部一段空白）──
-   *  虚拟容器的 height 由虚拟器按 `getTotalSize()` 写，而 getTotalSize 对**尚未挂载**的项用的是
-   *  estimateSize。贴底时若末项还没进渲染窗口（首帧尤其如此），尾部就按估算值占位：
-   *  估算偏高 ⇒ 最后一条消息下面多出一段空白，且这段空白是「可滚动区」的一部分，
-   *  表现为「已经到底了，但下面还有一截空的」；估算偏低则末项被裁。
-   *
-   *  一旦末项挂载，它的真实高度就已知，于是可以：
-   *   ① 把容器高度写成末项的真实 bottom（贴着底就没有多余滚动空间）；
-   *   ② 顺手再把 scrollTop 顶到真实底部。
-   *  后续库若把高度写回估算值（下一次 onChange），下一帧会再校正一次，直到库拿到的总高与真实一致
-   *  （末项实测后 getTotalSize 本身就等于真实 bottom，校正自动停止，不会长期互写）。 */
-  const syncBottomGeometry = useCallback((): boolean => {
-    const el = parentRef.current;
-    const inner = innerRef.current;
-    if (!el || !inner || totalCount === 0) return false;
-    const realBottom = bottomGeometryOf(inner, totalCount);
-    if (realBottom == null) return false;
-    if (Math.abs(inner.offsetHeight - realBottom) > 1) {
-      inner.style.height = `${realBottom}px`;
-    }
-    return true;
-  }, [totalCount]);
-
-  /** plan-20261115-firstframe-geometry：把「校正容器总高」排队到微任务，一帧内合并为一次。
-   *
-   *  为什么需要调度而不是在 onChange 里直接调用：库每次测量后都会写容器高度并触发 onChange，
-   *  而校正本身又要改这个高度——直接同步写会让「写 → 观察 → 再写」在同一帧里反复触发。
-   *  合并到微任务后，一次测量回调最多校正一次；且只有在校正确实改变了高度时才补一次贴底，
-   *  否则会让贴底与滚动事件互相唤醒（贴底写 scrollTop → 触发 onChange → 再贴底）。
-   *  末项实测后 getTotalSize 与真实末项底一致，校正成为 no-op，这条链路自然停下。 */
-  const bottomFixQueuedRef = useRef(false);
-  const scheduleBottomGeometryFix = useCallback(() => {
-    if (bottomFixQueuedRef.current) return;
-    bottomFixQueuedRef.current = true;
-    queueMicrotask(() => {
-      bottomFixQueuedRef.current = false;
-      const inner = innerRef.current;
-      const before = inner?.offsetHeight ?? 0;
-      if (!syncBottomGeometry()) return;
-      if (inner && Math.abs(inner.offsetHeight - before) > 1) sticky.requestPin();
-    });
-  }, [syncBottomGeometry, sticky]);
-
+  /** plan-20261103-flow-blank：首屏仅用公开定位和实际相交范围收敛，不伪造内部偏移。 */
+  const initialStartedAt = useRef(0);
   useLayoutEffect(() => {
-    /* plan-20261115-firstframe-geometry：首屏定位改为「按真实 DOM 收敛」，不再按估算总高收敛。
-     *
-     * 三版沿革（都写在这里，避免以后再退回前两版）：
-     *   · plan-282-1434：首帧先渲染顶部再由 layoutEffect 把 scrollTop 推到底 —— 多帧叠加成
-     *     「点开会话后从上往下滚一遍」；
-     *   · plan-282-1444：用估算偏移做首帧起点 + 「总高连续 2 帧不变」作揭示判据 —— 估算偏移只写
-     *     虚拟器内部变量、不改 DOM，两者在第一个 scroll 事件前不相等；而判据只看总高，正好在这个
-     *     中间态之后揭示，于是露出上下大片空白（本轮要修的主症状）。
-     *   · 现在：揭示条件改为**几何真的对齐**——末项已挂载并实测、容器高等于真实末项底、
-     *     距底 ≤1px、且虚拟器内部偏移已等于 DOM scrollTop。任何一条不满足都继续藏在
-     *     .is-positioning 下，并用 scrollToIndex(末项) 把末项拉进渲染窗口。 */
-    if (totalCount === 0) return;
-    if (initSessionKeyRef.current !== sessionKey) {
-      initSessionKeyRef.current = sessionKey;
-      setPositioned(false); // 进入新会话：先隐藏，待几何对齐
-      sticky.stick();
-
-      cancelAnimationFrame(settleRafRef.current);
-      const startedAt = performance.now();
-      let stableFrames = 0;
-      let frames = 0;
-      const settle = () => {
-        settleRafRef.current = 0;
-        const el = parentRef.current;
-        const inner = innerRef.current;
-        // 用户在这段窗口内主动上滑：立即停止定位并揭示，不与他抢滚动
-        if (!el || !inner || !sticky.isFollowing()) {
-          setPositioned(true);
-          return;
-        }
-        frames += 1;
-        // ① 末项未进渲染窗口时，先按虚拟器几何把它拉进来——否则总高一直是估算值，
-        //    贴底会停在「估算出来的底部」，那里既没有内容又比真实底部高（上下同时露白）。
-        const tailMeasured = syncBottomGeometry();
-        if (!tailMeasured) {
-          virtualizer.scrollToIndex(totalCount - 1, { align: "end", behavior: "auto" });
-        } else {
-          // ② 末项已实测：直接写真实底部（浏览器按真实 scrollHeight 钳制），
-          //    这次写入产生的 scroll 事件会把虚拟器内部偏移同步成真实值。
-          el.scrollTop = el.scrollHeight;
-        }
-
-        // ③ 对齐判据：末项已实测 + 已在底部 + 内部偏移与 DOM 一致（±1px 抗小数舍入）
-        const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop <= 1;
-        /* 同帧显式对齐虚拟器内部偏移。
-         *
-         * 为什么不能只等 scroll 事件：写 scrollTop 产生的 scroll 事件是**异步分发**的
-         * （滚动由合成/事件循环派发，不在写入当帧的 rAF 回调里），而本循环一帧只跑一次。
-         * 只依赖事件的话，`offsetSynced` 在写入后的那一帧恒为 false，只能等到超时兜底才揭示——
-         * 又把「等一个说不准的时刻」引了回来。
-         *
-         * 直接写实例字段是安全的：库的 scroll 回调本身也是赋值同一字段（virtual-core:855），
-         * 两者写的是同一个真实值；后续事件到达时赋同样的值，不会产生方向误判。 */
-        virtualizer.scrollOffset = el.scrollTop;
-        const offsetSynced = Math.abs((virtualizer.scrollOffset ?? 0) - el.scrollTop) <= 1;
-        if (tailMeasured && atBottom && offsetSynced) stableFrames += 1;
-        else stableFrames = 0;
-
-        const aligned = stableFrames >= 1;
-        const timedOut = frames >= FIRST_FRAME_SETTLE_MAX_FRAMES
-          || performance.now() - startedAt > FIRST_FRAME_SETTLE_MAX_MS;
-        if (aligned || timedOut) {
-          // 超时也揭示：不允许内容被永久隐藏；此后由 StickyBottom 的尺寸观察继续纠正
-          setPositioned(true);
-          return;
-        }
-        settleRafRef.current = requestAnimationFrame(settle);
-      };
+    const root = parentRef.current;
+    if (!visible || !root || root.clientWidth <= 0 || root.clientHeight <= 0 || totalCount === 0) return;
+    if (initSessionKeyRef.current === sessionKey) return;
+    if (!initialStartedAt.current) initialStartedAt.current = performance.now();
+    let frames = 0;
+    const finish = () => { initSessionKeyRef.current = sessionKey; setPositioned(true); requestGeometryCheck.current(); };
+    const settle = () => {
+      settleRafRef.current = 0;
+      if (!visibleRef.current || !root.isConnected || root.clientHeight <= 0) return;
+      if (!sticky.isFollowing()) {
+        if ((!needsRestore.current && visibleFlowItems(root).length > 0) || ++frames >= FIRST_FRAME_SETTLE_MAX_FRAMES
+          || performance.now() - initialStartedAt.current >= FIRST_FRAME_SETTLE_MAX_MS) finish();
+        else settleRafRef.current = requestAnimationFrame(settle);
+        return;
+      }
+      virtualizer.scrollToIndex(totalCount - 1, { align: "end", behavior: "auto" });
+      updateFlowViewport(root, true);
+      const tail = visibleFlowItems(root).find((node) => Number(node.dataset.index) === totalCount - 1);
+      const atBottom = root.scrollHeight - root.clientHeight - root.scrollTop <= 2;
+      if ((tail && atBottom) || ++frames >= FIRST_FRAME_SETTLE_MAX_FRAMES
+        || performance.now() - initialStartedAt.current >= FIRST_FRAME_SETTLE_MAX_MS) { finish(); return; }
       settleRafRef.current = requestAnimationFrame(settle);
+    };
+    settleRafRef.current = requestAnimationFrame(settle);
+    return () => { cancelAnimationFrame(settleRafRef.current); settleRafRef.current = 0; };
+  }, [sessionKey, totalCount, visible, layoutEpoch, virtualizer, sticky]);
+
+  const recoveryCycle = useRef({ id: 0, outer: false, inner: false });
+  const previousVisible = useRef(false);
+  useLayoutEffect(() => {
+    recoveryCycle.current = { id: recoveryCycle.current.id + 1, outer: false, inner: false };
+    const root = parentRef.current;
+    if (!visible) {
+      previousVisible.current = false;
+      restoreToken.current += 1; cancelAnimationFrame(restoreFrame.current);
       return;
     }
-    /* 条目数变化 / 同一会话内追加内容：
-     * 先把尾部高度校正到真实末项底（消除底部空白），再贴底。
-     * 注意顺序——贴底读的是 scrollHeight，必须在校正之后。 */
-    syncBottomGeometry();
-    sticky.pin();
-  }, [sessionKey, totalCount, virtualizer, sticky, syncBottomGeometry]);
+    if (root && root.clientWidth > 0 && root.clientHeight > 0) {
+      if (!previousVisible.current) {
+        previousVisible.current = true;
+        measurementDirty.current = true; needsRestore.current = true;
+        widthAnchorRef.current = readingAnchorRef.current;
+        runReconcile();
+      }
+      updateFlowViewport(root, true);
+      requestGeometryCheck.current();
+    }
+  }, [visible, entries, totalCount, layoutEpoch]);
+
+  useEffect(() => {
+    let frame = 0;
+    let disposed = false;
+    const offInspector = registerFlowInspector(instanceId, () => {
+      const root = parentRef.current;
+      return { session: sessionKey, visible: visibleRef.current, epoch: recoveryCycle.current.id,
+        width: root?.clientWidth ?? 0, height: root?.clientHeight ?? 0, top: root?.scrollTop ?? 0,
+        modelOffset: virtualizer.scrollOffset, total: virtualizer.getTotalSize(),
+        items: virtualizer.getVirtualItems().map((item) => {
+          const element = virtualizer.elementsCache.get(item.key);
+          const rect = element?.getBoundingClientRect();
+          return { index: item.index, start: item.start, size: item.size, domTop: rect?.top ?? null, domHeight: rect?.height ?? null };
+        }) };
+    });
+    const schedule = () => { if (!disposed && !frame) frame = requestAnimationFrame(check); };
+    const check = () => {
+      frame = 0;
+      const root = parentRef.current;
+      if (!visibleRef.current || !positioned || !root || !root.isConnected || root.clientWidth <= 0
+        || root.clientHeight <= 0 || totalCount === 0 || isBusy() || isReconcilePending()) return;
+      settleOffsetRef.current?.();
+      updateFlowViewport(root, true);
+      const items = visibleFlowItems(root);
+      const cycle = recoveryCycle.current;
+      const snapshot = (cause: "outer" | "inner", outcome: "repair" | "unresolved") => recordFlowDiagnostic({
+        session: sessionKey, epoch: cycle.id, cause, outcome, count: totalCount,
+        width: root.clientWidth, height: root.clientHeight, top: root.scrollTop,
+        modelOffset: virtualizer.scrollOffset, range: virtualizer.range ? { ...virtualizer.range } : null,
+        mountedItems: root.querySelectorAll(".message-flow-virtual-item").length,
+        mountedWindows: root.querySelectorAll("[data-flow-window][data-mounted]").length });
+      if (!items.length) {
+        if (cycle.outer) { snapshot("outer", "unresolved"); return; }
+        cycle.outer = true; snapshot("outer", "repair");
+        const anchor = readingAnchorRef.current;
+        refreshFlowMeasurements(root, virtualizer);
+        if (sticky.isFollowing()) virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
+        else if (anchor) {
+          const index = findAnchorIndex(totalCount, virtualizer.options.getItemKey, anchor);
+          const offset = index >= 0 ? virtualizer.getOffsetForIndex(index, "start")?.[0] : undefined;
+          virtualizer.scrollToOffset(offset == null ? anchor.top : Math.max(0, offset - anchor.offset));
+        } else virtualizer.scrollToOffset(lastValidTop.current);
+        schedule();
+        return;
+      }
+      const viewport = root.getBoundingClientRect();
+      const missing = Array.from(root.querySelectorAll<HTMLElement>("[data-flow-window]:not([data-mounted])")).some((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
+      });
+      if (missing) {
+        if (cycle.inner) { snapshot("inner", "unresolved"); return; }
+        cycle.inner = true; snapshot("inner", "repair");
+        updateFlowViewport(root, true); schedule();
+      }
+    };
+    requestGeometryCheck.current = schedule;
+    const wake = () => {
+      if (document.visibilityState === "hidden" || !visibleRef.current) return;
+      recoveryCycle.current = { id: recoveryCycle.current.id + 1, outer: false, inner: false };
+      measurementDirty.current = true; needsRestore.current = true;
+      widthAnchorRef.current = readingAnchorRef.current; runReconcile();
+    };
+    window.addEventListener("focus", wake); document.addEventListener("visibilitychange", wake);
+    window.addEventListener("chatcoder:workspace-restored", wake);
+    schedule();
+    return () => {
+      disposed = true; requestGeometryCheck.current = () => {};
+      offInspector();
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener("focus", wake); document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("chatcoder:workspace-restored", wake);
+    };
+  }, [sessionKey, totalCount, positioned, virtualizer, sticky, instanceId]);
+
+  // 布局提交后位置已由适配器写好，专用窗口在绘制前重新判断，不能依赖下一次滚动。
+  useLayoutEffect(() => { if (visible) { updateFlowViewport(parentRef.current, true); requestGeometryCheck.current(); } });
 
   /** plan-20261020-pts：尾项交给贴底内核观察——流式输出与异步卡片都在最后一条里长高，
    *  直接观察它可在同一帧完成贴底（只观察内容容器要晚一帧，新行会先露出半截再跳）。 */
@@ -1639,16 +1345,8 @@ function MessageFlowCore({
       // 守护期内的反复推走也要拉回，但给个上限避免与外部机制无休止互搏
       if (fixRounds >= 12) { cleanup(); return; }
       fixRounds++;
-      /* plan-20261115-firstframe-geometry：直写 scrollTop 前先把容器撑到正确总高。
-       * 目标项在长会话里常靠后，`getOffsetForIndex` 给出的落点可能超过当前 scrollHeight——
-       * 而被旧高度钳制的那一段就变成「跳过去之后目标上方/下方多出空白」。 */
-      const innerEl = innerRef.current;
-      if (innerEl) {
-        const realBottom = bottomGeometryOf(innerEl, totalCount);
-        innerEl.style.height = `${realBottom ?? virtualizer.getTotalSize()}px`;
-      }
       const before = el.scrollTop;
-      el.scrollTop = before + delta;
+      virtualizer.scrollToOffset(before + delta);
       // 写不进去 = 被 maxScroll / 顶部钳制：目标已尽可能对齐（钳制语义下完整可见），接受现状
       if (el.scrollTop === before) { cleanup(); return; }
       lastTop = -1;
@@ -1672,15 +1370,7 @@ function MessageFlowCore({
       return;
     }
 
-    // 动画期间逐帧直接写 scrollTop，先按 scrollToFn 同口径把内容撑到总高，
-    // 否则靠近底部时会被旧高度钳制，动画中途「粘住」再跳一下。
-    // plan-20261115-firstframe-geometry：与 scrollToFn 同口径——能算出真实末项底就用真实值，
-    // 否则回落到估算总高；只写估算总高会在这里凭空多出一段可滚动区（帧末回弹）。
-    const inner = innerRef.current;
-    if (inner) {
-      const realBottom = bottomGeometryOf(inner, totalCount);
-      inner.style.height = `${realBottom ?? virtualizer.getTotalSize()}px`;
-    }
+    // plan-20261103-flow-blank：缓动只提交滚动目标，不覆盖适配器管理的容器高度。
     const duration = Math.min(JUMP_ANIM_MAX_MS, JUMP_ANIM_BASE_MS + dist * 0.12);
     const startedAt = performance.now();
     const animate = (now: number) => {
@@ -1689,7 +1379,7 @@ function MessageFlowCore({
       const box = parentRef.current;
       if (!box) { cleanup(); return; }
       const p = Math.min(1, (now - startedAt) / duration);
-      box.scrollTop = from + (to - from) * jumpEase(p);
+      virtualizer.scrollToOffset(from + (to - from) * jumpEase(p));
       if (p < 1) {
         jumpRafRef.current = requestAnimationFrame(animate);
         return;
@@ -1785,7 +1475,7 @@ function MessageFlowCore({
       || entry.items.some((item) => "msg" in item && item.msg.id === match.id) : entry.msg.id === match.id;
   });
   return (
-    <div className={`message-flow-outer ${className || ""}`}>
+    <FlowVisibilityContext.Provider value={visible}><FlowViewportVisibility.Provider value={visible}><div className={`message-flow-outer ${className || ""}`}>
       {historySessionId != null && history.hasBefore && <div className="flow-history-control">
         <Button size="xs" variant="subtle" loading={history.loading} onClick={() => void loadOlder()}>
           {history.error ? "重试加载历史" : "加载更早消息"}
@@ -1904,16 +1594,9 @@ function MessageFlowCore({
                   data-index={item.index}
                   ref={virtualizer.measureElement}
                   className="message-flow-virtual-item"
-                  // plan-282-1444：主轴向位置（transform/top）由虚拟列表直接写 DOM。
-                  // plan-633-2604：**top 的初值必须给 item.start**，不能再是 0。
-                  //  directDomUpdates 的 applyDirectStyles 只遍历「当前 getVirtualItems()」内的元素，
-                  //  某个元素若已挂载但本次不在该集合里（range 收缩 / 测量抖动 / 重入），
-                  //  这一帧就不会被写位置 ⇒ 留在 top:0，与首项重叠成一团文字，
-                  //  直到下一次重渲染把它卸载才恢复（这正是「停下滚动后文字重叠、再滚两下就好」）。
-                  //  用 item.start 作锚点后，任何漏写的元素至少停在自己的正确位置。
+                  // plan-20261103-flow-blank：top 只由适配器写，React 再写会使 lastPositions 缓存与 DOM 分离。
                   style={{
                     position: "absolute",
-                    top: item.start,
                     left: 0,
                     width: "100%",
                   }}
@@ -1947,12 +1630,13 @@ function MessageFlowCore({
           <IconArrowDown size={14} />
         </button>
       )}
-    </div>
+    </div></FlowViewportVisibility.Provider></FlowVisibilityContext.Provider>
   );
 }
 
 /** 主会话数据源（source="main"）：全局 store 驱动，完整功能。 */
 function MainMessageFlow({
+  visible = true,
   actions,
   scrollTarget,
   clearScrollTarget,
@@ -1960,6 +1644,7 @@ function MainMessageFlow({
   emptyText,
   suggestionCard,
 }: {
+  visible?: boolean;
   actions?: "full" | "copy-only" | "none";
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
@@ -2149,10 +1834,13 @@ function MainMessageFlow({
           turnStatus={turnRowStatus}
           awaitingBackground={backgroundBusy && index === tailIndex}
           backgroundEndedAt={index === tailIndex ? backgroundEndedAt : 0}
+          // 会话首屏历史还没落地时先不画「未落位子代理卡」：那时 WS 补发的尾部消息
+          // 已进 store，但派发子代理的 spawn_subagent 条目还没到，卡片会先沉到轮末再跳回原位。
+          suppressUnplacedSubagents={messagesPending}
         />
       );
     },
-    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors, backgroundBusy, tailIndex, backgroundEndedAt]
+    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors, backgroundBusy, tailIndex, backgroundEndedAt, messagesPending]
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
@@ -2160,6 +1848,7 @@ function MainMessageFlow({
   const workflowOnly = !isRunning && workflowBusy;
   // plan-308-1542 需求1：任务执行类错误卡（只进消息流，不弹右上角 Toast）
   const flowError = useScoped("flowError");
+  const hasSuggestion = useChatStore((state) => state.pendingSuggestion != null);
   const clearFlowError = useScoped("clearFlowError");
   const dismissTurnError = useScoped("dismissTurnError");
   /* plan-549-2281（第7项）：主消息流**自己**订阅滚动目标。
@@ -2186,6 +1875,7 @@ function MainMessageFlow({
   return (
     <MessageFlowCore
       key={currentSessionId}
+      visible={visible}
       historySessionId={sideScope == null ? currentSessionId : undefined}
       entries={entries}
       // 主代理未跑但工作流在跑时同样开启流式槽位（否则尾部「等待响应…」不渲染）
@@ -2195,7 +1885,7 @@ function MainMessageFlow({
         // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；
         // 若同时存在 turn 级瞬态提示（如重试），瞬态提示仍优先）。
         <StreamingTail
-          active={isRunning || workflowOnly}
+          active={visible && (isRunning || workflowOnly)}
           statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
           persistedText={workflowOnly ? "" : lastPersistedText(entries)}
         />
@@ -2206,7 +1896,7 @@ function MainMessageFlow({
         // 运行中 / 等待子代理时不展示：建议只属于「已收口」的一轮。
         // plan-156-621：侧边对话等复用场景可通过 suggestionCard=false 关闭。
         // plan-20261020-suggestion-gate：消息尚未落地（会话首次加载中）时不展示建议卡。
-        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && !messagesPending && suggestionCard !== false ? <SuggestionCard />
+        !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && !messagesPending && suggestionCard !== false && hasSuggestion ? <SuggestionCard />
           // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
           // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
           : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
@@ -2317,6 +2007,7 @@ function SubagentMessageFlow({
   return (
     <FlowVisibilityContext.Provider value={visible}><MessageFlowCore
       key={threadId ?? "subagent-default"}
+      visible={visible}
       historySessionId={currentSessionId}
       historyThreadId={threadId}
       entries={entries}
@@ -2343,9 +2034,10 @@ function SubagentMessageFlow({
 
 /** 统一对外组件：根据 props.source 分流。 */
 export function MessageFlow(props: MessageStreamProps) {
+  const sessionId = useScoped("currentSessionId");
   if (props.source === "subagent") {
     return (
-      <SubagentMessageFlow
+      <SubagentMessageFlow key={`${sessionId}:${props.threadId}`}
         threadId={props.threadId}
         actions={props.features?.actions ?? "copy-only"}
         visible={props.visible !== false}
@@ -2354,7 +2046,8 @@ export function MessageFlow(props: MessageStreamProps) {
     );
   }
   return (
-    <MainMessageFlow
+    <MainMessageFlow key={sessionId}
+      visible={props.visible !== false}
       actions={props.features?.actions ?? "full"}
       suggestionCard={props.features?.suggestionCard ?? true}
       /* plan-549-2281（第7项）：这里**不要**无条件把 props.scrollTarget 传下去。

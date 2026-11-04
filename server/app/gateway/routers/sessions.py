@@ -1,11 +1,11 @@
 """会话路由（v2：CRUD/fork/rename/worktree；v30.1：压缩块索引/还原）。"""
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import (
-    CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
+    ForkRequest, CompactionIndexOut, GoalOut, GoalSetBody, MessageOut, SessionCreate, SessionOut, SessionUpdate,
 )
 from app.orchestration.agent_events import broadcast
 from app.orchestration.workflow import store as workflow_store
@@ -42,10 +42,13 @@ async def _to_out(db: AsyncSession, s, flags: "session_service.SessionFlags | No
         status=s.status, pinned=s.pinned,
         permission_mode=normalize_execution_mode(s.permission_mode),
         approval_mode=normalize_approval_mode(getattr(s, "approval_mode", None)),
+        # 会话级思考深度：前端按它还原输入框档位（不随其它会话/全局最近值漂移）
+        reasoning_effort=getattr(s, "reasoning_effort", None) or None,
         pinned_at=getattr(s, "pinned_at", None),
         # plan-20261009-ui U2：首页用量热力图按「创建日」统计会话数
         created_at=str(s.created_at) if getattr(s, "created_at", None) else None,
         fork_parent_id=s.fork_parent_id,
+        fork_info=getattr(s, "fork_info", None),
         side_parent_id=getattr(s, "side_parent_id", None),
         side_kind=getattr(s, "side_kind", None),
         worktree_path=s.worktree_path,
@@ -74,6 +77,7 @@ async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)
         db, project_id=body.project_id, title=body.title, model_id=body.model_id,
         permission_mode=body.permission_mode,
         approval_mode=body.approval_mode,
+        reasoning_effort=body.reasoning_effort,
         goal_text=body.goal_text,
     )
     session = await session_service.get_session(db, sid)  # async 只读
@@ -91,6 +95,20 @@ async def list_sessions(project_id: int | None = None, include_archived: bool = 
     for item in out:
         item.workflow_state = states.get(item.id)
     return out
+
+
+@router.get("/mention-candidates")
+async def mention_candidates(current_session_id: int | None = None, project_id: int | None = None,
+                             all_projects: bool = False, query: str = Query("", max_length=500),
+                             include_archived: bool = False, cursor: str | None = None,
+                             limit: int = Query(20, ge=1, le=50), db: AsyncSession = Depends(get_db)):
+    """plan-20261104-session-mentions：补全只读取轻量元信息，不装配运行状态与消息正文。"""
+    from app.services.session_context_service import ContextReadError, mention_candidates as candidates
+    try:
+        return await candidates(db, current_session_id=current_session_id, project_id=project_id,
+            all_projects=all_projects, query=query, include_archived=include_archived, cursor=cursor, limit=limit)
+    except ContextReadError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
 
 @router.get("/subsession-index", response_model=list[SessionOut])
@@ -144,6 +162,8 @@ async def create_side_session(session_id: int, db: AsyncSession = Depends(get_db
     sid = await session_service.create_session(
         db, project_id=parent.project_id, title="侧边会话", model_id=parent.model_id,
         permission_mode=parent.permission_mode, approval_mode=parent.approval_mode,
+        # 侧边会话沿用主会话的思考深度（会话级配置随派生关系继承）
+        reasoning_effort=getattr(parent, "reasoning_effort", None),
         side_parent_id=root,
         side_kind=SideKind.SIDE.value,
         # plan-156-619 S8：侧边会话标题是固定占位，标 named 不参与自动归纳
@@ -189,6 +209,8 @@ async def update_session(session_id: int, body: SessionUpdate, db: AsyncSession 
         title=body.title, model_id=body.model_id, pinned=body.pinned, status=body.status,
         permission_mode=normalize_execution_mode(body.permission_mode) if body.permission_mode else None,
         approval_mode=normalize_approval_mode(body.approval_mode) if body.approval_mode else None,
+        # 会话级思考深度：按会话落库（update_session 会跳过 None，未传该字段时保持原值）
+        reasoning_effort=(body.reasoning_effort or "").strip()[:20] or None,
     )
     if result_status is None:
         raise HTTPException(404, "会话不存在")
@@ -302,13 +324,25 @@ async def stop_bg_process(session_id: int, shell_id: str):
 
 
 @router.post("/{session_id}/fork", response_model=SessionOut)
-async def fork_session(session_id: int, db: AsyncSession = Depends(get_db)):
+async def fork_session(session_id: int, body: ForkRequest | None = None, db: AsyncSession = Depends(get_db)):
     try:
-        sid = await session_service.fork_session(db, session_id)
+        sid = await session_service.fork_session(db, session_id, request_id=body.request_id if body else None)
         session = await session_service.get_session(db, sid)
         return await _to_out(db, session)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        from app.services.fork_service import ForkSourceMissing
+        raise HTTPException(404 if isinstance(e, ForkSourceMissing) else 409, str(e))
+    except Exception:
+        logger.exception("[fork] 创建分支失败 source=%s", session_id)
+        raise HTTPException(500, "创建分支失败，历史快照未完成，请重试")
+
+
+@router.get("/{session_id}/fork-history")
+async def fork_history(session_id: int, db: AsyncSession = Depends(get_db)):
+    session = await session_service.get_session(db, session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在")
+    return session.fork_snapshot or {}
 
 
 @router.post("/{session_id}/rename", response_model=SessionOut)

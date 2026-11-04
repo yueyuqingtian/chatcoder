@@ -544,11 +544,13 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     ]
     user_text = None
     user_attachments = None
+    user_refs = None
     for m in msgs:
         if m.id == snap.user_message_id and restore_to_composer:
             # v2.2: 回滚撤销时同时回填文字与附件（图片等），前端可修改后直接重发
             user_text = str((m.content or {}).get("text", ""))
             user_attachments = (m.content or {}).get("attachments")
+            user_refs = (m.content or {}).get("refs")
     soft_msg_ids = [m.id for m in msgs]
     sub_agent_ids = [a.id for a in sub_agents]
 
@@ -623,6 +625,7 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         "file_recovery": file_result,
         "user_message": user_text if restore_to_composer else None,
         "user_attachments": user_attachments if restore_to_composer else None,
+        "user_refs": user_refs if restore_to_composer else None,
     }
 
 

@@ -82,7 +82,7 @@ _EXTENSION_REAL_NAMES: tuple[str, ...] = (
     # 网络与命令
     "web_fetch", "ci_run", "git",
     # 上下文与记忆
-    "compaction_index", "compaction_view",
+    "compaction_index", "compaction_view", "read_session_context",
     # 子代理管理
     "collect_results", "cancel_subagent", "subagent_inspect",
     "send_to_subagent", "resume_subagent", "report_to_leader",
@@ -296,10 +296,22 @@ def _restore_ask_user(args: dict) -> dict:
         desc = str(q.get("description") or "").strip()
         # 本项目问卷卡只展示 question 正文：背景说明并入正文，用户才能看到
         item["question"] = f"{text}\n{desc}" if text and desc else (text or desc)
-        if isinstance(q.get("options"), list):
-            item["options"] = [_restore_option(o) for o in q["options"]]
+        # 选项键名兜底：模型偶尔把选项写成 choices / answers，不认出来卡片就没有可点选项
+        opts = q.get("options")
+        if not isinstance(opts, list):
+            opts = next((q.get(k) for k in ("choices", "answer_options", "answers")
+                         if isinstance(q.get(k), list)), None)
+        if isinstance(opts, list):
+            item["options"] = [_restore_option(o) for o in opts]
         if "allowCustom" in q or "allow_custom" in q:
             item["allow_custom"] = _as_bool(q.get("allowCustom", q.get("allow_custom")), True)
+        # 官方 ask_user 的 multiple（多选）：前端支持多选题型，必须保留，否则模型问的多选题
+        # 会被渲染成单选（用户实测：AI 出多选题、卡片却只能选一个）
+        multi = q.get("multiple")
+        if multi is None:
+            multi = q.get("multiSelect")
+        if multi is not None:
+            item["multiple"] = _as_bool(multi, False)
         restored.append(item)
     args["questions"] = restored
     args.pop("title", None)

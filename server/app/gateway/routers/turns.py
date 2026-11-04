@@ -15,6 +15,7 @@ from app.gateway.schemas import (ArtifactOut, FileChangeOut, FileDiffOut, Messag
 from app.orchestration import engine
 from app.persistence.database import commit_with_retry, get_db
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
+from app.services.session_context_service import ContextReadError, validate_refs
 
 router = APIRouter(prefix="/turns", tags=["turns"])
 
@@ -66,6 +67,17 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     session = await session_service.get_session(db, body.session_id)
     if session is None:
         raise HTTPException(404, "会话不存在")
+
+    # plan-20261103-fork：工作树失效不能静默回退主目录，也不能先写入用户消息。
+    if session.fork_info and session.worktree_path:
+        from pathlib import Path
+        if not Path(session.worktree_path).is_dir():
+            raise HTTPException(409, "分支的工作目录已不存在，请先恢复该目录或重新配置工作区")
+
+    try:
+        body.refs = await validate_refs(db, body.refs, body.session_id)
+    except ContextReadError as exc:
+        raise HTTPException(404 if exc.code == "NOT_FOUND" else 400, detail=str(exc)) from exc
 
     # 用户消息入库（v14: 附件以文件地址形式持久化到 content.attachments，
     # 前端从历史消息可直接展示附件卡片并点击预览）
@@ -235,20 +247,13 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
     turn = await turn_service.get_turn(db, turn_id)
     if turn is None:
         raise HTTPException(404, "turn 不存在")
-    # 先判定运行态再入库：未运行时不落消息，交由前端常规发送路径处理（避免重复消息）
-    if not engine.inject_input(turn_id, {
-        "request_id": body.request_id,
-        "content": body.content,
-        "attachments": body.attachments or [],
-        "model_id": body.model_id,
-    }):
+    # plan-20261104-session-mentions：引用先校验与持久化，再送进模型队列。
+    if engine.running_turn_id(turn.session_id) != turn_id:
         return {"ok": False, "queued": False, "error": "turn_not_running"}
-    # 运行中补充内容：同样提醒模型对照清单判断续接（提示排在用户消息之后，只进入模型上下文，不落库）
-    from app.orchestration import todo_carry
-
-    carry = await todo_carry.load_carry_steps(db, session_id=turn.session_id, turn_id=turn_id, mid_turn=True)
-    if carry:
-        engine.inject_input(turn_id, {"content": todo_carry.reminder_text(carry, mid_turn=True)})
+    try:
+        body.refs = await validate_refs(db, body.refs, turn.session_id)
+    except ContextReadError as exc:
+        raise HTTPException(404 if exc.code == "NOT_FOUND" else 400, detail=str(exc)) from exc
     # 用户消息立即入库并广播（消息流即时显示；注入内容在下次 LLM 调用前进入上下文）
     user_content: dict = {"text": body.content}
     if body.attachments:
@@ -268,6 +273,17 @@ async def inject_turn_input(turn_id: int, body: TurnInjectBody, db: AsyncSession
         turn_id=turn_id,
         broadcast=False,
     )
+    if not engine.inject_input(turn_id, {
+        "request_id": body.request_id, "content": body.content,
+        "attachments": body.attachments or [], "refs": body.refs or [], "model_id": body.model_id,
+    }):
+        # 落库期间轮次可能已结束；隐藏未入队消息，让前端回退常规发送，避免重复与残留权限。
+        await message_service.patch_message(user_msg.id, deleted=True)
+        return {"ok": False, "queued": False, "error": "turn_not_running"}
+    from app.orchestration import todo_carry
+    carry = await todo_carry.load_carry_steps(db, session_id=turn.session_id, turn_id=turn_id, mid_turn=True)
+    if carry:
+        engine.inject_input(turn_id, {"content": todo_carry.reminder_text(carry, mid_turn=True)})
     try:
         from app.gateway.ws import manager as ws_manager
         from app.services.message_service import _to_out
@@ -316,6 +332,7 @@ async def cancel_turn(turn_id: int, source: str = Query("unknown"),
 
 @router.post("/{turn_id}/resume", response_model=TurnOut)
 async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
+    await _require_live_turn(db, turn_id)
     """断点续跑：将 interrupted turn 重新置为 running 并启动。"""
     turn = await turn_service.get_turn(db, turn_id)
     if turn is None:
@@ -362,6 +379,7 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
     _turn_tasks[turn_id] = task
     # v0.3.1: 绝杀 MissingGreenlet——显式构造纯 Pydantic DTO 返回
     return TurnOut(
+        inherited=getattr(turn, "inherited", False),
         id=turn_id,
         session_id=session_id,
         user_message_id=user_msg_id,
@@ -375,9 +393,17 @@ async def resume_turn(turn_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
+async def _require_live_turn(db: AsyncSession, turn_id: int):
+    # plan-20261103-fork：服务端保护继承历史，不能仅隐藏客户端按钮。
+    turn = await turn_service.get_turn(db, turn_id)
+    if turn is not None and turn.inherited:
+        raise HTTPException(409, "继承的历史记录仅供查看，请发送新消息继续")
+
+
 @router.post("/{turn_id}/rollback", response_model=RollbackResult)
 async def rollback(turn_id: int, restore_to_composer: bool = True, allow_partial: bool = False,
                    db: AsyncSession = Depends(get_db)):
+    await _require_live_turn(db, turn_id)
     """回滚指定 turn（精确文件恢复 + 消息软删 + 可回填输入框）。
 
     存在与手动改动冲突的文件时默认整体拒绝（409，附冲突清单，未改动任何内容）；
@@ -403,6 +429,7 @@ async def rollback(turn_id: int, restore_to_composer: bool = True, allow_partial
 
 @router.get("/{turn_id}/rollback_preview", response_model=RollbackPreviewOut)
 async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
+    await _require_live_turn(db, turn_id)
     """回滚预览：计算本次回滚将撤销的文件及回滚前后内容（不修改任何文件）。
 
     前端确认弹窗据此展示文件清单与 diff 对比，供用户审核后确认执行。
@@ -429,6 +456,7 @@ async def rollback_preview(turn_id: int, db: AsyncSession = Depends(get_db)):
 async def revert_files(turn_id: int, allow_partial: bool = False,
                        turn_ids: str | None = Query(None),
                        db: AsyncSession = Depends(get_db)):
+    await _require_live_turn(db, turn_id)
     """仅撤销该轮（含并入的续跑轮）的文件改动（plan-20261018-turn-changes）。
 
     与 /rollback 的区别：不删消息、不改 turn.status、不回填输入框，只把该轮写盘改动
@@ -548,6 +576,21 @@ async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
     不传则回退整轮累积口径（兼容老数据）。
     plan-20261026-round-changes: 传 turn_ids 时按整轮累积口径（基底轮 + 续跑轮）。
     """
+    historical_turn = await turn_service.get_turn(db, turn_id)
+    if historical_turn and historical_turn.inherited:
+        session = await session_service.get_session(db, historical_turn.session_id)
+        writes = [w for w in (session.fork_snapshot or {}).get("writes", [])
+                  if w.get("turn_id") == turn_id and w.get("path", "").replace("\\", "/") == path.replace("\\", "/")
+                  and (not call_key or w.get("call_key") == call_key)]
+        if not writes:
+            raise HTTPException(404, "该历史记录没有保存此文件的变更详情")
+        before = writes[0].get("old_content")
+        after = writes[-1].get("new_content")
+        if any(w.get("binary") for w in writes):
+            before = writes[0].get("diff_before")
+            after = writes[-1].get("diff_after")
+        return rollback_service._build_diff_payload(path, before, after, single_edit=bool(call_key),
+            reason="继承的历史变更，仅供查看", action={"create": "added", "delete": "deleted"}.get(writes[-1].get("op"), "modified"))
     try:
         session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         if session_id is None or not workspace:
@@ -800,6 +843,10 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             # 属于没有产出也无法定位的幽灵记录，前端不展示。
             "message_count": message_counts.get(agent.id, 0),
         })
+    snapshot_session = await session_service.get_session(db, session_id)
+    if snapshot_session and snapshot_session.fork_snapshot:
+        out.extend(a for a in snapshot_session.fork_snapshot.get("agents", [])
+                   if turn_id is None or a.get("turn_id") == turn_id)
     return out
 
 
@@ -976,6 +1023,7 @@ async def confirm_plan_turn(turn_id: int, body: TaskConfirmBody,
     步骤由主代理在确认后用 todo_write 自主重建（见 engine.execute_confirmed_plan），
     系统不再预生成待确认的步骤列表。
     """
+    await _require_live_turn(db, turn_id)
     turn = await turn_service.get_turn(db, turn_id)
     if turn is None:
         raise HTTPException(404, "turn 不存在")

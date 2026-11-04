@@ -189,7 +189,7 @@ _MATRIX: dict[str, dict[str, str]] = {
 # 纯读工具（对文件系统 / 索引 / 记忆只读，无外部副作用）
 _READ_TOOLS = frozenset({
     "fs_read", "fs_list", "fs_grep", "git_diff", "codebase_search",
-    "symbol_search", "outline", "view_image", "read_attachment",
+    "symbol_search", "outline", "view_image", "read_attachment", "read_session_context",
     "memory_search", "compaction_index", "compaction_view",
     "skill_view", "todo_write", "ask_user_question", "goal_complete",
     "terminal_bg_status",

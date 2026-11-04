@@ -64,6 +64,8 @@ class SessionCreate(BaseModel):
     permission_mode: str | None = None
     # plan-75-332: 首页所选权限模式随创建一次落准（ask / auto / full）
     approval_mode: str | None = None
+    # 首页所选思考深度随创建一次落准——会话级配置，切会话/重启都保持
+    reasoning_effort: str | None = None
     # plan-676: 首页目标模式发送时随创建一次落准（非空即 goal_status=active）
     goal_text: str | None = None
 
@@ -88,9 +90,16 @@ class SessionUpdate(BaseModel):
     status: str | None = None  # active / archived
     permission_mode: str | None = None  # plan-75-332: 执行模式 readonly / plan / agent
     approval_mode: str | None = None  # plan-75-332: 权限模式 ask / auto / full
+    # 会话级思考深度：按会话隔离持久化（切会话 / 重启 / 换设备都保持）
+    reasoning_effort: str | None = None
+
+
+class ForkRequest(BaseModel):
+    request_id: str | None = Field(default=None, max_length=80)
 
 
 class SessionOut(BaseModel):
+    fork_info: dict[str, Any] | None = None
     id: int
     project_id: int | None = None
     title: str | None = None
@@ -102,6 +111,8 @@ class SessionOut(BaseModel):
     created_at: str | None = None  # plan-20261009-ui U2：首页用量热力图按创建日统计会话数
     permission_mode: str = "agent"  # plan-75-332: 执行模式 readonly / plan / agent
     approval_mode: str = "ask"  # plan-75-332: 权限模式 ask / auto / full
+    # 会话级思考深度（null = 该会话尚未设置，前端取模型默认档位）
+    reasoning_effort: str | None = None
     fork_parent_id: int | None = None
     # 侧边会话（子会话）所属主会话 id；普通会话为 None
     side_parent_id: int | None = None
@@ -169,6 +180,7 @@ class TurnInjectBody(BaseModel):
 
 
 class TurnOut(BaseModel):
+    inherited: bool = False
     id: int
     session_id: int
     user_message_id: int | None = None
@@ -385,6 +397,7 @@ class RollbackResult(BaseModel):
     file_recovery: dict[str, Any]
     user_message: str | None = None  # restore_to_composer=True 时回填
     user_attachments: list[dict[str, Any]] | None = None  # restore_to_composer=True 时回填附件（图片等）
+    user_refs: list[dict[str, Any]] | None = None  # plan-20261104-session-mentions：优先回填结构化引用
 
 
 class RollbackPreviewFile(BaseModel):

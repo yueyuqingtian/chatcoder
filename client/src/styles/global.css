@@ -2531,6 +2531,21 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   opacity: 0.3;
   cursor: not-allowed;
 }
+/* 题型标注（单选 / 多选）：多选题的交互与单选完全不同，卡片右上角必须自带说明 */
+.question-wizard-mode {
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-3);
+  background: var(--bg-hover);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+}
+.question-wizard-mode.is-multiple {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .question-wizard-options {
   display: flex;
   flex-direction: column;
@@ -2578,6 +2593,23 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 多选勾选标记：槽位常驻（未选中也占宽），勾选前后不产生布局抖动 */
+.question-wizard-opt-check {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  color: var(--accent-contrast, #fff);
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+.question-wizard-opt-btn.selected .question-wizard-opt-check {
+  background: var(--accent);
+  border-color: var(--accent);
 }
 /* plan-278-1391: 选项全文浮窗——仅当选项被单行截断时才展示（悬停/键盘聚焦触发），
    由 createPortal 渲染到 body，避免被输入框容器裁剪；位置在组件内按视口计算。 */

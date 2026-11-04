@@ -90,3 +90,15 @@ async def test_rollback_attachments_none_when_missing(db, workspace):
     assert result["ok"] is True
     assert result["user_message"] == "请查看图片并修改"
     assert result["user_attachments"] is None
+
+
+async def test_rollback_restores_structured_session_refs(db, workspace):
+    # plan-20261104-session-mentions：回填不依赖文字后缀，保留项目与原始会话标题。
+    from sqlalchemy import select
+    turn_id = await _seed_rollback(db, str(workspace))
+    message = await db.scalar(select(Message).where(Message.turn_id == turn_id))
+    refs = [{"kind": "session", "value": "42", "label": "登录、排查", "project_label": "项目甲"}]
+    message.content = {**message.content, "refs": refs}
+    await db.commit()
+    result = await rollback_service.rollback_turn(db, turn_id=turn_id, restore_to_composer=True)
+    assert result["ok"] and result["user_refs"] == refs

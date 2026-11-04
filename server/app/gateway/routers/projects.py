@@ -1,4 +1,6 @@
 """项目（工作目录）路由；plan-282-1441（#5）追加工作树管理端点。"""
+from pathlib import Path
+from app.services.preview_service import safe_project_path, decode_text, TEXT_LIMIT
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,42 +87,34 @@ async def project_scan_rules(project_id: int, db: AsyncSession = Depends(get_db)
 async def project_stat(project_id: int, path: str,
                        db: AsyncSession = Depends(get_db)):
     """问题2: 轻量文件存在性校验（不读内容），供消息内文件链接判断是否可点击。"""
-    import os
     project = await project_service.get_project(db, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
-    root = os.path.abspath(project.path)
-    target = os.path.abspath(os.path.join(root, path.lstrip("/\\")))
-    if not target.startswith(root + os.sep) and target != root:
+    try:
+        target = safe_project_path(Path(project.path), path)
+    except HTTPException:
         return {"exists": False, "is_dir": False}
-    is_dir = os.path.isdir(target)
-    return {"exists": os.path.exists(target), "is_dir": is_dir}
+    return {"exists":target.exists(), "is_dir":target.is_dir()}
+
 
 
 @router.get("/{project_id}/read-file", response_model=dict)
 async def project_read_file(project_id: int, path: str,
                             db: AsyncSession = Depends(get_db)):
     """读取项目内文件（供右侧文件预览面板）。仅允许项目路径内。"""
-    import os
     project = await project_service.get_project(db, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
-    root = os.path.abspath(project.path)
-    target = os.path.abspath(os.path.join(root, path.lstrip("/\\")))
-    if not target.startswith(root + os.sep) and target != root:
-        raise HTTPException(400, "路径越界")
-    if not os.path.isfile(target):
-        raise HTTPException(404, "文件不存在")
-    size = os.path.getsize(target)
-    MAX_BYTES = 512 * 1024
-    try:
-        with open(target, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(MAX_BYTES) if size > MAX_BYTES else f.read()
-    except OSError as e:
-        raise HTTPException(500, f"读取失败: {e}")
-    ext = os.path.splitext(target)[1].lstrip(".").lower()
-    return {"path": target.replace("\\", "/"), "content": content,
-            "size": size, "truncated": size > MAX_BYTES, "language": ext or None}
+    target = safe_project_path(Path(project.path), path)
+    if not target.is_file():
+        raise HTTPException(404, "文件不存在" if not target.is_dir() else "此路径是目录")
+    size = target.stat().st_size
+    with target.open("rb") as f:
+        data = f.read(TEXT_LIMIT)
+    content = decode_text(data, size > TEXT_LIMIT)
+    return {"path":target.as_posix(), "content":content, "size":size,
+            "truncated":size>TEXT_LIMIT, "language":target.suffix.lstrip(".").lower() or None}
+
 
 
 @router.get("/{project_id}/tree", response_model=dict)

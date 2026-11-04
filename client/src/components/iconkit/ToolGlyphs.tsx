@@ -88,7 +88,7 @@ const TOOL_KEY: Record<string, K> = {
   // plan-20261015-browser-agent：截图类工具用图片图形（plan-630-2590 起其余浏览器工具改为逐项登记，见下）
   browser_screenshot: "image", desktop_screenshot: "image",
   // plan-20261017-ux-overhaul：补齐此前落到「other」闪电图标的常用工具
-  multi_file_edit: "patch", apply_patch: "patch", read_file_range: "read", read_attachment: "read",
+  multi_file_edit: "patch", apply_patch: "patch", read_file_range: "read", read_attachment: "read", read_session_context: "read",
   symbol_search: "search", outline: "list", shell_exec: "term", terminal_bg_status: "term", terminal_bg_kill: "term", bg_command_done: "term", bg_command_stopped: "term",
   // plan-549-2281：功能地图查询与符号索引导入——此前落到 other 闪电图标，与「检索类工具」语义不符
   feature_lookup: "search", symbol_index_enable: "list",

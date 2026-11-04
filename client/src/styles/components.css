@@ -962,3 +962,7 @@
 .ui-pager-num { min-width: 28px; padding-inline: 6px; font-variant-numeric: tabular-nums; }
 .ui-pager-gap { width: 20px; text-align: center; color: var(--text-3); user-select: none; }
 .ui-pager-jump { width: 112px; margin-left: var(--sp-3); }
+
+
+/* plan-20261103-fork-ui：不可回滚仍保留操作槽位，与普通会话保持同样布局。 */
+.msg-action:disabled, .msg-action:disabled:hover { opacity: 0.35; cursor: not-allowed; color: var(--text-3); background: transparent; }

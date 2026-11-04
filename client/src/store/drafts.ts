@@ -45,7 +45,8 @@ export function normalizeApprovalMode(mode: string | null | undefined): Approval
  *  plan-282-1441（#9）：新增 "mcp"（连接器引用）。
  *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹引用）。 */
 export interface ComposerRefDraft {
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin";
+  project_label?: string;
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
   value: string;
   label: string;
 }

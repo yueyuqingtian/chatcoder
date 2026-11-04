@@ -10,7 +10,7 @@ import { Children, isValidElement, useCallback, useMemo, useRef, useState, type 
 import { IconCheck, IconCopy, IconDownload, IconMaximize } from "../icons";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
-import { tableRows, tableMarkdown } from "./markdownData";
+import { tableRows, tableMarkdown, nodeText } from "./markdownData";
 import { ViewportBlock } from "./ViewportBlock";
 
 /** 单元格 → Markdown 行内文本 */
@@ -136,7 +136,7 @@ export function TableBlock({ children }: { children?: ReactNode }) {
     const bodyRows = Children.toArray(child.props.children);
     const groups: ReactNode[] = [];
     for (let start = 0; start < bodyRows.length; start += 40) groups.push(
-      <ViewportBlock key={start} tableColumns={rows[0]?.length || 1} estimate={Math.min(40, bodyRows.length - start) * 36}>
+      <ViewportBlock key={start} windowed contentVersion={nodeText(bodyRows.slice(start, start + 40))} tableColumns={rows[0]?.length || 1} estimate={Math.min(40, bodyRows.length - start) * 36}>
         {bodyRows.slice(start, start + 40)}
       </ViewportBlock>);
     return groups;

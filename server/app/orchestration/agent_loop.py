@@ -205,6 +205,8 @@ async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schem
     # v29: 降档序列里的 "none" 显式关闭思考；有档位时开启；空档位沿用原三态
     _eff_l = (effort or "").strip().lower()
     _retry_thinking = False if _eff_l == "none" else (True if _eff_l else thinking)
+    from app.orchestration.history_sequence import prepare_history
+    api_messages = prepare_history(api_messages)
     _retry_req = ChatRequest(
         messages=api_messages, model="",
         tools=tool_schemas or None,
@@ -1621,6 +1623,8 @@ async def run_agent_loop(
                                   "全部完成后输出方案总结并结束本轮。",
                     )]
 
+            from app.orchestration.history_sequence import prepare_history
+            api_messages = prepare_history(api_messages)
             request = ChatRequest(
                 messages=api_messages, model="",
                 tools=tool_schemas or None,
@@ -1799,6 +1803,9 @@ async def run_agent_loop(
                             return AgentOutput(kind="error", error=_err_text,
                                                transient=_is_transient_failure_text(_reason))
             except Exception as api_err:
+                from app.orchestration.history_sequence import HistorySequenceError
+                if isinstance(api_err, HistorySequenceError):
+                    raise
                 logger.warning("[agent] turn=%s 模型调用失败，尝试修复/压缩: %s", turn_id, str(api_err)[:200])
                 # 先兜底初始化：下方 except 分支会读它们，若在赋值前就抛异常不能变成 NameError
                 _repair_waits: list[float] = []

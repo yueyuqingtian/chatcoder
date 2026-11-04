@@ -1107,11 +1107,13 @@ class Ta3Provider(ModelProvider):
         # plan-598-2517：压缩后可能一条 user 也没有（保留区从 assistant 起切）——
         # 网关要求以 user 开场，否则直接判非法（ta3 表现为「AI服务异常，请稍后重试」）。
         msgs = _ensure_user_lead(_ta3_relocate_inline_system(list(request.messages)))
+        from app.orchestration.history_sequence import prepare_history, validate_openai_wire
+        msgs = prepare_history(msgs)
         raw_msgs = [self._disguise_message(m) for m in msgs]
         runtime_max = self._runtime_max_tokens(request)
         body: dict = {
             "model": request.model or self._model_name,
-            "messages": self._sanitize_openai_tool_pairing(raw_msgs),
+            "messages": validate_openai_wire(self._sanitize_openai_tool_pairing(raw_msgs)),
             "stream": not text,
             "temperature": _to_number(_opt(opts, "temperature"), _DEFAULT_TEMPERATURE),
             "top_p": _opt(opts, "topP", "top_p"),
@@ -1351,7 +1353,9 @@ class Ta3Provider(ModelProvider):
         与流式共用同一构造函数，档位缺省为 none）。
         """
         opts = self._completion_opts
-        system, messages = self._convert_anthropic_messages(request.messages)
+        from app.orchestration.history_sequence import prepare_history, validate_anthropic_wire
+        system, messages = self._convert_anthropic_messages(prepare_history(request.messages))
+        validate_anthropic_wire(messages)
         max_tokens = _to_number(
             _nullish(self._runtime_max_tokens(request), _opt(opts, "maxTokens", "max_tokens")),
             _DEFAULT_MAX_TOKENS)

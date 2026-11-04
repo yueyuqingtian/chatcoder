@@ -95,6 +95,8 @@ function leafPath(leaf: ToolLeaf): string | null {
   if (typeof p === "string" && p) return p;
   const file = leaf.args?.file_path;
   if (typeof file === "string" && file) return file;
+  const directory = leaf.args?.directory ?? leaf.args?.target_directory;
+  if (typeof directory === "string" && directory) return directory;
   // v25: 工具伪装写盘（terminal_exec 等）路径来自 change_stat
   if (leaf.changeStat?.path) return leaf.changeStat.path;
   return null;
@@ -139,7 +141,7 @@ function leafMeta(leaf: ToolLeaf): string {
 
 /** 读文件 / 搜索类：合并行里全是它们时，动作词为「查阅」 */
 const LOOKUP_TOOLS = new Set([
-  ...SEARCH_TOOLS, "fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "outline",
+  ...SEARCH_TOOLS, "fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "read_session_context", "outline",
   "symbol_search", "feature_lookup", "skill_view", "compaction_index", "compaction_view", "git_diff",
 ]);
 
@@ -654,9 +656,15 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
           ? "执行失败，没有返回错误信息"
           : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
 
+  // plan-20261103-attachment-preview：相对工具路径以该调用的工作目录解析。
+  const toolPath = (p: string) => {
+    if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(p)) return p;
+    const cwd = leaf.args?.cwd ?? leaf.args?.workdir ?? leaf.args?.working_directory;
+    return typeof cwd === "string" && cwd && cwd !== "." ? `${cwd.replace(/[\\/]$/,"")}/${p}` : p;
+  };
   const openGrepHit = (e: React.MouseEvent, hit: { path: string; line: number }) => {
     e.stopPropagation();
-    setPreviewPath(hit.path, hit.line);
+    setPreviewPath(toolPath(hit.path), hit.line);
     openPanel();
     openTab("files");
   };
@@ -664,13 +672,16 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   // 点击文件名/徽标：写入工具 = 右面板 Monaco DiffEditor 查看变更（plan-89-387: 带 call_key 取本次编辑）；其余查看文件
   const openFilePreview = async (e: React.MouseEvent, p: string) => {
     e.stopPropagation();
-    setPreviewPath(p);
+    const opened = toolPath(p);
+    const bucket = usePanelStore.getState().activeBucket;
+    setPreviewPath(opened);
     openPanel();
     openTab("files");
     if (isWrite && leaf.turnId != null) {
       try {
         const d = await api.getFileDiff(leaf.turnId, p, leaf.callKey);
-        setDiffPreview({ path: d.path, before: d.before, after: d.after, truncated: d.truncated });
+        if (usePanelStore.getState().activeBucket !== bucket || usePanelStore.getState().previewPath !== opened) return;
+        setDiffPreview({ path: opened, before: d.before, after: d.after, truncated: d.truncated });
       } catch { /* 回退普通预览 */ }
     }
   };
@@ -685,7 +696,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
         {/* plan-20261025-shell（需求 1）：两字动作词，运行中与完成态同一个词（运行态 = 流光 + 行尾转圈） */}
         <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>{label.verb}</span>
         {path && (
-          <Tooltip content={`${path}（点击查看${isWrite ? "变更" : "文件"}）`}>
+          <Tooltip content={`${path}（点击查看${isWrite ? "变更" : "文件或目录"}）`}>
             <span className="tc-filelink" onClick={(e) => void openFilePreview(e, path)}>
               <FileIcon name={path} size={16} />
               <span className="tc-filename">{name}</span>
@@ -777,14 +788,22 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               {leaf.tool === "ask_user_question" && (
                 (() => {
                   const qs = (leaf.args?.questions as Array<{ question?: string }> | undefined) || [];
-                  /** 解析工具结果中的答案映射（形如 `用户回答:\n{ "0": "..." }`）。 */
+                  /** 解析工具结果中的答案映射（形如 `用户回答:\n{ "0": "..." }`）。
+                   *  多选的答案是字符串数组，这里统一压成展示文本（顿号连接）。 */
                   const parseAnswers = (): Record<string, string> => {
                     if (!leaf.output) return {};
                     const jsonMatch = leaf.output.match(/\{[\s\S]*\}/);
                     if (!jsonMatch) return {};
                     try {
                       const parsed = JSON.parse(jsonMatch[0]);
-                      return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+                      if (!parsed || typeof parsed !== "object") return {};
+                      const out: Record<string, string> = {};
+                      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+                        out[k] = Array.isArray(v)
+                          ? v.map((x) => String(x ?? "")).filter((x) => x.trim() !== "").join("、")
+                          : String(v ?? "");
+                      }
+                      return out;
                     } catch {
                       return {};
                     }
@@ -857,7 +876,7 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
   const summary = useMemo(() => {
     const search = leaves.filter((l) => SEARCH_TOOLS.has(l.tool)).length;
     const run = leaves.filter((l) => RUN_TOOLS.has(l.tool)).length;
-    const read = leaves.filter((l) => ["fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "outline"].includes(l.tool)).length;
+    const read = leaves.filter((l) => ["fs_read", "read_file_range", "fs_list", "view_image", "read_attachment", "read_session_context", "outline"].includes(l.tool)).length;
     const web = leaves.filter((l) => l.tool.startsWith("browser_")).length;
     const other = leaves.length - search - run - read - web;
     const parts: string[] = [];
@@ -964,7 +983,7 @@ const WindowedToolLeaves = memo(function WindowedToolLeaves({ leaves }: { leaves
   const groups = [];
   for (let start = 0; start < leaves.length; start += 20) {
     const group = leaves.slice(start, start + 20);
-    groups.push(<ViewportBlock key={group[0].callKey} estimate={group.length * 28}>
+    groups.push(<ViewportBlock key={group[0].callKey} windowed contentVersion={group.map((leaf) => `${leaf.callKey}:${leaf.ok}:${leaf.output.length}`).join("|")} estimate={group.length * 28}>
       <div className="tc-leaf-window">{group.map((leaf) => <LeafRow key={leaf.callKey} leaf={leaf} />)}</div>
     </ViewportBlock>);
   }

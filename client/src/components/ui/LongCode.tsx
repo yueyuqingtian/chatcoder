@@ -58,7 +58,7 @@ export const LongCode = memo(function LongCode({ source, language, live = false 
     return out;
   }, [source, highlighted]);
   return <code className={`language-${language || "text"} md-long-code`}>{chunks.map((chunk, index) => (
-    <ViewportBlock key={index} inline estimate={chunk.count * 20}>
+    <ViewportBlock key={index} inline windowed contentVersion={source} estimate={chunk.count * 20}>
       {chunk.html ? <span dangerouslySetInnerHTML={{ __html: chunk.content }} /> : chunk.content}
     </ViewportBlock>
   ))}</code>;

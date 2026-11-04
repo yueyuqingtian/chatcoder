@@ -195,6 +195,11 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
              "view_image", "read_attachment"],
         ],
     }
+    # plan-20261104-session-mentions：只升级未自定义的内置白名单，派生代理沿用同会话引用边界。
+    for preset in presets:
+        previous = list(preset["tools_whitelist"])
+        _PAST_DEFAULTS[preset["name"]].append(previous)
+        preset["tools_whitelist"].append("read_session_context")
     for preset in presets:
         res = await db.execute(
             select(SubagentProfile).where(SubagentProfile.name == preset["name"])

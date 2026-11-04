@@ -22,6 +22,7 @@ from app.orchestration.tools.memory_search import MemorySearchTool
 from app.orchestration.tools.memory_write import MemoryWriteTool
 from app.orchestration.tools.multi_edit import MultiFileEditTool
 from app.orchestration.tools.read_attachment import ReadAttachmentTool
+from app.orchestration.tools.read_session_context import ReadSessionContextTool
 from app.orchestration.tools.skill_view import SkillViewTool
 # plan-156-619 S10：后续任务建议（收尾时向用户提一条可执行的下一步）
 from app.orchestration.tools.suggestion import SuggestNextTaskTool
@@ -110,7 +111,7 @@ def _build_default_registry() -> ToolRegistry:
         TerminalExecTool, EditorApplyDiffTool, WebFetchTool,
         CiRunTool, MemorySearchTool, GitDiffTool,
         GrepTool, WebSearchTool, ViewImageTool,
-        ReadAttachmentTool, TodoWriteTool,
+        ReadAttachmentTool, ReadSessionContextTool, TodoWriteTool,
         # v2.2 (对齐 zcode 3.14): 补注册——多文件编辑/git 操作/代码库搜索/结构化提问
         MultiFileEditTool, GitTool, CodebaseSearchTool, AskUserQuestionTool,
         # plan-548-2276 阶段 4：功能 → 模块映射（先知道该读哪几个文件，再选具体检索工具）

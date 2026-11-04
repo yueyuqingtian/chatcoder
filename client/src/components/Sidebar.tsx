@@ -193,6 +193,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const forkSession = useChatStore((s) => s.forkSession);
+  const forkingSessions = useChatStore((s) => s.forkingSessions);
   // 本地得知的后台工作流执行中的会话（只在 bySession 变化时重算，避免每次工作流事件都重绘侧栏）；
   // 加上「待唤醒」的会话（工作流结束到主代理被唤醒之间的空档，转圈不断；plan-20261014-actions-wait）
   const wfBySession = useWorkflowStore((s) => s.bySession);
@@ -817,7 +818,7 @@ export function Sidebar({ active, onChange, onSessionFocus }: SidebarProps) {
             onClick={closeSessionMenu}
           >
             <div className="context-menu-item" onClick={() => { setRenaming({ id: s.id, value: s.title || "" }); closeSessionMenu(); }}><IconPencil size={13} /> {t("sidebar.ctx_rename")}</div>
-            {!child && <div className="context-menu-item" onClick={() => { forkSession(s.id); onSessionFocus(); closeSessionMenu(); }}><IconCopy size={13} /> {t("sidebar.ctx_fork")}</div>}
+            {!child && <div className={"context-menu-item" + (forkingSessions[s.id] ? " disabled" : "")} aria-disabled={!!forkingSessions[s.id]} onClick={() => { if (forkingSessions[s.id]) return; void forkSession(s.id); onSessionFocus(); }}><IconCopy size={13} /> {forkingSessions[s.id] ? "正在创建分支…" : t("sidebar.ctx_fork")}</div>}
             <div className="context-menu-item" onClick={() => { togglePin(s); closeSessionMenu(); }}><IconPin size={13} /> {s.pinned ? t("sidebar.ctx_unpin") : t("sidebar.ctx_pin")}</div>
             {!child && <div className="context-menu-item" onClick={() => { api.createWorktree(s.id); closeSessionMenu(); }}><IconGitBranch size={13} /> {t("sidebar.ctx_worktree")}</div>}
             <div

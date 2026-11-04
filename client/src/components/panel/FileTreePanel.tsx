@@ -10,18 +10,18 @@
  *  · 预览头：路径面包屑（点目录 → 在树里定位）+ 分段切换（变更对比 / 当前内容，预览 / 源码）+ 外部打开 + 关闭；
  *  · 没有预览时树占满整个面板，打开预览后树收成侧栏（宽度带弹簧过渡）。 */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import Editor, { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "@monaco-editor/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { api, type TreeNode } from "../../api/client";
+import { previewApi, type PreviewSource, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { bucketKeyOf, usePanelStore } from "../../store/panel";
 import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconPanelLeft, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
-import { MarkdownContent } from "../MarkdownContent";
-import { Button, Empty, Segmented, Tooltip } from "../ui";
+import ResourcePreview from "./ResourcePreview";
+import { Empty, Segmented, Tooltip } from "../ui";
 import { FileIcon } from "../iconkit/FileIcon";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { projectColorKey, projectIconKey } from "../project/projectMeta";
-import { recordComponentRender, recordDerivation } from "../../perf/metrics";
+import { recordComponentRender } from "../../perf/metrics";
 import { isBusy, subscribe } from "../../perf/bus";
 
 /** 文件扩展名 -> Monaco 语言 ID 映射（后端只返回扩展名，这里兜底转换）。 */
@@ -198,12 +198,15 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("filePanel");
 
-  const currentProjectId = useChatStore((s) => s.currentProjectId);
+  const session = useChatStore((s) => s.sessions.find(x => x.id === sessionId));
+  const currentProjectId = session?.project_id ?? null;
   const projects = useChatStore((s) => s.projects);
-  const previewPath = usePanelStore((s) => s.previewPath);
-  const previewLine = usePanelStore((s) => s.previewLine);
+  const previewRequestId = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewRequestId ?? 0);
+  const previewTarget = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewTarget ?? null);
+  const previewPath = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewPath ?? null);
+  const previewLine = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewLine ?? null);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
-  const diffPreview = usePanelStore((s) => s.diffPreview);
+  const diffPreview = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.diffPreview ?? null);
   // 按本实例所属会话桶读取「计划查看后收起目录树」请求（各会话的文件面板常驻挂载，不能共用投影值）
   const planCollapsePending = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.planCollapsePending ?? false);
   const turnChanges = useChatStore((s) => s.turnChanges);
@@ -212,13 +215,12 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const [filter, setFilter] = useState("");
   /** 键盘光标（路径）：与「当前预览文件」是两回事——可以先移动再回车打开 */
   const [cursor, setCursor] = useState<string | null>(null);
-  const [content, setContent] = useState<string>("");
-  const [contentLang, setContentLang] = useState<string>("plaintext");
+  const contentLang = toMonacoLang(null, previewPath ?? "");
   const [contentError, setContentError] = useState<string | null>(null);
+  useEffect(()=>setContentError(null),[previewPath,previewTarget]);
   // v11: 变更对比 / 当前内容 视图切换（仅当 diff 与当前文件匹配时生效）
   const [viewMode, setViewMode] = useState<"diff" | "content">("diff");
   // v17: Markdown 文件支持 预览/源码 切换（默认预览渲染）
-  const [mdView, setMdView] = useState<"preview" | "source">("preview");
   const panelRef = useRef<HTMLDivElement>(null);
   const crumbsRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
@@ -238,15 +240,11 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const treeRef = useRef<HTMLDivElement>(null);
   /** 待定位的路径：展开祖先目录后，等行列表更新再滚动到它 */
   const pendingReveal = useRef<string | null>(null);
-  // v2.2 (对齐 zcode 3.14.2): Monaco 编辑器实例引用（grep 行号定位）
-  const editorRef = useRef<{ revealLineInCenter: (line: number) => void; setPosition: (p: { lineNumber: number; column: number }) => void; focus: () => void } | null>(null);
-  /** plan-75-334 阶段2：请求序号——快速切换文件时只允许最新一次响应落地。 */
-  const loadSeqRef = useRef(0);
-  /** plan-75-334 阶段3：已完成的「路径#变更签名」加载键（隐藏期不请求、恢复可见时补算）。 */
-  const loadedKeyRef = useRef<string>("");
 
   const project = projects.find((p) => p.id === currentProjectId);
-  const projectRoot = project?.path ?? "";
+  const projectRoot = session?.worktree_path || project?.path || "";
+  const projectSource = (path: string): Extract<PreviewSource,{source:"project"}> | null => sessionId != null && currentProjectId != null ? {source:"project", session_id:sessionId, project_id:currentProjectId, path} : null;
+  const resourceSource = previewTarget ?? (previewPath ? projectSource(previewPath) : null);
   /** 预览文件的相对路径 / 树节点路径 / 比较键 */
   const previewRel = previewPath ? relativeTo(projectRoot, previewPath) : "";
   const previewNode = previewPath ? toNodePath(projectRoot, previewRel) : "";
@@ -342,71 +340,31 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
     }
   }, [diffPreview, previewPath]);
 
+  const treeGeneration = useRef(0);
+  const mergeChildren = (nodes: TreeNode[], path: string, children: TreeNode[]): TreeNode[] => nodes.map(n => pathKey(n.path) === pathKey(path) ? {...n,children:children.map(child=>{const old=n.children?.find(x=>pathKey(x.path)===pathKey(child.path));return old?.children?.length&&child.type==="dir"?{...child,children:old.children}:child;})} : n.children ? {...n,children:mergeChildren(n.children,path,children)} : n);
+  const loadChildren = async (path: string) => {
+    const source=projectSource(path); if(!source)return;
+    const generation=treeGeneration.current;
+    const result=await previewApi.children(source);
+    if(generation===treeGeneration.current)setTree(old=>mergeChildren(old,result.path,result.children));
+    return result;
+  };
   const loadTree = async () => {
-    if (!currentProjectId) return;
-    try {
-      const data = await api.getProjectTree(currentProjectId, 8);
-      setTree(data.children ?? []);
-    } catch { /* ignore */ }
-  };
-
-  useEffect(() => { loadTree(); }, [currentProjectId]);
-
-  // 预览文件
-  const loadFile = async (path: string, seq: number) => {
-    if (!currentProjectId) return;
     setContentError(null);
-    // plan-75-334 阶段0：文件预览请求计数（仅采集期间统计）——
-    // 用来核对「只修改其它文件时当前预览请求次数为 0」这一验收项。
-    recordDerivation("filePreviewRequest");
+    const generation=++treeGeneration.current;
+    const source=projectSource(""); if(!source){setTree([]);return;}
     try {
-      const data = await api.readProjectFile(currentProjectId, path);
-      // plan-75-334 阶段2：过期响应保护——快速切换文件时旧响应不得覆盖新预览
-      if (loadSeqRef.current !== seq) return;
-      setContent(data.content);
-      setContentLang(toMonacoLang(data.language, path));
-      if (data.truncated) setContentError("文件过大，已截断预览");
-    } catch (e) {
-      if (loadSeqRef.current !== seq) return;
-      setContentError(String(e));
-      setContent("");
-    }
+      const data=await previewApi.children(source,undefined,8);
+      if(generation!==treeGeneration.current)return;
+      setTree([{name:project?.name??data.path,path:data.path,type:"dir",children:data.children}]);
+      setOpenPaths(new Set([data.path]));
+    } catch (e) { if(generation===treeGeneration.current)setContentError(String(e)); }
   };
+  useEffect(() => {setTree([]);setCursor(null);void loadTree();return()=>{treeGeneration.current++;};}, [currentProjectId, projectRoot, sessionId]);
 
-  useEffect(() => {
-    if (!previewPath) { loadedKeyRef.current = ""; return; }
-    // plan-75-334 阶段3：隐藏期不请求磁盘（面板不可见时读盘+编辑器刷新都是白做）；
-    // 恢复可见时本 effect 因 visible 变化重跑，键未记录 ⇒ 补算一次。
-    if (!visible) return;
-    // 已删除文件不读盘（读取必然失败，还会闪出错误态）
-    if (isDeletedDiff) return;
-    const key = `${previewPath}#${previewChangeSignature}`;
-    if (loadedKeyRef.current === key) return;
-    loadedKeyRef.current = key;
-    void loadFile(previewPath, ++loadSeqRef.current);
-  }, [previewPath, previewChangeSignature, visible, currentProjectId, isDeletedDiff]);
-
-  // v19.2 (plan-917): 彻底隔离右侧文件面板与主会话流式输出。
-  // 文件面板永远展示磁盘真实文件内容，绝不被 streamingBuffers 覆盖。
-  // 文件落盘或修改后通过 turnChanges 重新加载最新磁盘文件。
-  const displayContent = content;
-
-  // v2.2 (对齐 zcode 3.14.2): grep path:line 跳转 → Monaco 定位到行
-  useEffect(() => {
-    if (previewLine != null && editorRef.current) {
-      const editor = editorRef.current;
-      try {
-        editor.revealLineInCenter(previewLine);
-        editor.setPosition({ lineNumber: previewLine, column: 1 });
-        editor.focus();
-      } catch { /* ignore */ }
-    }
-  }, [previewLine, content, contentLang]);
-
-  // 打开文件后自动展开父级目录，并在行列表更新后滚动定位到该文件
   useEffect(() => {
     if (!previewPath) return;
-    const dirs = ancestorNodePaths(projectRoot, previewRel);
+    const dirs = [projectRoot.replace(/\\/g,"/"), ...ancestorNodePaths(projectRoot, previewRel)];
     pendingReveal.current = previewNode;
     setCursor(previewNode);
     if (dirs.length === 0) return;
@@ -468,6 +426,7 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   }, []);
   const toggleDir = (path: string) => {
     const opening = !openPaths.has(path);
+    if(opening) void loadChildren(path).catch(e=>setContentError(String(e)));
     setOpenPaths((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
@@ -543,18 +502,25 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   };
 
   /** 面包屑：点目录 → 展开并在树里定位到它 */
-  const revealDir = (dirRel: string) => {
-    const node = toNodePath(projectRoot, dirRel);
-    setFilter("");
-    if (narrow) setPreviewPath(null); // 窄面板里目录树被预览占满：先回到目录树再定位
-    pendingReveal.current = node;
-    setCursor(node);
-    setOpenPaths((prev) => {
-      const next = new Set(prev);
-      for (const d of [...ancestorNodePaths(projectRoot, `${dirRel}/x`), node]) next.add(d);
-      return next;
-    });
+  const revealDirectory = async (node: string) => {
+    const source=projectSource(node); if(!source)return;
+    const generation=treeGeneration.current;
+    const openedPath=previewPath;
+    const openedRequest=previewRequestId;
+    const rel=relativeTo(projectRoot,node);
+    const root=projectRoot.replace(/\\/g,"/").replace(/\/+$/,"");
+    const dirs=[root,...(rel===root?[]:ancestorNodePaths(root,`${rel}/x`))];
+    try {
+      const lists: {path:string;children:TreeNode[]}[]=[];
+      for(const dir of [...new Set([...dirs,node])]) lists.push(await previewApi.children({...source,path:dir}));
+      if(generation!==treeGeneration.current || usePanelStore.getState().activeBucket!==bucketKeyOf(sessionId) || (usePanelStore.getState().previewPath!==openedPath || usePanelStore.getState().previewRequestId!==openedRequest))return;
+      setTree(old=>lists.reduce((nodes,d)=>mergeChildren(nodes,d.path,d.children),old.length?old:[{name:project?.name??root,path:root,type:"dir",children:[]}]));
+      setFilter("");setTreeCollapsed(false);setCursor(node);pendingReveal.current=node;
+      setOpenPaths(old=>new Set([...old,...dirs,node]));
+      setPreviewPath(null);
+    } catch(e){if(generation===treeGeneration.current)setContentError(String(e));}
   };
+  const revealDir = (dirRel: string) => {void revealDirectory(toNodePath(projectRoot,dirRel));};
 
   const pathParts = previewRel.split("/").filter(Boolean);
   const fileName = pathParts[pathParts.length - 1] ?? "";
@@ -563,10 +529,14 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
     const el = crumbsRef.current;
     if (el) el.scrollLeft = el.scrollWidth;
   }, [previewPath, narrow]);
-  const isMd = previewPath ? /\.(md|markdown)$/i.test(previewPath) : false;
+
+  if(previewTarget) return <div className="ft-panel resource-attachment-panel" ref={panelRef}>
+    <ResourcePreview key={`${previewRequestId}:${JSON.stringify(previewTarget)}`} source={previewTarget} onClose={()=>setPreviewPath(null)} onDirectory={path=>void revealDirectory(path)}/>
+  </div>;
 
   return (
     <div className={"ft-panel" + (narrow ? " is-narrow" : "")} ref={panelRef}>
+      {contentError && <div className="resource-notice" role="alert">{contentError}</div>}
       <div className={"ft-body" + (previewPath ? " has-preview" : "") + (wide ? " is-wide" : "") + (previewPath && treeCollapsed && !narrow ? " tree-collapsed" : "")}>
         {/* 左：目录树（预览时可收起；收起后不可聚焦，见 panel.css .tree-collapsed） */}
         <div className="ft-tree-col" aria-hidden={previewPath && treeCollapsed && !narrow ? true : undefined}>
@@ -611,8 +581,8 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                     role="treeitem"
                     aria-level={r.depth + 1}
                     aria-expanded={isDir ? r.open : undefined}
-                    aria-selected={!isDir && pathKey(n.path) === previewKey}
-                    className={"ft-row" + (isDir ? "" : " ft-file") + (!isDir && pathKey(n.path) === previewKey ? " active" : "") + (n.path === cursor ? " is-cursor" : "") + (entering ? " is-entering" : "")}
+                    aria-selected={isDir ? n.path === cursor : pathKey(n.path) === previewKey}
+                    className={"ft-row" + (isDir ? "" : " ft-file") + ((isDir ? n.path === cursor : pathKey(n.path) === previewKey) ? " active" : "") + (n.path === cursor ? " is-cursor" : "") + (entering ? " is-entering" : "")}
                     style={{
                       height: ROW_H,
                       transform: `translateY(${v.start}px)`,
@@ -680,15 +650,6 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                     options={[{ value: "diff", label: "变更对比" }, { value: "content", label: "当前内容" }]}
                   />
                 )}
-                {isMd && (
-                  <Segmented
-                    size="sm"
-                    value={mdView}
-                    onChange={setMdView}
-                    aria-label="Markdown 视图"
-                    options={[{ value: "preview", label: "预览" }, { value: "source", label: "源码" }]}
-                  />
-                )}
                 {!isDeletedDiff && (
                   <Tooltip content="在外部打开" side="bottom">
                     <button type="button" className="ui-icon-btn" aria-label="在外部打开" onClick={() => openExternal(previewPath)}><IconExternalLink size={14} /></button>
@@ -735,25 +696,9 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                 )}
                 {diffPreview!.truncated && <div className="ft-diff-truncated">变更行数过大，内容已截断显示</div>}
               </div>
-            ) : contentError ? (
-              <div className="ft-preview-err">
-                <p>{contentError}</p>
-                <Button variant="outline" size="sm" icon={<IconExternalLink size={13} />} onClick={() => openExternal(previewPath)}>在外部打开</Button>
-              </div>
-            ) : isMd && mdView === "preview" ? (
-              <div className="ft-md-preview">
-                <MarkdownContent>{displayContent}</MarkdownContent>
-              </div>
-            ) : (
-              <Editor
-                height="100%"
-                language={contentLang}
-                value={content}
-                theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
-                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, automaticLayout: false }}
-                onMount={(editor) => { editorRef.current = editor; attachManualLayout(editor); }}
-              />
-            )}
+            ) : resourceSource ? (
+              <ResourcePreview showName={false} key={`${previewRequestId}:${JSON.stringify(resourceSource)}:${previewChangeSignature}`} source={resourceSource} line={previewLine} onDirectory={path=>void revealDirectory(path)} />
+            ) : <div className="resource-state">此会话未关联项目，无法读取项目文件。</div>}
           </div>
         )}
       </div>

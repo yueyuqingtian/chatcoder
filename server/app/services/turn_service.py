@@ -87,4 +87,10 @@ async def update_turn_status(db: AsyncSession, turn_id: int, status: str,
         s.commit()
         return t.status
 
+    # plan-20261103-fork：完成状态是快照边界，发布前必须经过写入屏障。
+    if status == "completed":
+        from app.persistence.write_behind import write_behind
+        for (sid, tid), buf in list(write_behind.buckets.items()):
+            if tid == turn_id:
+                await buf.flush()
     return await run_write_locked(patch, label=f"turn.status.{turn_id}")

@@ -66,6 +66,8 @@ else:
     )
 
 hiddenimports = [
+    "xlrd",
+    "openpyxl",
     "sqlite3",
     "uvicorn.logging",
     "uvicorn.loops",

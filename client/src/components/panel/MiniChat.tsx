@@ -1,3 +1,4 @@
+import { usePanelStore } from "../../store/panel";
 /** 主对话小窗（plan-20261016-ux 问题 10）：右侧面板全屏时，右下角浮出当前会话的精简对话，可直接发送。
  *
  * 三种状态（记住用户上次的选择）：
@@ -30,7 +31,7 @@ import { attachmentsOf } from "../chat/AttachmentCard";
 import { StickyBottom } from "../chat/stickyBottom";
 import { IconArrowDown, IconFileText, IconMessageSquare, IconMinus, IconOperationCluster, IconPaperclip, IconPin, IconSpinner, IconX } from "../icons";
 import { IconSendStop } from "../iconkit/MorphIcons";
-import { Tooltip } from "../ui";
+import { Button, Tooltip } from "../ui";
 import type { MessageOut } from "../../api/client";
 
 type MiniState = "hidden" | "open" | "pinned";
@@ -136,7 +137,7 @@ function useAnchorDrag(anchor: Anchor, setAnchor: (a: Anchor) => void, storageKe
 }
 
 type MiniItem =
-  | { kind: "user"; key: string; text: string; atts: AttachmentInfo[] }
+  | { kind: "user"; messageId: number; sessionId: number; key: string; text: string; atts: AttachmentInfo[] }
   | { kind: "ai"; key: string; text: string }
   | { kind: "tools"; key: string; count: number; last: string }
   | { kind: "image"; key: string; url: string; title: string }
@@ -159,7 +160,7 @@ function buildItems(messages: MessageOut[]): MiniItem[] {
       flushTools();
       const text = msgText(m.content).trim();
       const atts = attachmentsOf(content);
-      if (text || atts.length > 0) out.push({ kind: "user", key: `u${m.id}`, text, atts });
+      if (text || atts.length > 0) out.push({ kind: "user", key: `u${m.id}`, text, atts, messageId: m.id, sessionId: m.session_id });
       continue;
     }
     if (m.sender_type !== "agent") continue;
@@ -344,7 +345,10 @@ export function MiniChat() {
     if (!text && atts.length === 0) return;
     const st = useChatStore.getState();
     const mode = normalizeDraftMode(session?.permission_mode);
-    const effort = useDraftsStore.getState().getDraft(`s${currentSessionId}`)?.reasoningEffort ?? st.lastReasoningEffort ?? undefined;
+    // 深度按会话隔离：会话记录（服务端持久化）优先，其次本会话草稿，最后才回落全局最近值
+    const effort = session?.reasoning_effort
+      ?? useDraftsStore.getState().getDraft(`s${currentSessionId}`)?.reasoningEffort
+      ?? st.lastReasoningEffort ?? undefined;
     sticky.stick();
     // 与主输入框同口径：agent 透传 null（引擎默认全量工具），其余模式名原样透传；运行中由 sendTurn 自动排队
     void st.sendTurn(text, atts as unknown as Record<string, unknown>[], effort, mode === "agent" ? null : mode, session?.model_id ?? st.lastModelId ?? null, []);
@@ -438,10 +442,10 @@ export function MiniChat() {
                         </button>
                       ) : (
                         <Tooltip key={`${a.url}-${i}`} content={a.filename} side="top">
-                          <span className="mini-chat-file">
+                          <Button variant="ghost" size="xs" onClick={() => usePanelStore.getState().openResource({source:"attachment",session_id:it.sessionId,message_id:it.messageId,file_id:a.file_id},useChatStore.getState().currentSessionId)}>
                             <IconFileText size={13} />
                             <span>{a.filename}</span>
-                          </span>
+                          </Button>
                         </Tooltip>
                       ))}
                     </div>

@@ -46,15 +46,63 @@ def _normalize_option(opt: Any) -> str:
     return str(opt)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """模型常把布尔值写成字符串 / 数字（"true" / 1），统一归一。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "y", "on"):
+            return True
+        if low in ("false", "0", "no", "n", "off", "", "none", "null"):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+# 多选的键名别名：ta3 官方 schema 用 multiple，模型也常照搬 Claude 的习惯写 multiSelect
+_MULTI_KEYS = ("multiple", "multiSelect", "multi_select", "multi")
+
+# 选项的键名别名：模型偶尔把选项写进 choices / answers 等键，卡片会因此整块没有可点选项
+_OPTION_KEYS = ("options", "choices", "answer_options", "answers")
+
+
+def _pick_option_list(item: dict) -> list[Any] | None:
+    """取第一个「确实是数组」的选项键（保持键名多样性的同时不伪造空列表）。"""
+    for key in _OPTION_KEYS:
+        value = item.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
 def _normalize_questions(questions: list[Any]) -> list[Any]:
-    """每个问题的 options 规范化为字符串数组（其余字段原样保留）。"""
+    """每个问题的 options 规范化为字符串数组，并归一多选/自定义输入标记。
+
+    - options 保持原样（缺省/非数组）时不动：模型可以只提开放式问题不给选项，
+      前端会渲染自定义输入行让用户直接作答（用户实测：没选项的卡片此前整块不可作答）。
+    - multiple：`multiple` / `multiSelect` 等别名统一成布尔 `multiple`；缺省视为单选，
+      前端按单选/多选分别渲染（多选允许勾多个 + 补充自定义输入）。
+    - allowCustom 归一成 allow_custom：非 ta3 供应商会照官方 schema 传驼峰键。
+    """
     out: list[Any] = []
     for q in questions:
         if isinstance(q, dict):
             item = dict(q)
-            opts = item.get("options")
+            opts = _pick_option_list(item)
             if isinstance(opts, list):
                 item["options"] = [_normalize_option(o) for o in opts]
+                for key in _OPTION_KEYS:
+                    if key != "options":
+                        item.pop(key, None)
+            for key in _MULTI_KEYS:
+                if key in item:
+                    item["multiple"] = _as_bool(item.pop(key), False)
+                    break
+            if "allowCustom" in item and "allow_custom" not in item:
+                item["allow_custom"] = _as_bool(item.pop("allowCustom"), True)
             out.append(item)
         else:
             out.append(q)
@@ -70,7 +118,8 @@ class AskUserQuestionTool(Tool):
         "在动手实现之前使用此工具——避免猜测用户意图导致方向性返工。"
         "能从代码库/文档/会话历史中查到的事实不要问（先自行探索）；"
         "只问真正的决策点。"
-        "问题必须简洁、选项互斥且覆盖主要可能，"
+        "问题必须简洁、选项覆盖主要可能；互斥的选择用默认单选，"
+        "选项之间互相独立、可以同时成立时把该题的 multiple 设为 true（用户可勾选多个，也能再补充自定义输入）。"
         "相关的问题合并到一次调用中（最多 8 个），不要反复打断用户；"
         "allow_custom 为 true 时用户可自由输入选项之外的答案。"
     )
@@ -102,6 +151,14 @@ class AskUserQuestionTool(Tool):
                                         "items": {"type": "string"},
                                     },
                                     "allow_custom": {"type": "boolean"},
+                                    "multiple": {
+                                        "type": "boolean",
+                                        "description": (
+                                            "是否多选（默认单选）。选项之间互相独立、可以同时成立时设为 true——"
+                                            "用户可以勾选多个选项，也可以再补充自定义输入；"
+                                            "互斥的选择保持默认单选即可"
+                                        ),
+                                    },
                                 },
                                 "required": ["question"],
                             },

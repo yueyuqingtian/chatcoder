@@ -288,9 +288,16 @@ export interface ProjectTreeOut {
  *  落库结构化副本后，消息流可直接渲染出与输入框一致的带图标芯片。 */
 export interface ComposerRefOut {
   /** plan-633-2604（R3）：新增 "dir"——拖入的文件夹引用（值为目录路径，AI 侧用 fs_list 查看） */
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin";
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
   value: string;
   label: string;
+  project_label?: string;
+}
+
+export interface SessionMentionCandidate {
+  id: number; title: string | null; project_id: number | null; project_name: string | null;
+  status: string; side_kind: string | null; side_parent_id: number | null; parent_title: string | null;
+  last_activity_at: string | null;
 }
 
 export interface TurnCreateBody {
@@ -974,12 +981,18 @@ export const api = {
     ),
 
   // ── 会话 ──
+  sessionMentionCandidates: (params: { current_session_id?: number; project_id?: number; all_projects?: boolean;
+    query?: string; include_archived?: boolean; cursor?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined) q.set(key, String(value));
+    return get<{ items: SessionMentionCandidate[]; next_cursor: string | null }>(`/sessions/mention-candidates?${q}`);
+  },
   listSessions: (projectId?: number, includeArchived?: boolean) => {
     const q = [projectId != null ? `project_id=${projectId}` : "", includeArchived ? "include_archived=true" : ""]
       .filter(Boolean).join("&");
     return get<SessionOut[]>(`/sessions${q ? `?${q}` : ""}`);
   },
-  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; approval_mode?: string; goal_text?: string }) =>
+  createSession: (data: { project_id: number; title?: string; model_id?: number; permission_mode?: string; approval_mode?: string; reasoning_effort?: string; goal_text?: string }) =>
     post<SessionOut>("/sessions", data),
   getSession: (id: number) => get<SessionOut>(`/sessions/${id}`),
   /** 从主会话开一个侧边会话（子会话）：沿用主会话的项目、模型与模式，之后走同一条 turn 流水线。 */
@@ -1000,7 +1013,7 @@ export const api = {
   /** 取消建议 → 永久不再展示。 */
   dismissSuggestion: (suggestionId: number) =>
     post<{ ok: boolean }>(`/suggestions/${suggestionId}/dismiss`),
-  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string; approval_mode?: string }) =>
+  updateSession: (id: number, data: { title?: string; model_id?: number; pinned?: boolean; status?: string; permission_mode?: string; approval_mode?: string; reasoning_effort?: string }) =>
     patch<SessionOut>(`/sessions/${id}`, data),
   /** 删除会话。默认语义 = 归档（可恢复）；permanent=true 走物理删除（plan-282-1441 #4） */
   deleteSession: (id: number, permanent = false) =>
@@ -1015,7 +1028,8 @@ export const api = {
   cancelSessionGoal: (id: number) => del<GoalOut>(`/sessions/${id}/goal`),
   /** 用户确认目标完成（goal_complete 工具的同义用户路径） */
   completeSessionGoal: (id: number) => del<GoalOut>(`/sessions/${id}/goal?complete=true`),
-  forkSession: (id: number) => post<SessionOut>(`/sessions/${id}/fork`),
+  forkSession: (id: number, requestId?: string) => post<SessionOut>(`/sessions/${id}/fork`, { request_id: requestId }),
+  forkHistory: (id: number) => get<ForkHistoryOut>(`/sessions/${id}/fork-history`),
   /** 停止按钮：中断本会话的一切执行（主代理及子代理、后台子代理、运行中的工作流——暂停保留进度） */
   stopSession: (id: number) => post<{ ok: boolean; turns: number; agent_managers: number; workflows_paused: number; wakeup_cancelled?: number }>(`/sessions/${id}/stop`),
   /** plan-20261020-bgtask：会话名下仍在运行的后台命令（右上角「后台任务」栏的数据源） */
@@ -2139,3 +2153,30 @@ export function resolveFileUrl(url: string): string {
   const origin = baseStr.startsWith("http") ? new URL(baseStr).origin : window.location.origin;
   return url.startsWith("/") ? `${origin}${url}` : `${origin}/${url}`;
 }
+
+/** plan-20261103-fork：只读历史快照没有执行入口。 */
+export interface ForkHistoryOut {
+  tasks?: { id: number; turn_id: number; title: string; description?: string; status: string; note?: string }[];
+  workflows?: { id: number; origin_turn_id: number; title: string; goal?: string; status: string; rationale?: string }[];
+  nodes?: { id: number; run_id: number; title: string; task?: string; status: string; output_json?: Record<string, unknown> }[];
+}
+
+/** plan-20261103-attachment-preview：来源明确，附件不借用项目路径权限。 */
+export type PreviewSource = (
+  | { source: "upload"; file_id: string; filename: string; session_id?: number }
+  | { source: "attachment"; session_id: number; message_id: number; file_id: string }
+  | { source: "project"; session_id: number; project_id: number; path: string }) & {relative?: string};
+export interface PreviewResource { name: string; path: string; kind: "directory" | "text" | "word" | "spreadsheet" | "pdf" | "image" | "unsupported"; size: number; content?: string; truncated?: boolean }
+export interface SheetMeta { name: string; rows: number; cols: number }
+export interface SheetRegion { cells: {row:number;col:number;text:string;style:Record<string,string|number>}[]; merges:number[][]; widths:Record<number,number>; heights:Record<number,number> }
+export function previewQuery(source: PreviewSource): string {
+  return new URLSearchParams(Object.entries(source).map(([k,v]) => [k,String(v)])).toString();
+}
+export const previewApi = {
+  text: (source: PreviewSource, signal?: AbortSignal) => get<PreviewResource>(`/preview/text?${previewQuery(source)}`, signal),
+  resolve: (source: PreviewSource, signal?: AbortSignal) => get<PreviewResource>(`/preview/resource?${previewQuery(source)}`, signal),
+  children: (source: PreviewSource, signal?: AbortSignal, depth = 1) => get<{path:string;children:TreeNode[]}>(`/preview/children?${previewQuery(source)}&depth=${depth}`, signal),
+  workbook: (source: PreviewSource, signal?: AbortSignal) => get<{sheets:SheetMeta[];notice:string}>(`/preview/workbook?${previewQuery(source)}`, signal),
+  region: (source: PreviewSource, sheet:string, row:number, col:number, signal?: AbortSignal) => get<SheetRegion>(`/preview/region?${previewQuery(source)}&${new URLSearchParams({sheet,row:String(row),col:String(col)})}`, signal),
+  contentUrl: (source: PreviewSource, download = false) => resolveFileUrl(`/api/preview/content?${previewQuery(source)}&download=${download}`),
+};

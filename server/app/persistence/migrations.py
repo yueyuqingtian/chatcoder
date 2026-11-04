@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 # 团队相关表 (team_agents/teams/agent_templates/session_members/task_edges/decisions)
 # 已被 v2 废弃，不再维护迁移。
 _MIGRATIONS: list[tuple[str, str, str]] = [
+    # plan-20261103-fork：旧会话保持空值，不回填历史分支。
+    ("sessions", "fork_info", "JSON"),
+    ("sessions", "fork_snapshot", "JSON"),
+    ("sessions", "fork_request_id", "VARCHAR(80)"),
+    ("turns", "inherited", "BOOLEAN DEFAULT 0 NOT NULL"),
     ("sessions", "message_revision", "INTEGER DEFAULT 0 NOT NULL"),
     # ========== sessions（v1 缺 project_id / model_id / pinned / fork_parent / worktree / updated_at）==========
     ("sessions", "project_id", "BIGINT"),

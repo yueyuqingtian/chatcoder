@@ -50,6 +50,13 @@ async def _reset_shared_test_db():
         columns = (await conn.exec_driver_sql("PRAGMA table_info(sessions)")).all()
         if not any(row[1] == "message_revision" for row in columns):
             await conn.exec_driver_sql("ALTER TABLE sessions ADD COLUMN message_revision INTEGER DEFAULT 0 NOT NULL")
+        # plan-20261103-fork：复用临时测试库时同样补齐兼容列。
+        for table, column, ddl in (("sessions", "fork_info", "JSON"), ("sessions", "fork_snapshot", "JSON"),
+                                   ("sessions", "fork_request_id", "VARCHAR(80)"),
+                                   ("turns", "inherited", "BOOLEAN DEFAULT 0 NOT NULL")):
+            existing = (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).all()
+            if not any(row[1] == column for row in existing):
+                await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_messages_window ON messages(session_id, thread_id, deleted, id)")
         # 关外键后按 sorted_tables 逆序删数据：外键开启时删除会被约束挡下
         await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")

@@ -53,7 +53,7 @@ _CFG_PATH = Path(
 _READ_CORE = [
     "fs_read", "fs_list", "fs_grep", "git_diff",
     "memory_search", "web_fetch", "web_search", "view_image",
-    "read_attachment", "codebase_search",
+    "read_attachment", "read_session_context", "codebase_search",
     "ask_user_question", "todo_write",
     "skill_view", "compaction_index", "compaction_view",
     # plan-230-1144 M3: 符号检索/文件骨架属纯读探索能力

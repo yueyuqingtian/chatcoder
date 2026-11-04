@@ -355,6 +355,7 @@ export interface ArthasConfigOut {
 }
 
 export interface SessionOut {
+  fork_info?: { version: number; source_session_id: number; source_created_at?: string; source_turn_id: number | null; copied_turns: number; created_at: string; excluded_incomplete: boolean; warnings: string[]; last_message_id: number } | null;
   id: number;
   project_id: number | null;
   title: string | null;
@@ -371,6 +372,9 @@ export interface SessionOut {
   permission_mode?: string;
   // plan-75-332: 权限模式（与执行模式正交）——ask 询问审批 / auto 自动审批 / full 完全访问
   approval_mode?: string;
+  /** 会话级思考深度（null/缺省 = 该会话尚未设置，前端按回退链取默认档位）。
+   *  按会话隔离持久化：切会话、重启、换设备都保持各会话自己的档位。 */
+  reasoning_effort?: string | null;
   fork_parent_id: number | null;
   /** 侧边会话（子会话）所属主会话 id；普通会话为 null。子会话不进入会话列表。 */
   side_parent_id?: number | null;
@@ -420,6 +424,7 @@ export interface CompactionIndexOut {
 }
 
 export interface TurnOut {
+  inherited?: boolean;
   id: number;
   session_id: number;
   user_message_id: number | null;
@@ -674,6 +679,8 @@ export interface RollbackResult {
   user_message: string | null;
   /** restore_to_composer=True 时回填的附件（图片等），供输入框恢复展示与重发 */
   user_attachments?: Array<Record<string, unknown>> | null;
+  /** plan-20261104-session-mentions：撤回后保留会话标题与项目等结构化引用信息 */
+  user_refs?: Array<{ kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session"; value: string; label: string; project_label?: string }> | null;
 }
 
 /** 回滚预览：单个文件回滚前后的内容对比（供用户审核确认）。 */

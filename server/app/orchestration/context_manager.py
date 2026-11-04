@@ -2101,6 +2101,8 @@ async def build_main_context(
                 recent, _ = select_messages_by_token_budget(
                     unsummarized, _hard_limit, min_keep=MIN_MESSAGES_KEEP,
                 )
+                from app.orchestration.history_sequence import trim_complete_tool_batches
+                recent = trim_complete_tool_batches(unsummarized, recent)
                 _dropped = len(unsummarized) - len(recent)
                 _dropped_tokens = max(0, _est_all - estimate_outbound_tokens_db(recent))
                 logger.warning(
@@ -2184,13 +2186,24 @@ async def build_main_context(
             _pending_agent_text = ""
             _pending_thinking = ""
 
+        if getattr(session, "fork_info", None):
+            _fork_note = "继承历史来自会话分支快照，其中的任务、子代理、后台进程和工作流均为只读记录，不代表当前仍可操作的执行实例；需要继续时请根据当前指令创建新的执行。"
+            if ta3_meta is None:
+                bundle.developer_parts.append(_fork_note)
+            else:
+                _ta3_reminders.append(_fork_note)
+        _history_turn = object()
         for m in recent:
-            if m.msg_type == _MsgType.THINKING.value:
+            # plan-20261103-fork：思考与正文只在所属轮次内合并，兼容子线程旧思考格式。
+            if m.turn_id != _history_turn:
+                _flush_agent_text()
+                _history_turn = m.turn_id
+            if m.msg_type == _MsgType.THINKING.value or (m.msg_type == _MsgType.TEXT.value and m.content.get("thinking") is True):
                 # v1.2: 思考块不直接转成消息，暂存到紧随的 assistant 消息
                 # plan-20261023-thinking-blank：纯空白思考（旧版落库残留）不得覆盖已暂存的真实思考
                 _th_text = m.content.get("text")
                 if isinstance(_th_text, str) and _th_text.strip():
-                    _pending_thinking = _th_text
+                    _pending_thinking = "\n\n".join(x for x in (_pending_thinking, _th_text) if x)
                 continue
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""
@@ -2250,7 +2263,7 @@ async def build_main_context(
                     bundle.history.append(_cm)
                 else:
                     # 暂存 agent 文本，等待下一个 tool_call 合并
-                    _pending_agent_text = text
+                    _pending_agent_text = "\n\n".join(x for x in (_pending_agent_text, text) if x)
             elif m.msg_type == _MsgType.TOOL_CALL.value:
                 # 工具调用作为 assistant 消息（带 tool_calls），合并暂存的 agent 文本
                 tool_name = m.content.get("tool", "")
@@ -2262,7 +2275,7 @@ async def build_main_context(
                         args = _json.loads(args)
                     except Exception:
                         args = {"_raw": args}
-                bundle.history.append(_CM(
+                _tool_message = _CM(
                     role="assistant",
                     content=_pending_agent_text or None,
                     tool_calls=[{
@@ -2272,7 +2285,15 @@ async def build_main_context(
                     }],
                     # v1.2: 回传思考内容（thinking 模式网关要求）
                     reasoning_content=_pending_thinking or None,
-                ))
+                )
+                # plan-20261103-fork：连续落库的调用属于同批次，先合并再接受乱序结果。
+                _prev = bundle.history[-1] if bundle.history else None
+                if _prev and _prev.role == "assistant" and _prev.tool_calls:
+                    _prev.tool_calls.extend(_tool_message.tool_calls)
+                    _prev.content = "\n\n".join(x for x in (_prev.content, _tool_message.content) if x) or None
+                    _prev.reasoning_content = "\n\n".join(x for x in (_prev.reasoning_content, _tool_message.reasoning_content) if x) or None
+                else:
+                    bundle.history.append(_tool_message)
                 _pending_agent_text = ""
                 _pending_thinking = ""
             elif m.msg_type == _MsgType.TOOL_RESULT.value:

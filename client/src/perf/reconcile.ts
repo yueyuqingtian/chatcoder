@@ -38,15 +38,20 @@ const entries = new Map<string, ReconcileEntry>();
 let raf = 0;
 let generation = 0;
 const FRAME_BUDGET_MS = 4;
+let pending = false;
 
-/** plan-20261101-performance：新运动使旧布局任务失效，不能在下一次拖拽中继续追平。 */
-export function cancelReconcile(): void {
+/** plan-20261103-flow-blank：取消执行代次不等于完成待办；运动中断必须保留恢复工作。 */
+function cancelScheduled(): void {
   generation += 1;
   if (raf) cancelAnimationFrame(raf);
   raf = 0;
 }
+export function cancelReconcile(): void { cancelScheduled(); pending = false; }
 
-subscribe((busy) => { if (busy) cancelReconcile(); });
+subscribe((busy) => {
+  if (busy) { if (pending) cancelScheduled(); }
+  else if (pending) runReconcile();
+});
 
 /** 注册一个收尾任务。返回注销函数（组件卸载时调用）。 */
 export function registerReconcileTask(
@@ -60,6 +65,7 @@ export function registerReconcileTask(
     // 仅当仍是自己注册的那一项时才删除（避免后注册者被前者的清理误删）
     const cur = entries.get(id);
     if (cur && cur.fn === fn) entries.delete(id);
+    if (!entries.size) cancelReconcile();
   };
 }
 
@@ -72,25 +78,20 @@ export function hasReconcileTask(id: string): boolean {
  * 触发一次收敛：按顺序分帧执行已注册任务，运动开始时取消旧代次。
  * 重复调用合并为一次。
  *
- * plan-633-2604：执行中若又进入几何运动期，**不能静默丢弃这一轮**。
- * 此前直接 `return`，于是「运动期被跳过的测量」在 reconcile 里永远等不到补测，
- * 屏外项停在旧高度，表现为消息流中间露出一大片空白，直到滚动重新挂载才恢复。
- * 现在改为登记一次性订阅：运动结束（busy 转 false）后自动重跑一轮。
+ * plan-20261103-flow-blank：待办标记独立于 rAF，执行前和执行中被运动取消都由统一订阅补跑。
  */
 export function runReconcile(): void {
   if (typeof requestAnimationFrame !== "function") return;
-  cancelReconcile();
+  cancelScheduled();
+  pending = entries.size > 0;
+  if (!pending || isBusy()) return;
   const token = generation;
   const list = Array.from(entries.entries()).sort((a, b) => a[1].order - b[1].order);
   let cursor = 0;
   const step = () => {
     raf = 0;
     if (token !== generation) return;
-    if (isBusy()) {
-      // 重新回到运动期：本轮作废，但运动结束后必须补跑（否则被跳过的测量再无补测机会）。
-      deferUntilIdle();
-      return;
-    }
+    if (isBusy()) return;
     const t0 = performance.now();
     while (cursor < list.length) {
       const [id, e] = list[cursor++];
@@ -109,26 +110,14 @@ export function runReconcile(): void {
     }
     recordReconcile(performance.now() - t0);
     if (cursor < list.length) raf = requestAnimationFrame(step);
+    else pending = false;
   };
   raf = requestAnimationFrame(step);
 }
 
-/** 运动期被打断的一次性补跑：busy 转 false 时自动重跑，只登记一份。 */
-let idleResumeOff: (() => void) | null = null;
-
-function deferUntilIdle(): void {
-  if (idleResumeOff) return;
-  idleResumeOff = subscribe((busy) => {
-    if (busy) return;
-    idleResumeOff?.();
-    idleResumeOff = null;
-    runReconcile();
-  });
-}
-
 /** 是否有一次收敛已排队（诊断用）。 */
 export function isReconcilePending(): boolean {
-  return raf !== 0;
+  return pending;
 }
 
 /** 收敛任务的顺序约定（供注册方引用，避免各处写魔法数字）。 */

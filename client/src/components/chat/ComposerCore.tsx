@@ -6,6 +6,7 @@
  */
 import {
   useRef,
+  useId,
   useState,
   useCallback,
   useEffect,
@@ -18,6 +19,7 @@ import { isBusy } from "../../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
   IconPaperclip,
+  IconMessageSquare,
   IconChevronLeft,
   IconChevronRight,
   IconX,
@@ -49,19 +51,24 @@ import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
-import { useChatStore, persistLastReasoning, patchSession, useCurrentSession, type UsageDetail } from "../../store/chat";
+import { useChatStore, persistLastReasoning, patchSession, findSession, useCurrentSession, type UsageDetail, type QuestionAnswer } from "../../store/chat";
 import { useScoped } from "./convoScope";
+import { firstVisiblePending } from "../../store/pendingInteractions";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
+import { usePanelStore } from "../../store/panel";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useI18n } from "../../store/i18n";
 import { parseRefLines } from "../../utils/refLines";
 // plan-633-2604（R3）：拖入文件夹——取出目录路径后作为 dir 引用交给 AI（AI 侧用 fs_list 查看）
 import { resolveDroppedDir, splitDroppedEntries, type DroppedEntry } from "../../utils/dirDrop";
+import { CommandMenu } from "../composer/CommandMenu";
+import { MentionMenu } from "../composer/MentionMenu";
+import { useMentionCandidates, type MentionItem } from "../composer/useMentionCandidates";
 import { baseName } from "../iconkit/FileIcon";
-import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SkillOut, type TreeNode } from "../../api/client";
+import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SessionOut, type SkillOut } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
-import { Button, Tooltip } from "../ui";
+import { Button, Tooltip, Collapse } from "../ui";
 
 /** plan-20261009-ui U2：+ 浮窗中执行模式的顺序改为「智能体 → 计划 → 只读」——
  *  最常用的默认模式排在最上，自定义模式排在其后（保持后端返回的相对顺序）。 */
@@ -86,9 +93,10 @@ export interface ComposerCoreProps {
 }
 
 /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
-export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin";
+export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
 
 export interface ComposerRef {
+  project_label?: string;
   /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用
    *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹，值为目录路径，AI 侧用 fs_list 自行查看） */
   kind: ComposerRefKind;
@@ -111,6 +119,8 @@ export function buildRefsSuffix(refs: ComposerRef[], workspaceRoot?: string | nu
   // plan-633-2604（R3）：目录引用——写明"可用 fs_list 查看"，否则模型不知道这个路径是可以翻开的
   const dirs = refs.filter((r) => r.kind === "dir").map((r) => r.value);
   const lines: string[] = [];
+  const sessions = refs.filter((r) => r.kind === "session");
+  if (sessions.length) lines.push(`引用会话：${JSON.stringify(sessions.map((r) => ({ id: Number(r.value), title: r.label })))}（可通过会话上下文读取工具分页或按关键词查询）`);
   if (files.length > 0) lines.push(`引用文件：${files.join("、")}`);
   if (dirs.length > 0) lines.push(`引用文件夹：${dirs.map((d) => withOutsideHint(d, workspaceRoot)).join("、")}（可用 fs_list 查看其中内容）`);
   if (skills.length > 0) lines.push(`使用技能：${skills.join("、")}`);
@@ -152,11 +162,27 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const isCompacting = useScoped("isCompacting");
   const usage = useScoped("usage");
   const pendingApproval = useScoped("pendingApproval");
-  const approvalQueueLength = useScoped("approvalQueue").length;
+  const approvalQueue = useScoped("approvalQueue");
+  const approvalQueueLength = approvalQueue.length;
   const pendingPlan = useScoped("pendingPlan");
 
   // plan-156-620：子会话不在主会话列表里——不走 findSession 时模型 / 执行模式 / 权限模式会回落默认值
   const currentSession = useCurrentSession();
+  /** 作用域内的会话记录：侧边对话里 `currentSessionId` 来自 ConvoScope（侧边会话 id），
+   *  而 `useCurrentSession()` 读的是主会话——深度等会话级配置必须按作用域 id 取，
+   *  否则会把主会话的档位写进侧边会话（串话）。侧边会话不进主仓库的会话表，
+   *  查不到时单独拉一次会话详情。 */
+  const scopedSession = useChatStore((s) => (isHome || currentSessionId == null ? undefined : findSession(s, currentSessionId)));
+  /** 拉取到的会话详情与其 id 绑定：切换侧边会话后旧详情还在 state 里，不能直接拿来用 */
+  const [scopedFetched, setScopedFetched] = useState<{ id: number; session: SessionOut } | null>(null);
+  useEffect(() => {
+    if (isHome || currentSessionId == null || scopedSession) return;
+    let cancelled = false;
+    api.getSession(currentSessionId)
+      .then((s) => { if (!cancelled) setScopedFetched({ id: currentSessionId, session: s }); })
+      .catch(() => { /* 拉取失败：深度退回草稿值，不影响使用 */ });
+    return () => { cancelled = true; };
+  }, [isHome, currentSessionId, scopedSession]);
 
   /** plan-546: 草稿 key——home 变体固定 "home"，会话变体取 sessionId（"new"=无会话兜底，不持久化） */
   const draftKey = isHome ? "home" : currentSessionId != null ? String(currentSessionId) : "new";
@@ -164,6 +190,11 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const initialDraft = useRef(
     draftKey !== "new" ? useDraftsStore.getState().getDraft(draftKey) : null
   ).current;
+
+  /** 深度所属的会话记录：主对话取主会话，侧边对话取侧边会话（可能需单独拉详情） */
+  const effortSession = isHome
+    ? undefined
+    : (scopedSession ?? (scopedFetched && scopedFetched.id === currentSessionId ? scopedFetched.session : undefined));
 
   // plan-676: 首页本地目标（无会话 id 不能调 goal API，先入 home 草稿，随创建一次落准）
   const [homeGoalText, setHomeGoalText] = useState<string | null>(() => initialDraft?.goalText ?? null);
@@ -244,8 +275,12 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
    *  不再内嵌进输入文本（那是双层高亮层错位的根源），改为输入框上方可单独删除的 chips；
    *  发送时拼装成可读引用行追加到消息文本，保证模型仍能看到引用。 */
   const [refs, setRefs] = useState<ComposerRef[]>(() => initialDraft?.refs ?? []);
-  /** 本会话/首页独立的思考深度（null=跟随全局最近值） */
-  const [effort, setEffort] = useState<string | null>(() => initialDraft?.reasoningEffort ?? null);
+  /** 本会话/首页独立的思考深度（null=未指定，按下方回退链取值）。
+   *  会话变体优先用会话记录里的档位——深度是**会话级配置**，不跟随其它会话的改动。 */
+  const [effort, setEffort] = useState<string | null>(() => {
+    const fromSession = effortSession?.reasoning_effort ?? null;
+    return fromSession ?? initialDraft?.reasoningEffort ?? null;
+  });
   /** 展示与发送用的档位：本 key 草稿 → 全局最近 → 冷启动模型最高档（activeModel 就绪后计算，见下方） */
   // activeEffort 在 activeModel 定义之后计算（需依赖 sessionModelId 所选模型的档位）
 
@@ -383,8 +418,11 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const [showAt, setShowAt] = useState(false);
   const [atIndex, setAtIndex] = useState(0);
   const [atQuery, setAtQuery] = useState("");
-  const [atFiles, setAtFiles] = useState<string[]>([]);
-  const [atLoading, setAtLoading] = useState(false);
+  const slashListId = useId();
+  const mentionListId = useId();
+  const mentions = useMentionCandidates(showAt, atQuery, effortSession?.project_id ?? currentProjectId, isHome ? null : currentSessionId);
+  const atItems = mentions.items;
+  const selectedAtIndex = Math.min(atIndex, Math.max(0, atItems.length - 1));
   // 会话 229: 技能列表（/ 菜单技能区 + $ 补全菜单共用）
   const [skills, setSkills] = useState<SkillOut[]>([]);
   /** plan-282-1441（#9）：/ 菜单「连接器」分区数据源（已启用的 MCP） */
@@ -432,6 +470,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     // 发送过的 $技能 / @文件 样式在撤回后丢失）
     if (bf.refs && bf.refs.length > 0) {
       setRefs(bf.refs.map((r) => ({
+        ...r,
         kind: r.kind as ComposerRef["kind"],
         value: r.value,
         label: r.label,
@@ -516,9 +555,49 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   })();
   const activeModel = models.find((m) => m.id === sessionModelId) ?? null;
   const supportsReasoning = (activeModel?.reasoning_efforts?.length ?? 0) > 0;
-  /** v7: 展示/发送档位——本 key 草稿 → 全局最近 → 冷启动无历史时取所选模型最高档兜底 */
-  const activeEffort = effort ?? lastReasoningEffort
+  /** 展示/发送档位。
+   *  会话变体：本会话本地选择 → 会话记录（服务端持久化）→ 模型最高档。
+   *  首页变体：本 key 草稿 → 全局最近值（新建任务承接最近一次选择）→ 模型最高档。
+   *  **会话变体不再回落全局最近值**——否则在一个会话里调深度，所有没有自记录的会话都会跟着变。 */
+  const sessionEffort = isHome ? null : (effortSession?.reasoning_effort ?? null);
+  const activeEffort = effort ?? sessionEffort
+    ?? (isHome ? lastReasoningEffort : null)
     ?? (supportsReasoning ? maxEffortOf(activeModel?.reasoning_efforts) : null);
+
+  /** 会话切换时重置本地档位：右侧侧边对话等场景会复用同一个输入框实例，
+   *  不重置就会把上一个会话的深度带进新会话（看起来像串话）。
+   *  只随 draftKey（= 会话 key）变化执行，用户在本会话内的改动不受影响。 */
+  useEffect(() => {
+    if (draftKey === "new") return;
+    const d = useDraftsStore.getState().getDraft(draftKey);
+    setEffort((effortSession?.reasoning_effort ?? null) ?? d?.reasoningEffort ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey]);
+
+  /** 会话档位与本地状态对齐：
+   *  ① 会话记录已有值 → 以它为准（其它窗口/设备改过也要跟上）；
+   *  ② 会话记录还没有值（功能上线前建的会话）→ 把**本会话草稿里的那次选择**补写进会话记录。
+   *  只迁移本会话自己的草稿值（必须与本会话草稿一致），绝不拿全局最近值填充——那正是串话的来源。 */
+  const effortSyncRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isHome || currentSessionId == null || effortSession == null) return;
+    if (sessionEffort) {
+      if (effort !== sessionEffort) setEffort(sessionEffort);
+      return;
+    }
+    if (!effort) return;
+    // 本地值必须就是本会话草稿里的值，否则是上一个会话残留，不能写进本会话
+    if (useDraftsStore.getState().getDraft(draftKey)?.reasoningEffort !== effort) return;
+    const mark = `${currentSessionId}:${effort}`;
+    if (effortSyncRef.current === mark) return;
+    effortSyncRef.current = mark;
+    useChatStore.setState((s) => patchSession(s, currentSessionId, (x) => ({
+      ...x, reasoning_effort: effort,
+    })));
+    void api.updateSession(currentSessionId, { reasoning_effort: effort }).catch(() => {
+      effortSyncRef.current = null; // 落库失败不阻断使用，下次打开再试
+    });
+  }, [isHome, currentSessionId, effortSession, sessionEffort, effort, draftKey]);
 
   /** 上下文占用百分比（usage.total / context_window） */
   const usagePct = useMemo(() => {
@@ -596,55 +675,16 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   /** 会话 229: / 菜单扁平项（命令 + 技能 + 连接器 + 插件，键盘导航共用同一索引） */
   const slashItems = useMemo(
     () => [
-      ...filteredSlash.map((s) => ({ kind: "cmd" as const, key: s.cmd })),
-      ...filteredSlashSkills.map((s) => ({ kind: "skill" as const, key: s.name })),
-      ...filteredSlashMcp.map((m) => ({ kind: "mcp" as const, key: m.name })),
-      ...filteredSlashPlugins.map((p) => ({ kind: "plugin" as const, key: p.name })),
+      ...filteredSlash.map((s) => ({ kind: "cmd" as const, key: s.cmd, label: s.cmd, description: s.desc, icon: <IconTerminal size={16} /> })),
+      ...filteredSlashSkills.map((s) => ({ kind: "skill" as const, key: s.name, label: s.display_name || s.name, description: s.display_name ? `$${s.name}${s.description ? ` · ${s.description}` : ""}` : s.description || "技能", icon: <IconSparkles size={16} /> })),
+      ...filteredSlashMcp.map((m) => ({ kind: "mcp" as const, key: m.name, label: m.display_name || m.name, description: m.description || m.name, icon: <IconPlug size={16} /> })),
+      ...filteredSlashPlugins.map((p) => ({ kind: "plugin" as const, key: p.name, label: p.displayName || p.name, description: p.descriptionZh || p.description || p.category || "插件", icon: <IconPuzzle size={16} /> })),
     ],
     [filteredSlash, filteredSlashSkills, filteredSlashMcp, filteredSlashPlugins]
   );
 
-  const slashVisible = showSlash && slashItems.length > 0;
-
-  /** 问题13: @ 文件搜索——按查询词走全量文件搜索接口（无深度/数量限制），防抖 250ms */
-  const atDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchAtFiles = useCallback(async (pid: number, q: string) => {
-    setAtLoading(true);
-    try {
-      // 空查询：回退到项目树初始建议（仅展示用）；非空：全量路径子串搜索
-      const paths = q.trim()
-        ? await api.projectFileSearch(pid, q)
-        : await api.getProjectTree(pid, 6).then((tree) => {
-            const out: string[] = [];
-            const walk = (nodes: TreeNode[]) => {
-              for (const n of nodes) {
-                if (out.length >= 15) return;
-                if (n.type === "file") out.push(n.path.replace(/\\/g, "/"));
-                if (n.children) walk(n.children);
-              }
-            };
-            walk(tree.children || []);
-            return out;
-          });
-      setAtFiles(paths);
-    } catch {
-      setAtFiles([]);
-    } finally {
-      setAtLoading(false);
-    }
-  }, []);
-
-  const queueAtSearch = useCallback((pid: number, q: string) => {
-    if (atDebounceRef.current) clearTimeout(atDebounceRef.current);
-    atDebounceRef.current = setTimeout(() => void searchAtFiles(pid, q), 250);
-  }, [searchAtFiles]);
-
-  useEffect(() => () => { if (atDebounceRef.current) clearTimeout(atDebounceRef.current); }, []);
-
-  const filteredAtFiles = useMemo(() => {
-    if (!atQuery) return atFiles.slice(0, 15);
-    return atFiles.filter((p) => p.toLowerCase().includes(atQuery)).slice(0, 15);
-  }, [atFiles, atQuery]);
+  const slashVisible = showSlash;
+  const selectedSlashIndex = Math.min(Math.max(0, slashIndex), Math.max(0, slashItems.length - 1));
 
   /** plan-404-1892（图2）：标记「选中项变化来自键盘导航」，仅此时才把选中项滚入可视区。
    *  鼠标悬停（onMouseEnter → setXxxIndex）不得触发滚动——此前悬停到部分可见项会把列表拽动。
@@ -691,22 +731,20 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     [showSkills, skillQuery]);
   useEffect(() => { if (atMenuRef.current) atMenuRef.current.scrollTop = 0; },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showAt, atQuery]);
+    [showAt, atQuery, mentions.category, mentions.allProjects, mentions.archived]);
 
   /** plan-238-1210 (A2): 选择文件 → 追加引用 chip（不再把 @路径 写回输入文本）。
    *  同时清掉用户已敲的 `@查询词`，避免残留半截文本。 */
-  const pickAtFile = (filePath: string) => {
+  const pickAtItem = (item: MentionItem) => {
     const pos = taRef.current?.selectionStart ?? input.length;
-    // 去掉触发用的 `@查询词`（仅当光标前确实在输入 @ 时才替换）
     const before = input.slice(0, pos);
     const cleaned = before.replace(/@([^\s]*)$/, "");
     setInput(cleaned + input.slice(pos));
-    const label = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
-    setRefs((prev) => (prev.some((r) => r.kind === "file" && r.value === filePath)
-      ? prev
-      : [...prev, { kind: "file", value: filePath, label }]));
-    setShowAt(false);
-    setAtQuery("");
+    const ref: ComposerRef = item.kind === "session"
+      ? { kind: "session", value: String(item.session.id), label: item.session.title || "未命名会话", project_label: item.session.project_name || "无项目" }
+      : { kind: "file", value: item.path, label: item.path.replace(/\\/g, "/").split("/").pop() || item.path };
+    setRefs((prev) => prev.some((r) => r.kind === ref.kind && r.value === ref.value) ? prev : [...prev, ref]);
+    setShowAt(false); setAtQuery("");
     setTimeout(() => {
       if (taRef.current) {
         taRef.current.focus();
@@ -715,6 +753,21 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       }
     }, 0);
   };
+
+  useEffect(() => {
+    setShowAt(false); setAtQuery(""); setAtIndex(0);
+  }, [draftKey]);
+  useEffect(() => {
+    if (!showAt && !showSlash) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest(".mention-menu, .ui-select-content") && target !== taRef.current) {
+        setShowAt(false); setShowSlash(false);
+      }
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [showAt, showSlash]);
 
   /** plan-238-1210 (A2): 输入框回归原生渲染——不再有"透明 textarea + 标签高亮层"的
    *  双层结构（两层排版引擎必须逐像素一致，边界无穷：宽度口径/折行/字距/缩放…）。
@@ -844,8 +897,12 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     e.stopPropagation();
   };
 
-  /** 会话 229: 打开输入框图片附件的全局查看器（多图可左右切换；非图片新窗口打开） */
+  /** 会话 229: 打开输入框附件预览（图片用全局查看器，非图片进入右侧查看器） */
   const openAttachmentPreview = (att: AttachmentInfo) => {
+    if (att.type !== "image" && !att.mime_type.startsWith("image/")) {
+      usePanelStore.getState().openResource({source:"upload",file_id:att.file_id,filename:att.filename},useChatStore.getState().currentSessionId);
+      return;
+    }
     const imgs = attachments.filter((a) => a.type === "image" || a.mime_type.startsWith("image/"));
     if (imgs.length === 0) return;
     const list = imgs.map((a) => ({ url: resolveFileUrl(a.url), name: a.filename, size: a.size }));
@@ -1072,13 +1129,25 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   };
 
   const changeReasoning = (e: string | null) => {
-    // plan-546: 深度双写——本 key 草稿隔离 + 全局最近值（新会话/新首页默认承接）
-    // v7: 全局最近值同时落 localStorage，重启后可恢复上次选择（新建任务默认跟随全局）
+    // 深度是**会话级配置**：会话变体写该会话的 reasoning_effort（落库，切会话/重启/换设备都保持），
+    // 首页变体只写本 key 草稿 + 全局最近值（新建任务承接最近一次选择）。
     // plan-20261009-ui：滑块可以连续拖动，每越过一档就调用一次——这里不关浮窗，
     // 用户拖完点外部 / 按 Esc 自然收起（此前选一档就关，无法连续调整）
     setEffort(e);
     useChatStore.setState({ lastReasoningEffort: e });
     persistLastReasoning(e);
+    if (isHome || currentSessionId == null || !e) return;
+    // 本地会话列表立刻同步（切走再回来/其它入口读 session.reasoning_effort 都能看到新值）；
+    // 侧边对话不在主仓库会话表里，单独更新拉取到的详情，否则同步 effect 会用旧值把它改回去
+    useChatStore.setState((s) => patchSession(s, currentSessionId, (x) => ({
+      ...x, reasoning_effort: e,
+    })));
+    setScopedFetched((prev) => (prev && prev.id === currentSessionId
+      ? { id: prev.id, session: { ...prev.session, reasoning_effort: e } }
+      : prev));
+    void api.updateSession(currentSessionId, { reasoning_effort: e }).catch(() => {
+      useChatStore.setState({ error: "思考深度保存失败，请重试" });
+    });
   };
 
   /** plan-75-332: 切换执行模式（只读 / 计划 / 智能体）。旧值先归一化再落库，避免写入脏值。 */
@@ -1144,7 +1213,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   // plan-633-2604（R3）：只有引用 chips（典型是刚拖进来的文件夹）也算有话可说——
   // 发送时引用会被拼成「可查看目录：…」引用行，模型据此去看目录，正文可以是空的。
-  const canSend = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
+  const historyLoadFailed = useChatStore((s) => s.sessionLoadError);
+  const historyUnavailable = useChatStore((s) => s.sessionLoading || s.sessionLoadError);
+  const canSend = !historyUnavailable && Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
 
   const handleCancel = () => {
     // 停止 = 中断本会话的一切执行：运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）
@@ -1181,7 +1252,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     const refsSuffix = buildRefsSuffix(refs, projectRootPath);
     // plan-308-1542 需求2：引用芯片的**结构化**副本——随消息落库，消息流据此渲染
     // 与输入框一致的带图标芯片（纯文本后缀继续保留，模型上下文不变）。
-    const refPayload = refs.map((r) => ({ kind: r.kind, value: r.value, label: r.label }));
+    const refPayload = refs.map((r) => ({ ...r }));
     const hasPriorText = Boolean(input.trim()) || refTextParts.length > 0;
     const content = (input.trim() ? input.trim() : "") +
       (refTextParts.length ? `${input.trim() ? "\n\n" : ""}${refTextParts.join("\n\n")}` : "") +
@@ -1209,6 +1280,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           model_id: usedModelId,
           permission_mode: mode,
           approval_mode: approvalMode,
+          // 深度随创建一次落准：新会话诞生即有自己的档位，不依赖全局最近值兜底
+          reasoning_effort: sendEffort ?? null,
           goal_text: goalText0 || homeGoalText,
         });
         if (sessionId == null) return;
@@ -1358,7 +1431,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     // 剪掉引用行后把结构化 refs（旧队列项无 refs 时从文本解析兜底）恢复成输入框 chips。
     const parsed = parseRefLines(q.content);
     const restored: ComposerRef[] = ((q.refs && q.refs.length > 0 ? q.refs : parsed.refs) as ComposerRef[])
-      .map((r) => ({ kind: r.kind, value: r.value, label: r.label }));
+      .map((r) => ({ ...r }));
     const body = parsed.text;
     setInput((cur) => (cur.trim() ? (body ? `${cur}\n${body}` : cur) : body));
     if (restored.length > 0) {
@@ -1376,7 +1449,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
    *  此前在「当前会话无队首」时回退到跨会话索引里最早的一条，导致 A 会话的提问卡出现在 B 会话，
    *  且作答时回执按提交方会话广播，原会话的索引条目永远不消失、卡片反复回到第 1 题。
    *  其他会话的等待统一由侧栏等待标记提示，用户主动切过去处理。 */
-  const effectivePendingApproval = pendingApproval;
+  // plan-20261103-interactions：按所属会话的即时配置过滤，避免切换首帧沿用上一会话的本地权限状态。
+  const effectivePendingApproval = firstVisiblePending(approvalQueue, currentSessionId, effortSession?.approval_mode);
 
   /** 来源子代理：审批卡要根据来源反查子代理标题。
    *  plan-549-2281：改按 agent_id + subagent_title 取，不再查子会话桶——并行执行已统一到子代理。 */
@@ -1422,6 +1496,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       }}
       onDrop={handleDrop}
     >
+      {!isHome && historyLoadFailed && <Button variant="ghost" size="xs" onClick={() => { if (currentSessionId != null) void useChatStore.getState().switchSession(currentSessionId); }}>重新加载消息</Button>}
       {/* plan-20261009-ui U2：运行中继续发送的消息排在输入卡上方的独立托盘（原先挤在卡内顶部） */}
       {!isHome && !isQuestionMode && !isApprovalMode && (
         <QueueTray
@@ -1532,24 +1607,22 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                 <Tooltip key={att.file_id ?? idx} content={att.filename}>
                   <div
                     className={`composer-attach-chip${att.type === "image" ? " image" : ""}`}
+                    onClick={() => openAttachmentPreview(att)}
                   >
                     {att.type === "image" ? (
                       <img
                         src={resolveFileUrl(att.url)}
                         alt={att.filename}
                         className="attach-chip-thumb"
-                        onClick={() => openAttachmentPreview(att)}
                       />
                     ) : (
                       <IconPaperclip size={11} />
                     )}
                     <span
                       className="attach-chip-name"
-                      onClick={() =>
-                        att.type === "image"
-                          ? openAttachmentPreview(att)
-                          : window.open(resolveFileUrl(att.url), "_blank", "noopener")
-                      }
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e)=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openAttachmentPreview(att);}}}
                     >
                       {att.filename}
                     </span>
@@ -1557,7 +1630,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                       <button
                         className="remove"
                         aria-label={`移除附件 ${att.filename}`}
-                        onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                        onClick={(e) => { e.stopPropagation(); setAttachments((prev) => prev.filter((_, i) => i !== idx)); }}
                         type="button"
                       >
                         <IconX size={10} />
@@ -1628,12 +1701,13 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             <div className="composer-refs">
               {refs.map((r, i) => {
                 const removeTip = r.kind === "file" ? "移除文件引用"
+                  : r.kind === "session" ? "移除会话引用"
                   : r.kind === "dir" ? "移除文件夹引用"
                   : r.kind === "mcp" ? "移除连接器引用"
                   : r.kind === "plugin" ? "移除插件引用"
                   : "移除技能引用";
                 return (
-                  <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.value}>
+                  <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.kind === "session" ? `${r.label} · ${r.project_label || "会话"} · #${r.value}` : r.value}>
                     <span
                       className={`composer-ref-chip composer-ref-${r.kind}`}
                     >
@@ -1641,6 +1715,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                         {/* plan-282-1441（#9）：四类引用用不同图标区分（文件/技能/连接器/插件）
                             plan-633-2604（R3）：拖入的文件夹用文件夹图标 */}
                         {r.kind === "file" ? <IconFileText size={12} />
+                          : r.kind === "session" ? <IconMessageSquare size={12} />
                           : r.kind === "dir" ? <IconFolder size={12} />
                           : r.kind === "mcp" ? <IconPlug size={12} />
                           : r.kind === "plugin" ? <IconPuzzle size={12} />
@@ -1667,6 +1742,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             <textarea
               ref={taRef}
               className="composer-input"
+              aria-haspopup="listbox"
+              aria-expanded={showAt || slashVisible}
+              aria-controls={showAt ? mentionListId : slashVisible ? slashListId : undefined}
+              aria-activedescendant={showAt && atItems.length ? `${mentionListId}-${selectedAtIndex}` : slashVisible && slashItems.length ? `${slashListId}-${selectedSlashIndex}` : undefined}
               placeholder={placeholderText}
               spellCheck={false}
               value={input}
@@ -1687,9 +1766,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                 setShowAt(true);
                 setAtQuery(atMatch[1].toLowerCase());
                 setAtIndex(0);
-                // 问题13: 触发全量文件搜索（携带查询词，防抖）
-                const pid = isHome ? activeProjectId : currentProjectId;
-                if (pid != null) void queueAtSearch(pid, atMatch[1]);
+
               } else {
                 setShowAt(false);
                 setAtQuery("");
@@ -1708,6 +1785,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               }
             }}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               // plan-20261009-ui U2：Shift+Tab 在「智能体 → 计划 → 只读」间循环（+ 浮窗内有提示）
               if (e.key === "Tab" && e.shiftKey && !slashVisible && !showSkills && !showAt) {
                 e.preventDefault();
@@ -1719,19 +1797,19 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               if (slashVisible) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
-                  setSlashIndex((i) => (i + 1) % slashItems.length);
+                  setSlashIndex((i) => (i + 1) % Math.max(1, slashItems.length));
                   kbScrollRef.current = "slash";
                   return;
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  setSlashIndex((i) => (i - 1 + slashItems.length) % slashItems.length);
+                  setSlashIndex((i) => (i - 1 + Math.max(1, slashItems.length)) % Math.max(1, slashItems.length));
                   kbScrollRef.current = "slash";
                   return;
                 }
-                if (e.key === "Enter" && !e.shiftKey) {
+                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
                   e.preventDefault();
-                  pickSlashItem(slashItems[Math.min(slashIndex, slashItems.length - 1)]);
+                  if (slashItems.length > 0) pickSlashItem(slashItems[selectedSlashIndex]);
                   return;
                 }
                 if (e.key === "Escape") {
@@ -1766,29 +1844,20 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   return;
                 }
               }
-              if (showAt && filteredAtFiles.length > 0) {
-                if (e.key === "ArrowDown") {
+              if (showAt) {
+                const n = atItems.length;
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                   e.preventDefault();
-                  setAtIndex((i) => (i + 1) % filteredAtFiles.length);
+                  setAtIndex((i) => (i + (e.key === "ArrowDown" ? 1 : -1) + Math.max(1, n)) % Math.max(1, n));
                   kbScrollRef.current = "at";
                   return;
                 }
-                if (e.key === "ArrowUp") {
+                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
                   e.preventDefault();
-                  setAtIndex((i) => (i - 1 + filteredAtFiles.length) % filteredAtFiles.length);
-                  kbScrollRef.current = "at";
+                  if (n > 0) pickAtItem(atItems[selectedAtIndex]);
                   return;
                 }
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  pickAtFile(filteredAtFiles[Math.min(atIndex, filteredAtFiles.length - 1)]);
-                  return;
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  setShowAt(false);
-                  return;
-                }
+                if (e.key === "Escape") { e.preventDefault(); setShowAt(false); return; }
               }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -2002,92 +2071,17 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         )}
       </Modal>
 
-      {slashVisible && (
-        <div className="composer-menu composer-slash" ref={slashMenuRef}>
-          {filteredSlash.length > 0 && <div className="composer-menu-title">快捷命令</div>}
-          {filteredSlash.map((s, idx) => (
-            <button
-              key={s.cmd}
-              className={idx === slashIndex ? "active" : ""}
-              onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
-              onClick={() => pickSlash(s.cmd)}
-            >
-              <strong>{s.cmd}</strong>
-              <span>{s.desc}</span>
-            </button>
-          ))}
-          {filteredSlashSkills.length > 0 && <div className="composer-menu-title">技能（$）</div>}
-          {filteredSlashSkills.map((s, j) => {
-            const idx = filteredSlash.length + j;
-            return (
-              <button
-                key={`sk-${s.id}`}
-                className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
-                onClick={() => insertSkill(s.name, true)}
-              >
-                <IconBox size={12} />
-                {/* plan-282-1441（#9）：主标题显示可读名（与设置页一致）。
-                    引用值仍用 s.name——它是稳定标识（$name 语义与工具调用都依赖它）。 */}
-                <strong>{s.display_name || s.name}</strong>
-                <span>{s.display_name ? `$${s.name}` : (s.description || "")}</span>
-              </button>
-            );
-          })}
-          {/* plan-282-1441（#9）：连接器分区（已启用的 MCP，含内置与插件贡献） */}
-          {filteredSlashMcp.length > 0 && <div className="composer-menu-title">连接器</div>}
-          {filteredSlashMcp.map((m, j) => {
-            const idx = filteredSlash.length + filteredSlashSkills.length + j;
-            return (
-              <button
-                key={`mcp-${m.id}`}
-                className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
-                onClick={() => insertConnector(m.name, m.display_name || m.name)}
-              >
-                <IconPlug size={12} />
-                <strong>{m.display_name || m.name}</strong>
-                <span>{m.description || m.name}</span>
-              </button>
-            );
-          })}
-          {/* plan-59-286：有未启用连接器时给一行出口——
-              否则用户装了连接器却在引用菜单里看不到，也无从知道原因。 */}
-          {disabledMcpCount > 0 && (
-            <button
-              className="composer-menu-hint"
-              onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(-1); }}
-              onClick={() => {
-                setShowSlash(false);
-                window.dispatchEvent(new CustomEvent("chatcoder:open-settings", {
-                  detail: { tab: "extensions" },
-                }));
-              }}
-            >
-              <IconPlug size={12} />
-              <strong>另有 {disabledMcpCount} 个连接器未启用</strong>
-              <span>前往扩展管理启用</span>
-            </button>
-          )}
-          {/* plan-282-1441（#9）：插件分区（已安装且已启用的插件） */}
-          {filteredSlashPlugins.length > 0 && <div className="composer-menu-title">插件</div>}
-          {filteredSlashPlugins.map((p, j) => {
-            const idx = filteredSlash.length + filteredSlashSkills.length + filteredSlashMcp.length + j;
-            return (
-              <button
-                key={`pl-${p.name}`}
-                className={idx === slashIndex ? "active" : ""}
-                onMouseEnter={() => { kbScrollRef.current = null; setSlashIndex(idx); }}
-                onClick={() => insertPlugin(p.name, p.displayName || p.name)}
-              >
-                <IconBox size={12} />
-                <strong>{p.displayName || p.name}</strong>
-                <span>{p.descriptionZh || p.description || p.category || ""}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <div className="mention-anchor">
+        <Collapse open={slashVisible} lazy>
+          <CommandMenu ref={slashMenuRef} items={slashItems} index={selectedSlashIndex} listId={slashListId}
+            disabledMcpCount={disabledMcpCount}
+            onIndex={(i) => { kbScrollRef.current = null; setSlashIndex(i); }} onPick={pickSlashItem}
+            onClose={() => setShowSlash(false)} onManageExtensions={() => {
+              setShowSlash(false);
+              window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "extensions" } }));
+            }} />
+        </Collapse>
+      </div>
 
       {showSkills && filteredSkills.length > 0 && (
         <div className="composer-menu composer-slash" ref={skillMenuRef}>
@@ -2107,26 +2101,13 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         </div>
       )}
 
-      {showAt && (
-        <div className="composer-menu composer-at" ref={atMenuRef}>
-          <div className="composer-menu-title">引用文件上下文（@）</div>
-          {atLoading && <div className="composer-menu-empty">加载文件树…</div>}
-          {!atLoading && filteredAtFiles.length === 0 && (
-            <div className="composer-menu-empty">{atQuery ? "未找到匹配文件" : "继续输入文件名以补全…"}</div>
-          )}
-          {!atLoading &&
-            filteredAtFiles.map((f, idx) => (
-              <button
-                key={f}
-                className={idx === atIndex ? "active" : ""}
-                onMouseEnter={() => { kbScrollRef.current = null; setAtIndex(idx); }}
-                onClick={() => pickAtFile(f)}
-              >
-                <span>{f}</span>
-              </button>
-            ))}
-        </div>
-      )}
+      <div className="mention-anchor">
+        <Collapse open={showAt} lazy>
+          <MentionMenu ref={atMenuRef} model={mentions} index={selectedAtIndex} listId={mentionListId}
+            onFocusInput={() => setTimeout(() => taRef.current?.focus(), 0)}
+            onIndex={(i) => { kbScrollRef.current = null; setAtIndex(i); }} onPick={pickAtItem} onClose={() => setShowAt(false)} />
+        </Collapse>
+      </div>
 
       {/* plan-75-332: 原「普通工具审批弹窗」（.approval-overlay 遮罩 + 四按钮卡片）已删除——
           审批改为 ApprovalCard 直接替换输入框主体（见上方渲染分支），
@@ -2369,7 +2350,7 @@ function QuestionWizardBox({
   };
   const hideOptTip = () => setOptTip(null);
 
-  const writeDraft = (next: { stepIndex: number; answers: Record<string, string> }) => {
+  const writeDraft = (next: { stepIndex: number; answers: Record<string, QuestionAnswer> }) => {
     setQuestionDraft({ approvalId, stepIndex: next.stepIndex, answers: next.answers });
   };
 
@@ -2377,6 +2358,7 @@ function QuestionWizardBox({
     question?: unknown;
     options?: unknown;
     allow_custom?: unknown;
+    multiple?: unknown;
   }>;
   const total = questions.length;
   const currentQ = questions[stepIndex] ?? {};
@@ -2386,17 +2368,32 @@ function QuestionWizardBox({
     ? (currentQ.options as unknown[]).map(normalizeQuestionOption)
     : [];
   const allowCustom = currentQ.allow_custom !== false;
-  const currentAnswer = answers[String(stepIndex)] ?? "";
+  /** 多选题：ta3 官方 schema 用 multiple 表达「可同时选多个」，其他供应商也可能写 multiSelect */
+  const multiple = currentQ.multiple === true || currentQ.multiple === "true"
+    || (currentQ as { multiSelect?: unknown }).multiSelect === true;
+  /** 是否渲染自定义输入行：
+   *  1) 多选题始终保留一行「补充自定义输入」（勾选项之外还能自己写）；
+   *  2) 模型只提开放式问题、不给选项时也必须有输入行——否则选项区整块不渲染，
+   *     卡片只剩「忽略」可用（用户实测）。 */
+  const showCustom = multiple || allowCustom || currentOptions.length === 0;
+  /** 当前题已存的答案：单选/自定义输入是字符串，多选是「勾选选项 + 自定义补充」的数组 */
+  const rawAnswer = answers[String(stepIndex)];
+  const answerList = Array.isArray(rawAnswer)
+    ? rawAnswer.map((x) => String(x ?? "")).filter((x) => x.trim() !== "")
+    : typeof rawAnswer === "string" && rawAnswer !== "" ? [rawAnswer] : [];
+  /** 已勾选的选项——按选项原始顺序排列，勾选/回填的位置都稳定 */
+  const pickedOptions = currentOptions.filter((opt) => answerList.includes(opt));
+  /** 答案里的自定义补充（不在选项内的文本） */
+  const answerCustom = answerList.filter((x) => !currentOptions.includes(x)).join("\n");
+  /** 单选等价物：选中项或自定义文本（多选态下不参与导航） */
+  const currentAnswer = multiple ? "" : (answerList[0] ?? "");
 
   useEffect(() => {
-    const prevAns = answers[String(stepIndex)] ?? "";
-    if (prevAns && !currentOptions.includes(prevAns)) {
-      setCustomText(prevAns);
-    } else {
-      setCustomText("");
-    }
+    // 切题 / 回填：把该题已存的答案搬回输入框（多选与单选共用一个文本框）
+    setCustomText(answerCustom);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stepIndex, currentAnswer, currentOptions.join("\u0000")]);
+  }, [stepIndex, multiple, answerCustom]);
+
 
   /** 自定义回答高度随内容自适应（上限见 CSS 的 max-height）。
    *  原生支持 field-sizing（见 supportsFieldSizing）时高度由浏览器按内容算，这里直接跳过；
@@ -2408,16 +2405,21 @@ function QuestionWizardBox({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
-  }, [customText, stepIndex, allowCustom]);
+  }, [customText, stepIndex, showCustom]);
 
   /** 键盘高亮项下标：0..选项数-1 为选项，紧随其后的一行为自定义回答（无自定义行时不会落到它上） */
   const customIdx = currentOptions.length;
-  const optionCount = currentOptions.length + (allowCustom ? 1 : 0);
+  const optionCount = currentOptions.length + (showCustom ? 1 : 0);
   /** 切题时的高亮落点：该题已有答案则落在答案上（回到上一题可直接回车确认原答案），否则第一项 */
   const initialKbIndex = (): number => {
+    if (multiple) {
+      const pickedIdx = currentOptions.findIndex((opt) => pickedOptions.includes(opt));
+      if (pickedIdx >= 0) return pickedIdx;
+      return answerCustom && showCustom ? customIdx : 0;
+    }
     const i = currentOptions.indexOf(currentAnswer);
     if (i >= 0) return i;
-    return currentAnswer && allowCustom ? customIdx : 0;
+    return currentAnswer && showCustom ? customIdx : 0;
   };
   /** 高亮状态记下「在哪一题、停在哪一项」：题号一变就回到该题的默认落点。
    *  这里用派生而不是 effect 重置——切题（如点「上一题」）后紧跟的按键，不能读到还没重置的旧下标。 */
@@ -2425,29 +2427,50 @@ function QuestionWizardBox({
   const kbIndex = kbState && kbState.step === stepIndex ? kbState.idx : initialKbIndex();
   const setKbIndex = (idx: number) => setKbState({ step: stepIndex, idx });
 
-  const handlePickOption = (opt: string) => {
-    const updated = { ...answers, [String(stepIndex)]: opt };
-    setCustomText("");
+  /** 多选答案：按选项原始顺序收集勾选项，自定义补充追加在末尾（空串不入列） */
+  const buildMultiAnswer = (picked: string[], custom: string): string[] => {
+    const ordered = currentOptions.filter((opt) => picked.includes(opt));
+    const extra = custom.trim();
+    return extra ? [...ordered, extra] : ordered;
+  };
+  /** 当前题是否已有可提交的答案：单选看选中项或自定义文本，多选看勾选项与自定义补充 */
+  const hasAnswer = multiple
+    ? pickedOptions.length > 0 || customText.trim() !== ""
+    : !!(customText.trim() || currentAnswer);
+  /** 提交一题：末题提交回答，其余跳到下一题（提交成功路径会清空草稿） */
+  const commitAnswer = (value: QuestionAnswer) => {
+    const updated = { ...answers, [String(stepIndex)]: value };
     if (stepIndex < total - 1) {
       writeDraft({ stepIndex: stepIndex + 1, answers: updated });
     } else {
-      // 末题：落盘草稿后提交（提交成功路径会清空草稿）
       writeDraft({ stepIndex, answers: updated });
       setTimeout(() => onSubmit(updated), 180);
     }
   };
 
+  const handlePickOption = (opt: string) => {
+    // 多选：只切换勾选、不跳题——用户还要继续勾其它项或补充自定义输入，由底栏按钮提交
+    if (multiple) {
+      const picked = pickedOptions.includes(opt)
+        ? pickedOptions.filter((x) => x !== opt)
+        : [...pickedOptions, opt];
+      writeDraft({ stepIndex, answers: { ...answers, [String(stepIndex)]: buildMultiAnswer(picked, customText) } });
+      return;
+    }
+    setCustomText("");
+    commitAnswer(opt);
+  };
+
   const handleNextCustom = () => {
+    if (multiple) {
+      if (!hasAnswer) return;
+      commitAnswer(buildMultiAnswer(pickedOptions, customText));
+      return;
+    }
     const text = customText.trim() || currentAnswer;
     if (!text) return;
-    const updated = { ...answers, [String(stepIndex)]: text };
     setCustomText("");
-    if (stepIndex < total - 1) {
-      writeDraft({ stepIndex: stepIndex + 1, answers: updated });
-    } else {
-      writeDraft({ stepIndex, answers: updated });
-      onSubmit(updated);
-    }
+    commitAnswer(text);
   };
 
   /** 键盘：Tab / Shift+Tab、↑↓ 切换高亮项，回车确认高亮项（与底部「Tab / 上下键切换 · 回车确认」一致）。
@@ -2472,7 +2495,8 @@ function QuestionWizardBox({
       if (e.repeat) return; // 按住回车的自动重复不连续确认多道题
       if (hl < customIdx) {
         handlePickOption(currentOptions[hl]);
-      } else if (customText.trim()) {
+      } else if (multiple ? hasAnswer : customText.trim()) {
+        // 多选：停在自定义行回车即提交（勾选项 + 自定义补充）；单选沿用「有输入才提交」
         handleNextCustom();
       } else {
         // 自定义行还没有输入：回车只把焦点交给输入框，不替用户确认别处的答案
@@ -2500,6 +2524,10 @@ function QuestionWizardBox({
           </Tooltip>
         </div>
         <div className="question-wizard-pager">
+          {/* 题型标注：多选题（ta3 官方 multiple）与单选在交互上完全不同，卡片必须自带说明 */}
+          <span className={`question-wizard-mode${multiple ? " is-multiple" : ""}`}>
+            {multiple ? "多选" : "单选"}
+          </span>
           <Tooltip content="上一题">
             <button
               type="button"
@@ -2528,10 +2556,10 @@ function QuestionWizardBox({
         </div>
       </div>
 
-      {currentOptions.length > 0 && (
-        <div className="question-wizard-options">
+      {(currentOptions.length > 0 || showCustom) && (
+        <div className="question-wizard-options" data-multiple={multiple ? "true" : undefined}>
           {currentOptions.map((opt, optIdx) => {
-            const isSelected = currentAnswer === opt;
+            const isSelected = multiple ? pickedOptions.includes(opt) : currentAnswer === opt;
             return (
               // S16（plan-41-197）：移除原生 title——它与自定义浮窗（showOptTip）同时出现，
               // 聚焦/悬停时会叠两个提示框（用户反馈“两处展示浮窗”）。
@@ -2540,6 +2568,7 @@ function QuestionWizardBox({
                 type="button"
                 className={`question-wizard-opt-btn${isSelected ? " selected" : ""}${kbIndex === optIdx ? " is-kb" : ""}`}
                 onClick={() => handlePickOption(opt)}
+                aria-pressed={multiple ? isSelected : undefined}
                 onMouseEnter={(e) => showOptTip(e, opt)}
                 onMouseLeave={hideOptTip}
                 onFocus={(e) => showOptTip(e, opt)}
@@ -2547,11 +2576,17 @@ function QuestionWizardBox({
               >
                 <span className="question-wizard-opt-num">{optIdx + 1}.</span>
                 <span className="question-wizard-opt-text">{opt}</span>
+                {/* 多选：右侧固定槽位的勾选标记（槽位常驻，切换不抖） */}
+                {multiple && (
+                  <span className="question-wizard-opt-check" aria-hidden="true">
+                    {isSelected && <IconCheck size={11} />}
+                  </span>
+                )}
               </button>
             );
           })}
 
-          {allowCustom && (
+          {showCustom && (
             <div className={`question-wizard-custom-row${kbIndex === customIdx ? " is-kb" : ""}`}>
               <span className="question-wizard-opt-num">{currentOptions.length + 1}.</span>
               {/* 回车确认由卡片级键盘处理统一负责（见 kbHandlerRef），这里只把高亮移到自定义行 */}
@@ -2560,7 +2595,7 @@ function QuestionWizardBox({
                 ref={customInputRef}
                 className="question-wizard-custom-input"
                 rows={1}
-                placeholder="输入自定义回答，回车确认，Shift+回车换行…"
+                placeholder={multiple ? "可补充自定义输入，回车确认，Shift+回车换行…" : "输入自定义回答，回车确认，Shift+回车换行…"}
                 value={customText}
                 onChange={(e) => setCustomText(e.target.value)}
                 onFocus={() => setKbIndex(customIdx)}
@@ -2572,7 +2607,7 @@ function QuestionWizardBox({
 
       <div className="question-wizard-footer">
         <div className="question-wizard-hint">
-          <span>Tab / 上下键切换 · 回车确认</span>
+          <span>{multiple ? "Tab / 上下键切换 · 回车勾选（可多选）" : "Tab / 上下键切换 · 回车确认"}</span>
         </div>
         <div className="question-wizard-actions">
           <button
@@ -2588,7 +2623,7 @@ function QuestionWizardBox({
             variant="primary"
             size="sm"
             onClick={handleNextCustom}
-            disabled={!customText.trim() && !currentAnswer}
+            disabled={!hasAnswer}
           >
             {stepIndex < total - 1 ? "继续" : "提交回答"}
           </Button>

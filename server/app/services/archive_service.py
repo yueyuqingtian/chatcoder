@@ -146,7 +146,7 @@ def _purge_rows(s, project_ids: list[int], session_ids: list[int]) -> dict[str, 
     return {"counts": counts, "sessions": sorted(purged_sessions)}
 
 
-def _remove_tool_outputs(session_ids: list[int]) -> int:
+async def _remove_tool_outputs(session_ids: list[int]) -> int:
     """清理这些会话的长工具输出落盘目录（`uploads/_tool_outputs/{sid}`），返回删除的目录数。
 
     plan-560-2311 E1：`_purge_rows` 绕开 `delete_session_permanent` 直接调
@@ -168,7 +168,7 @@ def _remove_tool_outputs(session_ids: list[int]) -> int:
     for sid in session_ids:
         target = root / str(int(sid))
         existed = target.is_dir()
-        purge_session_tool_outputs(int(sid))
+        await purge_session_tool_outputs(int(sid))
         if existed and not target.exists():
             removed += 1
     return removed
@@ -269,7 +269,7 @@ async def purge(*, project_ids: list[int], session_ids: list[int]) -> dict[str, 
     # 单独计数与单独兜底：它删的是目录而不是文件，口径与 files_removed 不同；
     # 与附件清理分开 try，避免前者异常连带跳过这里的清理。
     try:
-        result["tool_output_dirs_removed"] = _remove_tool_outputs((purged or {}).get("sessions") or [])
+        result["tool_output_dirs_removed"] = await _remove_tool_outputs((purged or {}).get("sessions") or [])
     except Exception:  # noqa: BLE001
         logger.warning("[archive] 清理工具输出目录失败（不影响删除结果）", exc_info=True)
     result.update(await reclaim_space())

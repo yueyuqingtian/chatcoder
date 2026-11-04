@@ -10,6 +10,7 @@
  *  「当前会话」语义直接读写这些字段，保留同名投影让它们零改动继续工作；真正的数据源是
  *  `buckets`，顶层字段只是当前桶的镜像（任何写入都会同步回桶），读取方无需感知分桶。
  */
+import type { PreviewSource } from "../api/client";
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
@@ -47,6 +48,8 @@ export interface PanelBucket {
   activeKey: string | null;
   /** v2.2 (对齐 zcode 3.3.3): 最近关闭标签（上限 10），供加号菜单恢复 */
   closedStack: PanelTab[];
+  previewRequestId: number;
+  previewTarget: PreviewSource | null;
   previewPath: string | null;
   /** v2.2 (对齐 zcode 3.14.2): 预览文件定位行号（grep path:line 跳转，Monaco revealLine） */
   previewLine: number | null;
@@ -75,7 +78,7 @@ export function bucketSessionId(key: string): number | null {
 }
 
 function emptyBucket(): PanelBucket {
-  return { tabs: [], activeKey: null, closedStack: [], previewPath: null, previewLine: null, diffPreview: null, planCollapsePending: false };
+  return { tabs: [], activeKey: null, closedStack: [], previewRequestId: 0, previewTarget: null, previewPath: null, previewLine: null, diffPreview: null, planCollapsePending: false };
 }
 /** 桶 → 顶层投影（当前桶字段镜像）。 */
 function projectionOf(b: PanelBucket) {
@@ -83,6 +86,8 @@ function projectionOf(b: PanelBucket) {
     tabs: b.tabs,
     activeKey: b.activeKey,
     closedStack: b.closedStack,
+    previewRequestId: b.previewRequestId ?? 0,
+    previewTarget: b.previewTarget ?? null,
     previewPath: b.previewPath,
     previewLine: b.previewLine,
     diffPreview: b.diffPreview,
@@ -175,6 +180,7 @@ interface PanelState extends PanelBucket {
   /** v2.2 (对齐 zcode 3.3.3): 恢复最近关闭的标签（同时从栈中移除） */
   reopenClosedTab: (index: number) => void;
   setActiveTab: (key: string) => void;
+  openResource: (target: PreviewSource, viewSessionId?: number | null) => void;
   setPreviewPath: (path: string | null, line?: number | null) => void;
   /** plan-20261018-turn-changes：一次性打开「文件 + 该文件的 diff」。
    *  卡片点「审查」时用：先设预览路径再写 diff 会让 DiffEditor 先卸载再挂载，
@@ -376,15 +382,20 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   },
   // v11: 切换预览文件时清空 diff（diff 视图仅由变更审核卡片进入时提供）
   // v2.2: 支持行号定位（grep path:line 跳转）
+  openResource: (target, viewSessionId) => {
+    const key = bucketKeyOf(viewSessionId === undefined ? target.session_id : viewSessionId);
+    writeBucket(key, (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: target, previewPath: null, previewLine: null, diffPreview: null }));
+    if (get().activeBucket === key) { get().openPanel(); get().openTab("files"); }
+  },
   setPreviewPath: (path, line = null) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewPath: path, previewLine: line, diffPreview: null })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: line, diffPreview: null })),
   openPlanPreview: (path) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewPath: path, previewLine: null, diffPreview: null, planCollapsePending: true })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: null, planCollapsePending: true })),
   ackPlanCollapse: () => writeBucket(get().activeBucket, (b) => ({ ...b, planCollapsePending: false })),
   setDiffPreview: (diff) => writeBucket(get().activeBucket, (b) => ({ ...b, diffPreview: diff })),
   // plan-20261018-turn-changes: 预览路径与 diff 一次写入，避免中间态让 DiffEditor 卸载重建
   openDiffPreview: (path, diff) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewPath: path, previewLine: null, diffPreview: diff })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: diff })),
 
   reset: () => set({ expanded: false, fullscreen: false, buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),
 }));

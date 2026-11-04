@@ -40,7 +40,7 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
   const errText = (failed || stopped) && meta.error ? String(meta.error).trim() : "";
   // plan-20261022-subagent-dispatch-fail：派发被拒时没有对应会话，整行静态展示
   const dispatchFailed = meta.dispatchFailed === true;
-  const clickable = !dispatchFailed && meta.agentId > 0;
+  const clickable = !dispatchFailed && meta.agentId !== 0;
 
   // plan-20261025-shell（需求 1）：与工具行同一写法——「子代理 任务名 · 状态」，图标与其它行同为 16px 槽位；
   // 状态只在行尾（转圈 / 勾 / 叉 / 暂停 + 一个弱色状态词），动作词不再随状态改写，整列起点与宽度稳定

@@ -33,7 +33,7 @@ def is_document(filename: str) -> bool:
 
 
 def is_text(filename: str) -> bool:
-    return Path(filename).suffix.lower() in TEXT_EXTS
+    return Path(filename).suffix.lower() in TEXT_EXTS | {".markdown", ".mjs", ".cjs", ".jsonc", ".toml", ".ini", ".cfg", ".conf", ".css", ".scss", ".vue", ".svelte", ".bat", ".ps1", ".cs", ".kt", ".swift", ".rb", ".php", ".dart", ".lock", ".gitignore", ".env"} or not Path(filename).suffix
 
 
 def _image_to_data_url(data: bytes, suffix: str) -> str:
@@ -175,6 +175,19 @@ def parse_file(filename: str, data: bytes, max_rows: int | None = MAX_SPREADSHEE
             text = _parse_csv_like(data, ",", max_rows)
         elif suffix.lower() == ".tsv":
             text = _parse_csv_like(data, "\t")
+        elif suffix.lower() == ".xls":
+            try:
+                import xlrd
+                book = xlrd.open_workbook(file_contents=data)
+                parts = []
+                for sheet in book.sheets():
+                    parts.append("### " + sheet.name)
+                    count = sheet.nrows if max_rows is None else min(sheet.nrows,max_rows)
+                    parts.extend(" | ".join(str(v) for v in sheet.row_values(r)) for r in range(count))
+                    if count < sheet.nrows: parts.append(f"(共 {sheet.nrows} 行，仅显示前 {count} 行)")
+                text = "\n".join(parts)
+            except Exception:
+                text = "(Excel 文件已损坏、加密或无法读取)"
         else:
             text = _parse_excel(data, max_rows)
         return {

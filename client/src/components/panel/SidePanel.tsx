@@ -380,6 +380,7 @@ export function SidePanel({ visible = true }: { visible?: boolean }) {
               {/* key 按会话切换：消息流内部的构建器 / 滚动位置 / 展开态不得跨会话复用，
                   否则切换侧边标签时会短暂看到上一个会话的内容。 */}
               <MessageFlow
+                visible={visible}
                 key={activeId}
                 features={{ jumpDots: false, search: false, planCard: false, suggestionCard: false }}
                 emptyText="这是新的侧边会话，直接在下方提问"

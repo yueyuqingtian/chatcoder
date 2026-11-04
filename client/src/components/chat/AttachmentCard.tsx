@@ -3,8 +3,10 @@
  * 会话 229: 统一改用全局 ImageGallery（左右切换/缩放/下载）；
  * 并新增 MessageAttachmentList——消息内图片改为约 150px 缩略图并排展示，非图片附件保持卡片。
  */
-import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage, IconFolder } from "../icons";
+import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage, IconFolder, IconMessageSquare } from "../icons";
 import { type AttachmentInfo, type ComposerRefOut, resolveFileUrl } from "../../api/client";
+import { useChatStore } from "../../store/chat";
+import { usePanelStore } from "../../store/panel";
 import { openGallery } from "../../store/gallery";
 import { Tooltip } from "../ui";
 import { tokenize, tokenDisplayName } from "../../utils/tokens";
@@ -20,15 +22,15 @@ function isImageAtt(att: AttachmentInfo): boolean {
   return att.type === "image" || att.mime_type.startsWith("image/");
 }
 
-export function AttachmentCard({ att }: { att: AttachmentInfo }) {
+export function AttachmentCard({ att, sessionId, messageId }: { att: AttachmentInfo; sessionId: number; messageId: number }) {
   const url = resolveFileUrl(att.url);
   const open = () => {
     if (isImageAtt(att)) openGallery([{ url, name: att.filename, size: att.size }], 0);
-    else window.open(url, "_blank", "noopener");
+    else usePanelStore.getState().openResource({ source: "attachment", session_id: sessionId, message_id: messageId, file_id: att.file_id }, useChatStore.getState().currentSessionId);
   };
   return (
     <Tooltip content={`${att.filename}（点击预览）`}>
-      <div className="attach-card" onClick={open}>
+      <div className="attach-card" role="button" tabIndex={0} onClick={open} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
         {isImageAtt(att) ? (
           <img className="attach-card-thumb" src={url} alt={att.filename} loading="lazy" decoding="async" />
         ) : (
@@ -80,12 +82,12 @@ export function MessageImageGrid({ atts }: { atts: AttachmentInfo[] }) {
 }
 
 /** 消息内非图片附件卡（保留在气泡内，点击新窗口打开）。 */
-export function MessageFileCards({ atts }: { atts: AttachmentInfo[] }) {
+export function MessageFileCards({ atts, sessionId, messageId }: { atts: AttachmentInfo[]; sessionId: number; messageId: number }) {
   const files = atts.filter((a) => !isImageAtt(a));
   return (
     <>
       {files.map((a) => (
-        <AttachmentCard key={a.file_id || a.url} att={a} />
+        <AttachmentCard key={a.file_id || a.url} att={a} sessionId={sessionId} messageId={messageId} />
       ))}
     </>
   );
@@ -114,7 +116,7 @@ export function TokenText({ text }: { text: string }) {
  * 调用方回退用 TokenText 解析文本（见 stripRefLines + TokenText）。
  */
 const REF_KIND_LABEL: Record<string, string> = {
-  file: "文件", dir: "文件夹", skill: "技能", mcp: "连接器", plugin: "插件",
+  file: "文件", dir: "文件夹", skill: "技能", mcp: "连接器", plugin: "插件", session: "会话",
 };
 
 export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
@@ -122,20 +124,20 @@ export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
   return (
     <div className="msg-ref-chips">
       {refs.map((r, i) => (
-        <span
-          key={`${r.kind}-${r.value}-${i}`}
-          className={`msg-ref-chip msg-ref-${r.kind}`}
-          title={`${REF_KIND_LABEL[r.kind] ?? r.kind}：${r.value}`}
-        >
-          <span className="msg-ref-icon">
-            {r.kind === "file" ? <IconFileText size={11} />
-              : r.kind === "dir" ? <IconFolder size={11} />
-              : r.kind === "mcp" ? <IconPlug size={11} />
-              : r.kind === "plugin" ? <IconPackage size={11} />
-              : <IconBox size={11} />}
+        <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.kind === "session"
+          ? `${r.label} · ${r.project_label || "会话"} · #${r.value}` : `${REF_KIND_LABEL[r.kind] ?? r.kind}：${r.value}`}>
+          <span className={`msg-ref-chip msg-ref-${r.kind}`}>
+            <span className="msg-ref-icon">
+              {r.kind === "file" ? <IconFileText size={11} />
+                : r.kind === "session" ? <IconMessageSquare size={11} />
+                : r.kind === "dir" ? <IconFolder size={11} />
+                : r.kind === "mcp" ? <IconPlug size={11} />
+                : r.kind === "plugin" ? <IconPackage size={11} />
+                : <IconBox size={11} />}
+            </span>
+            {r.label || r.value}
           </span>
-          {r.label || r.value}
-        </span>
+        </Tooltip>
       ))}
     </div>
   );
@@ -159,7 +161,7 @@ export function stripRefLines(text: string, hasRefs: boolean): string {
   if (!hasRefs || !text) return text;
   return text
     .split("\n")
-    .filter((ln) => !/^(引用文件|引用文件夹|使用技能|使用连接器|使用插件)：/.test(ln.trim()))
+    .filter((ln) => !/^(引用文件|引用文件夹|引用会话|使用技能|使用连接器|使用插件)：/.test(ln.trim()))
     .join("\n")
     .trim();
 }

@@ -592,6 +592,8 @@ class OpenAICompatibleProvider(ModelProvider):
         """
         from app.core.config import settings
 
+        from app.orchestration.history_sequence import prepare_history, validate_openai_wire
+        messages = prepare_history(messages)
         result = []
         for m in messages:
             if m.role == "developer":
@@ -649,7 +651,7 @@ class OpenAICompatibleProvider(ModelProvider):
                     _d["reasoning_content"] = m.reasoning_content
                 result.append(_d)
 
-        return result
+        return validate_openai_wire(result)
 
 
 # ---------------------------------------------------------------------------

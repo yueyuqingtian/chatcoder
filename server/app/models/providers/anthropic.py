@@ -169,7 +169,8 @@ class AnthropicProvider(ModelProvider):
         messages: list[dict] = []
 
         seen_dialogue = False  # 是否已出现过非系统消息（之后的 system 属于对话中途的动态提醒）
-        for m in request.messages:
+        from app.orchestration.history_sequence import prepare_history, validate_anthropic_wire
+        for m in prepare_history(request.messages):
             # v6.1: developer 角色（对齐 codex）——Anthropic 无 developer 概念，开头的系统段合并到顶层 system。
             # 对话中途注入的动态提醒（语言 / 规则 / 计划状态等）若也并入顶层 system，会被挪到开头、失去
             # “贴近动作点”的效果；这里改为原位置的 user 消息（system-reminder 包裹），Anthropic 会合并相邻同角色消息。
@@ -247,7 +248,7 @@ class AnthropicProvider(ModelProvider):
 
         payload: dict = {
             "model": request.model or self._default_model,
-            "messages": messages,
+            "messages": validate_anthropic_wire(messages),
             "stream": stream,
         }
         # 不限制输出：未显式配置时不传 max_tokens，由网关/模型自身决定上限。

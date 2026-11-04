@@ -19,8 +19,8 @@ import type { ServerEventName } from "@chatcoder/shared/events";
 import { useWorkflowStore } from "./workflow";
 import { useBgTaskStore } from "./bgTasks";
 import { handOffThinkingExpand } from "./flowExpand";
-// plan-522-2209：跨会话待处理交互轻量索引（仅存摘要）——侧栏等待图标的依据之一
-import { pendingActions, kindOfDetail, usePendingInteractions } from "./pendingInteractions";
+// plan-20261103-interactions：跨会话交互索引同时驱动侧栏等待标记与当前输入区。
+import { pendingActions, pendingQueueOf, kindOfDetail, usePendingInteractions } from "./pendingInteractions";
 import type { CompactSummaryPayload } from "@chatcoder/shared/events";
 
 /** v7: 全局最近选择思考深度的 localStorage 持久化 key——重启后仍能恢复上次选择 */
@@ -53,6 +53,9 @@ export function persistLastReasoning(value: string | null) {
 
 /** 上下文占用详情（输入框圆环）。 */
 /** 撤销本轮文件改动的结果：被严格拒绝时带回逐文件原因（plan-20261019-toolcard-v2）。 */
+const _forkRequestIds = new Map<number, string>();
+let _sessionNavigationVersion = 0;
+
 export interface RevertFilesOutcome {
   ok: boolean;
   message?: string;
@@ -188,6 +191,10 @@ export interface ApprovalQueueItem {
   detail: Record<string, unknown>;
 }
 
+/** 提问作答值：单选 / 自定义输入是字符串；多选是「勾选的选项 + 自定义补充」的字符串数组。 */
+export type QuestionAnswer = string | string[];
+export type QuestionAnswers = Record<string, QuestionAnswer>;
+
 export interface ApprovalExplainState {
   approvalId: string;
   status: "idle" | "loading" | "streaming" | "done" | "error";
@@ -199,6 +206,7 @@ export interface ApprovalExplainState {
 }
 
 export interface SessionSlice {
+  sessionLoadError?: boolean;
   messages: MessageOut[];
   turns: TurnOut[];
   tasks: TaskOut[];
@@ -216,7 +224,7 @@ export interface SessionSlice {
   /** 待审批队列（队首即 pendingApproval），随会话切片保存/恢复 */
   approvalQueue: ApprovalQueueItem[];
   /** plan-238-1188: 提问作答草稿随会话 slice 一起保存/恢复，切走再回来不丢。 */
-  questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
+  questionDraft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null;
   /** plan-75-332: 审批卡解释内容（同样随切片保存/恢复）。 */
   approvalExplain: ApprovalExplainState | null;
   /** plan-95/v38: turnId 标记计划卡归属 turn；planDocPath 为后端广播的实际文档路径。
@@ -276,6 +284,7 @@ export interface UsageCacheTotals {
 /** 视图 → slice 快照（切换会话前保存当前会话状态）。 */
 function _snapshotSlice(s: ChatState): SessionSlice {
   return {
+    sessionLoadError: s.sessionLoadError,
     messages: s.messages,
     turns: s.turns,
     tasks: s.tasks,
@@ -410,7 +419,7 @@ interface ChatState {
    *  已选答案随之丢失；上移到 store 后返回原会话可完整恢复。
    *  生命周期：approval.request 置 null（新提问）→ 作答过程中持续写回 →
    *  approval.response / respondApproval / cancelTurn 清空。 */
-  questionDraft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null;
+  questionDraft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null;
   /** plan-75-332: 审批卡「解释」状态（骨架 → 流式填充），按 approvalId 键控。
    *  生命周期：explainApproval 置 loading → delta 累加 → done/error 终态 →
    *  approval.request / approval.response / respondApproval / cancelTurn 清空。 */
@@ -541,7 +550,7 @@ interface ChatState {
   /** plan-278-1391: 关闭归档项目提示（用户取消）。 */
   dismissArchivedProjectPrompt: () => void;
   selectProject: (projectId: number) => Promise<void>;
-  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; approval_mode?: string; goal_text?: string | null }) => Promise<number | null>;
+  createSession: (projectId: number, title?: string, opts?: { model_id?: number | null; permission_mode?: string; approval_mode?: string; reasoning_effort?: string | null; goal_text?: string | null }) => Promise<number | null>;
   switchSession: (sessionId: number, fromHist?: boolean) => Promise<void>;
   /** 会话前进/后退历史（侧栏 logo 区与折叠态标题栏共用，zcode 顶部导航箭头） */
   sessionHist: number[];
@@ -551,6 +560,8 @@ interface ChatState {
   /** plan-20261025-shell（需求 8）：归档会话；归档的是当前会话时自动回退（成功返回 true） */
   archiveSession: (sessionId: number) => Promise<boolean>;
   renameSession: (sessionId: number, title: string) => Promise<void>;
+  forkingSessions: Record<number, boolean>;
+  sessionLoadError: boolean;
   forkSession: (sessionId: number) => Promise<void>;
 /** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
 sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) => Promise<number | null>;
@@ -578,7 +589,7 @@ resumeTurn: () => Promise<void>;
   dismissPlan: (turnId?: number) => void;
   respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>, rememberScope?: "session" | "global") => void;
   /** plan-238-1188: 提问向导作答草稿写回（null 清空）。 */
-  setQuestionDraft: (draft: { approvalId: string; stepIndex: number; answers: Record<string, string> } | null) => void;
+  setQuestionDraft: (draft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null) => void;
   /** plan-75-332: 请求 AI 解释当前审批项（骨架先显示，内容流式填充）。 */
   explainApproval: (approvalId: string) => void;
   /** plan-75-332: 清空解释状态（审批结束/取消/卡片卸载时调用）。 */
@@ -652,11 +663,6 @@ let _globalWsUnsub: (() => void) | null = null;
 /** plan-522-2209: 全局通道「连上 / 重连上」回调的清理函数——用于重建跨会话等待索引 */
 let _globalOpenUnsub: (() => void) | null = null;
 let _workflowRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-/** 会话隔离修复：本轮补发批次里出现过的审批 id。
- *  重建队列时只对这些条目做去留判定——实时到达的新请求不参与，
- *  避免「REST 未决清单返回」与「实时 approval.request」的竞态把新卡误摘。 */
-const _replayedApprovalIds = new Set<string>();
-
 /** 工作流状态变化：防抖刷新侧栏的工作流标记；只合并 workflow_state，不覆盖其它运行态字段 */
 function scheduleWorkflowSessionRefresh(): void {
   if (_workflowRefreshTimer !== null) return;
@@ -1476,6 +1482,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastModelId: null,
   loading: false,
   sessionLoading: false,
+  sessionLoadError: false,
+  forkingSessions: {},
   error: null,
   flowError: null,
   hiddenTurnErrors: [],
@@ -1716,6 +1724,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         model_id: opts?.model_id ?? undefined,
         permission_mode: opts?.permission_mode ?? undefined,
         approval_mode: opts?.approval_mode ?? undefined,
+        // 首页所选思考深度随创建一次落准——新会话从诞生起就有自己的档位，不靠全局最近值兜底
+        reasoning_effort: opts?.reasoning_effort ?? undefined,
         goal_text: opts?.goal_text ?? undefined,
       });
       set((s) => ({ sessions: [session, ...s.sessions] }));
@@ -1728,6 +1738,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   switchSession: async (sessionId, fromHist) => {
+    _sessionNavigationVersion += 1;
     // 导航历史入栈（histGo 触发的切换跳过，避免重复入栈）
     if (!fromHist) {
       const h = get().sessionHist;
@@ -1754,7 +1765,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
      * 缓存切片仅凭 id 命中会把「上一个同 id 会话」的消息/清单恢复进新会话。
      * 用创建时间做身份证：两边都有且不一致 ⇒ 缓存陈旧，丢弃后走 REST 首次加载。 */
     const session = findSession(get(), sessionId);
-    const rawCached = get().sessionState[sessionId];
+    const rawCached = prevId === sessionId && prev.sessionLoadError ? undefined : get().sessionState[sessionId];
     const cacheIsStale = Boolean(
       rawCached?.sessionCreatedAt && session?.created_at
       && rawCached.sessionCreatedAt !== session.created_at,
@@ -1766,12 +1777,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { sessionState: next };
       });
     }
-    const cached = cacheIsStale ? undefined : rawCached;
+    const cached = cacheIsStale || rawCached?.sessionLoadError ? undefined : rawCached;
     set({
       currentSessionId: sessionId,
+      sessionLoadError: false,
       ..._resetSessionState(),
       // v2.2: 有缓存直接恢复视图（零重载切换），无缓存走 REST 首次加载
       ..._sliceToView(cached),
+      // plan-20261103-interactions：交互从实时索引恢复，旧缓存不能短暂复活已处理卡片。
+      approvalQueue: pendingQueueOf(sessionId),
+      pendingApproval: pendingQueueOf(sessionId)[0] ?? null,
     });
     // plan-156-621：用 findSession 而非 sessions.find——子会话不在 sessions 里，
     // 从其他项目的主会话直接点开子会话时 currentProjectId 会停在旧项目，
@@ -1785,24 +1800,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // WS 连接 + 事件监听（保存 cleanup 函数）
     wsClient.connect(sessionId);
-    // 会话隔离修复：把跨会话索引里**属于本会话**的等待项补回审批队列。
-    // 会话在后台运行时的提问 / 审批只到达全局通道（本会话 WS 早已切走），队列里没有条目；
-    // 不补的话侧栏显示「在等你」、切进来却无卡可答。只取本会话桶，别的会话的请求绝不进本视图。
-    {
-      const bucket = usePendingInteractions.getState().pendingBySession[sessionId];
-      const entries = bucket ? Object.entries(bucket) : [];
-      if (entries.length > 0 && get().currentSessionId === sessionId) {
-        set((s) => {
-          const queue = [...s.approvalQueue];
-          for (const [approvalId, entry] of entries) {
-            if (!queue.some((x) => x.approvalId === approvalId)) {
-              queue.push({ approvalId, detail: entry.detail });
-            }
-          }
-          return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
-        });
-      }
-    }
     _wsUnsub = wsClient.on((ev) => {
       const payload = ev.payload as Record<string, unknown>;
       // plan-549-2281 复盘：把补发批次标记透传给 store——流式增量据此只丢重放、不误伤实时
@@ -1857,7 +1854,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // plan-387-1825 C3：置位 sessionLoading → 消息流显示骨架屏，
     // 避免消息流被 _resetSessionState 清空后闪一次「选择或创建会话」空态文案。
     // 缓存命中路径在上面已 return，不会走到这里，故缓存切换零闪烁。
-    set({ loading: true, error: null, sessionLoading: true });
+    set({ loading: true, error: null, sessionLoading: true, sessionLoadError: false });
     try {
       const [messages, turns, tasks] = await Promise.all([
         initialMessages(sessionId),
@@ -2011,7 +2008,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-387-1825 C3：失败也要清 sessionLoading，否则加载态永久停留。
       // plan-20261020-suggestion-gate：同样只清自己的——切走后由目标会话自行结束加载态。
       if (get().currentSessionId !== sessionId) return;
-      set({ loading: false, sessionLoading: false, error: String(e) });
+      set({ loading: false, sessionLoading: false, sessionLoadError: true, error: String(e) });
     }
   },
 
@@ -2107,18 +2104,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   forkSession: async (sessionId) => {
+    if (get().forkingSessions[sessionId]) return;
+    const focusAtStart = get().currentSessionId;
+    const navigationAtStart = _sessionNavigationVersion;
+    const requestId = _forkRequestIds.get(sessionId) ?? crypto.randomUUID();
+    _forkRequestIds.set(sessionId, requestId);
+    set((s) => ({ forkingSessions: { ...s.forkingSessions, [sessionId]: true } }));
     try {
-      const fork = await api.forkSession(sessionId);
-      set((s) => ({ sessions: [fork, ...s.sessions] }));
-      await get().switchSession(fork.id);
+      const fork = await api.forkSession(sessionId, requestId);
+      _forkRequestIds.delete(sessionId);
+      set((s) => ({ sessions: [fork, ...s.sessions.filter((x) => x.id !== fork.id)] }));
+      // plan-20261103-fork-ui：用户离开后安静加入列表，迟到响应不抢焦点。
+      if (get().currentSessionId === focusAtStart && _sessionNavigationVersion === navigationAtStart) await get().switchSession(fork.id);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: `创建分支失败，可重试：${String(e)}` });
+    } finally {
+      set((s) => { const next = { ...s.forkingSessions }; delete next[sessionId]; return { forkingSessions: next }; });
     }
   },
 
   sendTurn: async (content, attachments, reasoningEffort, mode, modelId, refs) => {
     const { currentSessionId, isRunning } = get();
-    if (!currentSessionId) return null;
+    if (!currentSessionId || get().sessionLoading || get().sessionLoadError) return null;
     // 空态新会话可能在 WS 建连前就收到首条消息，先本地投影标题，避免等待事件丢失。
     const currentSession = findSession(get(), currentSessionId);
     if (currentSession && !currentSession.title && get().messages.length === 0 && content.trim()) {
@@ -2382,6 +2389,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   respondApproval: (approvalId, approved, remember = false, answer, rememberScope = "session") => {
+    // plan-20261103-interactions：切回时连接可能尚未就绪，未发出的答案不能被记成已处理。
+    if (!wsClient.connected) {
+      set({ error: "会话连接尚未恢复，请稍后重试。" });
+      return;
+    }
     // v2.2 (对齐 zcode 3.12/3.14): remember=true 生成"始终允许"规则；
     // v3.0 (plan-88): rememberScope 区分会话级/全局规则（session / global）
     // answer 为 ask_user_question 的结构化回答
@@ -2730,7 +2742,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 「引用文件：/ 使用技能：/ 使用连接器：/ 使用插件：」可读行追加在正文后；
       // 撤回时解析回结构化 refs，输入框恢复 chips 样式（不再只剩纯文本）。
       // plan-128-518：解析逻辑抽到 utils/refLines，与排队消息编辑共用同一实现
-      const { text: restoredText, refs: restoredRefs } = parseRefLines(result.user_message ?? "");
+      const parsedRefs = parseRefLines(result.user_message ?? "");
+      const restoredText = parsedRefs.text;
+      const restoredRefs = Array.isArray(result.user_refs) ? result.user_refs : parsedRefs.refs;
       set({
         messages, turns, tasks,
         turnChanges: nextChanges,
@@ -4148,16 +4162,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case "approval.request": {
-        // 会话隔离修复：补发批次（replay）里的审批 / 提问请求一律不入队。
-        // 每次进会话 lastSeq 都从 0 开始，服务端会把本会话补偿缓冲里的历史 approval.request
-        // 整体重放；已作答的请求会因此重新弹卡（表现为「回答完又回到第 1 题」）。
-        // 真正仍未决的请求由 sync.response 到达后的未决清单重建（见下方分支），
-        // 这里只记录 id 供重建时判定去留。
-        const replayAid = String(payload.approval_id ?? "");
-        if (isReplay) {
-          if (replayAid) _replayedApprovalIds.add(replayAid);
-          break;
-        }
+        // plan-20261103-interactions：历史请求不显示，真实未决项由清单与全局实时通道恢复。
+        if (isReplay) break;
         // plan-230-1144: 跨会话串线双保险——服务端已按 detail.session_id 精确路由，
         // 前端再校验一次：detail 携带的 session_id 与当前会话不一致时忽略
         // （历史遗留事件、多窗口重放等场景下防止提问/审批弹进错误的会话）。
@@ -4172,14 +4178,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 切回会话时 WS 的 sync 会按序重放历史审批事件：若这里清草稿，中间那些已结束审批的
         // request 会把仍在等待的提问已填好的答案冲掉（“切走再回来草稿丢失”的根因）。
         const approvalId = String(payload.approval_id ?? "");
-        // 入队而不是覆盖：并行子代理可能同时请求审批，前一个未作答时它仍在等服务端回执，
-        // 必须留在队列里可见（队首即 pendingApproval，依次作答）。同一 id 的重放只保留一条。
-        set((s) => {
-          const queue = s.approvalQueue.some((x) => x.approvalId === approvalId)
-            ? s.approvalQueue
-            : [...s.approvalQueue, { approvalId, detail }];
-          return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
-        });
+        if (curSid != null) pendingActions.noteRequest(curSid, approvalId, kindOfDetail(detail), detail);
         break;
       }
       case "approval.response": {
@@ -4369,45 +4368,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           void get().refreshTurns();
           void get().refreshTasks();
         }
-        // 会话隔离修复：补发结束即用后端未决清单重建**当前会话**的审批队列。
-        // 重放的历史请求已在 approval.request 分支被忽略；这里既补回断线期间真正到达的
-        // 提问 / 审批，也顺手摘掉已作答、已超时的幽灵条目——否则切回会话时旧提问卡会复活。
+        // plan-20261103-interactions：清单统一校对索引；请求期间的实时事件及作答优先。
         const pendingSid = get().currentSessionId;
+        const navigation = _sessionNavigationVersion;
+        const startedAt = pendingActions.snapshotVersion();
         if (pendingSid != null) {
           void api.getPendingApprovals().then((res) => {
-            // 请求期间可能已切走：迟到响应不得写进新会话
-            if (get().currentSessionId !== pendingSid) return;
-            const items = res.items.filter((it) => Number(it.session_id ?? 0) === pendingSid);
-            set((s) => {
-              // 只对「本轮补发里出现过」的条目做去留判定；实时到达的新请求无条件保留
-              const queue = s.approvalQueue.filter((x) =>
-                items.some((it) => it.approval_id === x.approvalId)
-                || !_replayedApprovalIds.has(x.approvalId),
-              );
-              for (const it of items) {
-                if (!queue.some((x) => x.approvalId === it.approval_id)) {
-                  queue.push({
-                    approvalId: it.approval_id,
-                    detail: (it.detail || {}) as Record<string, unknown>,
-                  });
-                }
-              }
-              return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
-            });
-            // 同步补全跨会话索引（全局通道可能漏事件；noteRequest 幂等）
-            for (const it of items) {
-              pendingActions.noteRequest(
-                pendingSid, it.approval_id,
-                it.kind === "question" ? "question" : "approval",
-                (it.detail || {}) as Record<string, unknown>,
-              );
-            }
-            _replayedApprovalIds.clear();
-          }).catch(() => { /* 拉取失败：保留当前队列，后续实时事件仍会补齐 */
-            _replayedApprovalIds.clear();
-          });
-        } else {
-          _replayedApprovalIds.clear();
+            if (get().currentSessionId !== pendingSid || navigation !== _sessionNavigationVersion) return;
+            pendingActions.reconcile(res.items, startedAt, pendingSid);
+          }).catch(() => { /* 保留实时状态，后续连接时再校对 */ });
         }
         break;
       }
@@ -4440,19 +4409,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 后端未决清单重建索引，否则「有东西在等我」会因为一次网络抖动永久消失。
     // 先注册再 connect：onOpen 在当前已连上时会立刻回调，顺序反过来会漏掉首次连接。
     _globalOpenUnsub = globalWsClient.onOpen(() => {
+      const startedAt = pendingActions.snapshotVersion();
       void api.getPendingApprovals()
-        .then((res) => {
-          pendingActions.reset();
-          for (const item of res.items) {
-            const itemSid = Number(item.session_id ?? 0);
-            if (!itemSid || !item.approval_id) continue;
-            pendingActions.noteRequest(
-              itemSid, item.approval_id,
-              item.kind === "question" ? "question" : "approval",
-              (item.detail || {}) as Record<string, unknown>,
-            );
-          }
-        })
+        .then((res) => pendingActions.reconcile(res.items, startedAt))
         .catch(() => { /* 拉取失败不阻塞界面：后续到达的事件仍会补齐索引 */ });
     });
     globalWsClient.connect();
@@ -4471,7 +4430,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-522-2209：审批 / 提问到达与答复的跨会话索引。
       // 全局通道早就在转发这两个事件（_GLOBAL_FORWARD_EVENTS），但侧栏从无消费者——
       // 这就是「非当前会话在等你，左栏却什么都不显示」的根因。
-      // 只入轻量摘要（会话 / approvalId / 类型 / 到达时间），detail 不进跨会话内存。
+      // plan-20261103-interactions：索引保存完整详情，同时驱动侧栏与当前会话输入区。
       if (ev.event === "approval.request") {
         const approvalId = String(p.approval_id ?? "");
         const detail = (p.detail || {}) as Record<string, unknown>;
@@ -4632,4 +4591,19 @@ useChatStore.subscribe((state, previous) => {
   const next = { ...state.sessionState };
   for (const [sid] of cold.slice(5)) { delete next[Number(sid)]; _viewUsedAt.delete(Number(sid)); }
   useChatStore.setState({ sessionState: next });
+});
+
+// plan-20261103-interactions：两条事件通道和未决清单统一更新索引，当前队列只作视图投影。
+usePendingInteractions.subscribe((state, previous) => {
+  const current = useChatStore.getState();
+  const sid = current.currentSessionId;
+  if (sid == null || state.pendingBySession[sid] === previous.pendingBySession[sid]) return;
+  const queue = pendingQueueOf(sid);
+  const contains = (id: string) => queue.some((item) => item.approvalId === id);
+  useChatStore.setState({
+    approvalQueue: queue,
+    pendingApproval: queue[0] ?? null,
+    questionDraft: current.questionDraft && contains(current.questionDraft.approvalId) ? current.questionDraft : null,
+    approvalExplain: current.approvalExplain && contains(current.approvalExplain.approvalId) ? current.approvalExplain : null,
+  });
 });

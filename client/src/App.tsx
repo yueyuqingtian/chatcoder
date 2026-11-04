@@ -56,6 +56,15 @@ export default function App() {
     return () => { window.removeEventListener("resize", resize); window.clearTimeout(timer); };
   }, []);
   const [nav, setNav] = useState<NavKey | null>(null);
+  const wasSettings = useRef(false);
+  useEffect(() => {
+    const restored = wasSettings.current && nav !== "settings";
+    wasSettings.current = nav === "settings";
+    if (!restored) return;
+    // plan-20261103-flow-blank：设置返回后主区已重建、右面板仍保活，两者都需要重新提交布局。
+    const frame = requestAnimationFrame(() => window.dispatchEvent(new Event("chatcoder:workspace-restored")));
+    return () => cancelAnimationFrame(frame);
+  }, [nav]);
   // plan-41-233：右面板状态按会话分桶，这里跟随会话切换同步「当前桶」。
   const currentSessionId = useChatStore((s) => s.currentSessionId);
   // 进入设置前的位置：首页用 null + 空会话 ID 与消息页区分。

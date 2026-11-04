@@ -41,7 +41,60 @@ export const usePendingInteractions = create<PendingInteractionsState>(() => ({
   pendingBySession: {},
 }));
 
+// plan-20261103-interactions：清单请求期间的事件优先，已回答的请求不能被迟到清单或重复广播复活。
+let revision = 0;
+const changedAt = new Map<string, number>();
+const resolvedIds = new Set<string>();
+
+export function pendingQueueOf(sessionId: number) {
+  const bucket = usePendingInteractions.getState().pendingBySession[sessionId] ?? {};
+  return Object.entries(bucket).sort((a, b) => a[1].createdAt - b[1].createdAt)
+    .map(([approvalId, entry]) => ({
+      approvalId,
+      detail: entry.kind === "question" ? { ...entry.detail, kind: "question" } : entry.detail,
+    }));
+}
+
+// plan-20261103-interactions：完全访问只展示需求提问；取所属会话的队列，旧工具审批不能挡住后面的提问。
+export function firstVisiblePending<T extends { approvalId: string; detail: Record<string, unknown> }>(
+  queue: T[], sessionId: number | null, approvalMode: string | null | undefined,
+): T | null {
+  if (sessionId == null) return null;
+  return queue.find((item) => {
+    const owner = Number(item.detail.session_id ?? sessionId);
+    return owner === sessionId && (approvalMode !== "full" || kindOfDetail(item.detail) === "question");
+  }) ?? null;
+}
+
 export const pendingActions = {
+  snapshotVersion: () => revision,
+
+  reconcile: (items: Array<{ session_id: number | null; approval_id: string; kind: string; detail: Record<string, unknown> }>, startedAt: number, sessionId?: number) => {
+    const all = usePendingInteractions.getState().pendingBySession;
+    const next: PendingBySession = { ...all };
+    const sessions = sessionId == null
+      ? new Set([...Object.keys(all).map(Number), ...items.map((it) => Number(it.session_id)).filter(Boolean)])
+      : new Set([sessionId]);
+    for (const sid of sessions) {
+      const bucket: Record<string, PendingEntry> = {};
+      for (const [id, entry] of Object.entries(all[sid] ?? {})) {
+        if ((changedAt.get(id) ?? 0) > startedAt && !resolvedIds.has(id)) bucket[id] = entry;
+      }
+      for (const it of items) {
+        if (Number(it.session_id) !== sid || !it.approval_id || resolvedIds.has(it.approval_id)) continue;
+        if ((changedAt.get(it.approval_id) ?? 0) > startedAt) continue;
+        const kind = it.kind === "question" ? "question" : kindOfDetail(it.detail);
+        bucket[it.approval_id] = {
+          kind, createdAt: all[sid]?.[it.approval_id]?.createdAt ?? Date.now(),
+          detail: { ...(all[sid]?.[it.approval_id]?.detail ?? {}), ...it.detail, ...(kind === "question" ? { kind } : {}) },
+        };
+      }
+      if (Object.keys(bucket).length) next[sid] = bucket;
+      else delete next[sid];
+    }
+    usePendingInteractions.setState({ pendingBySession: next });
+  },
+
   /** 记录一条到达的审批 / 提问。同一 approvalId 重放只记一次
    *  （全局通道重连会补发历史事件，重复记录会让计数虚高）。 */
   noteRequest: (
@@ -50,7 +103,8 @@ export const pendingActions = {
     kind: PendingKind,
     detail: Record<string, unknown> = {},
   ) => {
-    if (!sessionId || !approvalId) return;
+    if (!sessionId || !approvalId || resolvedIds.has(approvalId)) return;
+    changedAt.set(approvalId, ++revision);
     usePendingInteractions.setState((s) => {
       const bucket = s.pendingBySession[sessionId];
       // 已存在即重放：保留首次到达时间（排序要按真实先后，不能让重放把它排到后面），
@@ -62,7 +116,7 @@ export const pendingActions = {
             ...s.pendingBySession,
             [sessionId]: {
               ...bucket,
-              [approvalId]: { ...bucket[approvalId], detail },
+              [approvalId]: { ...bucket[approvalId], kind, detail: { ...bucket[approvalId].detail, ...detail } },
             },
           },
         };
@@ -82,6 +136,8 @@ export const pendingActions = {
   /** 清除已作答 / 已取消的审批。整个会话桶空了就一并删掉，避免空对象堆积。 */
   clearRequest: (sessionId: number, approvalId: string) => {
     if (!sessionId || !approvalId) return;
+    changedAt.set(approvalId, ++revision);
+    resolvedIds.add(approvalId);
     usePendingInteractions.setState((s) => {
       const bucket = s.pendingBySession[sessionId];
       if (!bucket || !bucket[approvalId]) return {};
@@ -99,6 +155,8 @@ export const pendingActions = {
    *  切回原会话后卡片复活、反复回到第 1 题。approvalId 全局唯一，可直接跨桶定位。 */
   clearByApprovalId: (approvalId: string) => {
     if (!approvalId) return;
+    changedAt.set(approvalId, ++revision);
+    resolvedIds.add(approvalId);
     usePendingInteractions.setState((s) => {
       let changed = false;
       const next: PendingBySession = {};
@@ -120,6 +178,9 @@ export const pendingActions = {
 
   /** 清空（断线重连后由 REST 重建、或会话数据整体重载时使用）。 */
   reset: () => {
+    revision = 0;
+    changedAt.clear();
+    resolvedIds.clear();
     usePendingInteractions.setState({ pendingBySession: {} });
   },
 };

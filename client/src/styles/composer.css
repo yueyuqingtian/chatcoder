@@ -8,6 +8,40 @@
  * ═══════════════════════════════════════════════════════════ */
 
 /* ── 输入卡 ─────────────────────────────────────────────── */
+/* plan-20261104-session-mentions：不透明分组选择器，浮层动画与消息流布局隔离。 */
+.mention-anchor { position: absolute; bottom: calc(100% + 8px); left: 32px; right: 32px; z-index: 1000; container-type: inline-size; }
+.mention-menu { border: 1px solid var(--border); position: static; min-width: 0; max-height: none; overflow: hidden; padding: 8px; border-radius: var(--r-pop); background: var(--bg-elevated); box-shadow: var(--shadow-md); line-height: 1.5; }
+.mention-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding: 4px 8px 8px; }
+.mention-heading strong { color: var(--text-1); font-size: 13px; font-weight: 600; }
+.mention-heading > span { color: var(--text-3); font-size: 11px; }
+.mention-filters { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 0 4px; }
+.mention-categories { display: flex; gap: 4px; }
+.mention-menu .mention-filters button { width: auto; }
+.mention-menu .ui-select-trigger { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-panel); }
+.mention-menu .mention-categories .btn { justify-content: center; border-color: transparent; }
+.mention-archive { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 8px 0; color: var(--text-3); font-size: 11px; }
+.mention-menu .mention-archive .ui-switch-root { padding: 0; border-radius: var(--r-pill); }
+.mention-list { overflow-y: auto; overscroll-behavior: contain; max-height: min(340px, 42vh); margin-top: 8px; scrollbar-gutter: stable; }
+.mention-group-heading { position: sticky; top: 0; z-index: 1; padding: 6px 8px; background: var(--bg-elevated); color: var(--text-3); font-size: 11px; font-weight: 600; line-height: 1.5; }
+.mention-list .mention-group-heading:not(:first-child) { margin-top: 8px; }
+.mention-menu .mention-option.active { background: var(--bg-active); color: var(--text-1); }
+.mention-menu .mention-option { height: auto; min-height: 48px; padding: 8px; border-radius: var(--r-md); gap: 10px; border-color: transparent; white-space: normal; justify-content: flex-start; text-align: left; }
+.mention-menu .mention-option > .mention-option-icon { flex: 0 0 20px; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.mention-menu .mention-option > .mention-option-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; line-height: 1.5; }
+.mention-option-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 12px; font-weight: 500; }
+.mention-option-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
+.mention-menu .mention-option > .mention-badge { flex: 0 0 auto; font-size: 10px; color: var(--text-3); border-radius: var(--r-pill); background: var(--bg-panel); padding: 2px 6px; }
+.mention-time { flex: 0 0 auto; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.mention-status { display: flex; align-items: center; gap: 8px; min-height: 0; padding: 0 8px; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.mention-status:not(:empty) { padding-top: 8px; padding-bottom: 8px; }
+.mention-menu .mention-status > .btn, .mention-menu .mention-more { width: auto; }
+.mention-menu .mention-more { margin: 4px 8px; }
+.mention-footer { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 8px 2px; margin-top: 8px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 10px; line-height: 1.5; }
+@container (max-width: 360px) {
+  .mention-time, .mention-heading > span { display: none; }
+  .mention-menu .mention-filters { gap: 8px 4px; }
+}
+
 .composer-main {
   border-radius: var(--r-card);
   border: 1px solid var(--border);
@@ -346,3 +380,4 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 @keyframes cw-handle-in { from { opacity: 0; } to { opacity: 1; } }
+.composer-attach-chip { cursor:pointer; }

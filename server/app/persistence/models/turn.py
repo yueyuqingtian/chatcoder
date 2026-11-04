@@ -1,5 +1,5 @@
 """轮次（turn）：一次用户消息的执行单元。"""
-from sqlalchemy import BigInteger, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.database import Base
@@ -10,6 +10,8 @@ class Turn(Base):
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("sessions.id"))
+    # plan-20261103-fork：继承轮次只读，不能撤销源工作区或恢复旧执行。
+    inherited: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     user_message_id: Mapped[int | None] = mapped_column(BigInteger)  # 触发本 turn 的用户消息
     status: Mapped[str] = mapped_column(String(20), default="running")  # running/completed/failed/cancelled/interrupted/rolled_back
     summary: Mapped[str | None]  # turn 结束时主代理产出摘要

@@ -282,6 +282,7 @@ export const TurnGroup = memo(function TurnGroup({
   turnStatus,
   awaitingBackground = false,
   backgroundEndedAt = 0,
+  suppressUnplacedSubagents = false,
 }: {
   entry: Extract<TimelineEntry, { kind: "turn" }>;
   isRunning: boolean;
@@ -311,6 +312,15 @@ export const TurnGroup = memo(function TurnGroup({
   /** plan-20261014-actions-wait：本会话已启动的工作流里最晚的结束时刻（毫秒，0 = 无），仅尾部一轮传入。
    *  整轮结束后「已工作」用时的终点不早于它（见 WorkTimer 的 endFloorMs）。 */
   backgroundEndedAt?: number;
+  /** 会话首屏历史尚未落地（消息窗口还在加载）时抑制「未落位子代理卡」的兜底渲染。
+   *
+   *  为什么需要：进入会话时 WS 会把补发批次里的尾部消息先写进 store，而 REST 历史窗口还没返回，
+   *  此时时间线上没有派发该子代理的 spawn_subagent 调用条目 ⇒ 卡片被判成「未落位」，
+   *  兜底渲染到本轮的最后一个 AI 内容项之后（视觉上是「子代理先出现在消息流最下方」）；
+   *  等历史窗口落地、spawn 条目出现，卡片才跳回它该在的位置。加载态下先不画这张兜底卡，
+   *  历史到齐后它自然由 spawn 条目原位认领，不再有「先沉底再归位」的跳动。
+   *  缺省 false（子代理面板等宿主行为不变）。 */
+  suppressUnplacedSubagents?: boolean;
 }) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("turnGroup");
@@ -318,6 +328,7 @@ export const TurnGroup = memo(function TurnGroup({
   const requestRollbackPreview = useChatStore((s) => s.requestRollbackPreview);
   const items = entry.items;
   const turnId = entry.turnId;
+  const inherited = items.some((it) => "msg" in it && it.msg.content?.fork_history === true);
   /** 本条目覆盖的全部 turn（一轮可能并入了续跑轮）；计时、错误归属都按整轮计算 */
   const roundIds: readonly number[] = entry.turnIds ?? (turnId != null ? [turnId] : []);
 
@@ -541,7 +552,7 @@ export const TurnGroup = memo(function TurnGroup({
       const title = String(args?.task_title ?? "");
       if (title) names.add(title);
       const rid = Number(args?.agent_id);
-      if (Number.isFinite(rid) && rid > 0) ids.add(rid);
+      if (Number.isFinite(rid) && rid !== 0) ids.add(rid);
     }
     return { renderedSubagentNames: names, renderedSubagentIds: ids };
   }, [items]);
@@ -599,8 +610,11 @@ export const TurnGroup = memo(function TurnGroup({
     [items, firstUserIdx, attachedIdx],
   );
 
-  const subagentNode =
-    legacyUnplaced.length > 0 ? (
+  /** 未落位兜底卡是否可渲染：会话首屏历史还没落地时先不画。
+   *  此时时间线上缺 spawn_subagent 调用条目，卡片只是「暂时找不到位置」，
+   *  画出来就会先沉到轮末再跳回原位（见 suppressUnplacedSubagents）。 */
+  const showUnplaced = !suppressUnplacedSubagents && legacyUnplaced.length > 0;
+  const subagentNode = showUnplaced ? (
       <div className="turn-subagents">
         {legacyUnplaced.map((sa) => (
           <PluginSlot key={sa.agentId} slot="subagent-card" meta={sa} />
@@ -616,11 +630,11 @@ export const TurnGroup = memo(function TurnGroup({
   );
 
   // v0.3.1: 外层容器渲染守卫——只要存在任何非首条用户消息的项、计划卡或子代理，必须完整渲染 AI 回复区
-  // plan-586-2374：随 items 缓存；subagentNode 的非空判定等价于 legacyUnplaced 非空（见上），
-  // 这里用后者作依赖，避免把新建的 JSX 元素放进依赖数组、每次渲染都失效。
+  // plan-586-2374：随 items 缓存；subagentNode 的非空判定等价于 showUnplaced（见上），
+  // 这里用它作依赖，避免把新建的 JSX 元素放进依赖数组、每次渲染都失效。
   const hasAnyAiContent = useMemo(
-    () => items.some((_, index) => index !== firstUserIdx) || hasPlan || legacyUnplaced.length > 0,
-    [items, firstUserIdx, hasPlan, legacyUnplaced],
+    () => items.some((_, index) => index !== firstUserIdx) || hasPlan || showUnplaced,
+    [items, firstUserIdx, hasPlan, showUnplaced],
   );
 
   /** v36 修复：折叠入口可用性。主消息流维持原口径（有最终汇报才折叠）；
@@ -742,7 +756,7 @@ export const TurnGroup = memo(function TurnGroup({
         // 不再依赖「名称包含」模糊匹配（续跑卡片此前匹配不到、只能落到轮次末尾的兜底槽位）。
         const resumeId = Number(args.agent_id);
         const isResume = String(c?.tool ?? "") === "resume_subagent"
-          && Number.isFinite(resumeId) && resumeId > 0;
+          && Number.isFinite(resumeId) && resumeId !== 0;
         const taskTitle = String(args.task_title ?? "") || (isResume ? `子代理 #${resumeId}` : "子代理");
         const matched = isResume
           ? (subagents || []).find((sa) => sa.agentId === resumeId)
@@ -757,7 +771,7 @@ export const TurnGroup = memo(function TurnGroup({
           // plan-568-2333：续跑失败时子代理本身还在（agentId 已知），仍允许点开查看，
           // 不能退化成「无会话可打开」的派发失败态。
           ? { agentId: isResume ? resumeId : 0, name: fallbackName, status: "failed", error: dispatchError, dispatchFailed: !isResume }
-          : { agentId: isResume ? resumeId : Number(item.msg.sender_id ?? item.msg.id), name: fallbackName, status: "running" });
+          : { agentId: isResume ? resumeId : Number(item.msg.sender_id ?? item.msg.id), name: fallbackName, status: inherited ? "done" : "running" });
         // v36 修复：去掉内联 28px 左缩进——子代理行此前比工具调用行右移 28px，
         // 与「子代理卡片与工具调用行共用同一左侧边界」的规范不一致（用户反馈未对齐）。
         return (
@@ -797,6 +811,7 @@ export const TurnGroup = memo(function TurnGroup({
         // plan-20261025-shell（需求 9）：轮次内报错同样可关闭（关闭记在本机，刷新后不再出现）
         return <DismissibleErrorCard key={i} msgId={item.msg.id} text={msgText(item.msg.content) || "执行出错"} />;
       case "plan": {
+        if (inherited) return <div key={i} className="turn-item turn-item-text"><MarkdownContent>{msgText(item.msg.content)}</MarkdownContent></div>;
         // plan-865: 计划预览/确认消息——按数据库时间线位置渲染；同 turn 多条 plan 消息
         // 只在最后一条位置渲染卡片（携带最新状态），之前的渲染为细提示行
         const isLastPlan = i === lastPlanItemIdx;
@@ -978,7 +993,7 @@ export const TurnGroup = memo(function TurnGroup({
           上一轮的卡片内容随轮次固定，不会因为新轮次完成而被覆盖。
           plan-20261026-round-changes：基底轮与其续跑轮（后台事件唤醒）合并成**整轮一张卡**，
           清单 / 审查 / 撤销都走 roundIds 整组口径，不再每轮各出一张。 */}
-      {turnFinished && flow === "main" && !rolledBack && roundIds.length > 0 && (
+      {turnFinished && !inherited && flow === "main" && !rolledBack && roundIds.length > 0 && (
         <div className="turn-changes-stack">
           <TurnChangesCard key={roundIds[0]} turnId={roundIds[0]} turnIds={roundIds} />
         </div>

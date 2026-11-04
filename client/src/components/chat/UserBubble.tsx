@@ -95,7 +95,7 @@ export function UserBubble({ msg }: { msg: MessageOut }) {
   const collapsed = overflow && !expanded;
   return (
     <div className="turn-user-bubble" data-message-id={msg.id}>
-      <MessageFileCards atts={attachmentsOf(content)} />
+      <MessageFileCards atts={attachmentsOf(content)} sessionId={msg.session_id} messageId={msg.id} />
       {/* plan-308-1542 需求2：引用芯片 */}
       <RefChips refs={refs} />
       {text && (

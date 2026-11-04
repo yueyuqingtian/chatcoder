@@ -288,21 +288,22 @@ const REHYPE_PLUGINS = [skipLongHighlight, rehypeHighlight, rehypeKatex];
  *  此前缓存的是 `<ReactMarkdown>` 元素本身——虚拟列表重新挂载时 React 仍会再次执行该组件，
  *  unified 解析与 rehype-highlight / katex 一次都没省下，缓存形同虚设。
  *  react-markdown v10 的同步 `Markdown` 是无 hook 的纯函数（hook 版本是 MarkdownHooks），可安全直接调用。 */
-function renderMarkdownTree(text: string): ReactNode {
+function renderMarkdownTree(text: string, overrides?: Components): ReactNode {
   return (ReactMarkdown as unknown as (o: Parameters<typeof ReactMarkdown>[0]) => ReactNode)({
     children: text,
     remarkPlugins: REMARK_PLUGINS,
     rehypePlugins: REHYPE_PLUGINS,
-    components: markdownComponents,
+    components: overrides ? {...markdownComponents,...overrides} : markdownComponents,
   });
 }
 
-export const Markdown = memo(function Markdown({ children, cache = true }: { children: string; cache?: boolean }) {
+export const Markdown = memo(function Markdown({ children, cache = true, components }: { children: string; cache?: boolean; components?: Components }) {
+  if (components) cache = false;
   // 命中缓存则直接复用内层元素树（跳过解析与 highlight/katex）；外层 .md-body 每次新建，
   // 保证无论是否命中缓存，DOM 结构恒为单层 .md-body。
   const cached = cache ? mdCacheGet(children) : undefined;
   const started = isSampling() ? performance.now() : 0;
-  const inner = cached !== undefined ? cached : renderMarkdownTree(children);
+  const inner = cached !== undefined ? cached : renderMarkdownTree(children, components);
   if (cache && cached === undefined) mdCacheSet(children, inner);
   recordMarkdown(cached !== undefined, started ? performance.now() - started : 0, mdCache.size, mdCacheNodes, mdCacheChars);
   const blocks = children.length > 12000 && isValidElement<{ children?: ReactNode }>(inner)
