@@ -566,6 +566,7 @@ class ModelOut(BaseModel):
 
 # ── 供应商（v16）──
 class ProviderCreate(BaseModel):
+    ta3_alt_base_urls: list[str] | None = None
     name: str
     base_url: str | None = None
     api_key: str | None = None
@@ -579,6 +580,7 @@ class ProviderCreate(BaseModel):
 
 
 class ProviderUpdate(BaseModel):
+    ta3_alt_base_urls: list[str] | None = None
     name: str | None = None
     base_url: str | None = None
     api_key: str | None = None  # 传空字符串 = 清除
@@ -648,6 +650,8 @@ class ProviderProxyTestOut(BaseModel):
 
 
 class ProviderOut(BaseModel):
+    ta3_alt_base_urls: list[str] = []
+    ta3_resolved_base_url: str | None = None
     id: int
     name: str
     base_url: str | None = None

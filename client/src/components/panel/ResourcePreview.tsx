@@ -6,10 +6,12 @@ import {
   type PreviewSource,
 } from "../../api/client";
 import { MarkdownContent } from "../MarkdownContent";
+import { openGallery } from "../../store/gallery";
 import { usePanelStore } from "../../store/panel";
 import { ResourceLoading } from "./ResourceLoading";
 import { IconX } from "../icons";
 import { Button, Segmented, Tooltip } from "../ui";
+const PdfPreview = lazy(() => import("./PdfPreview"));
 const WordPreview = lazy(() => import("./WordPreview"));
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 const languages: Record<string, string> = {
@@ -136,23 +138,11 @@ export default function ResourcePreview({
               <WordPreview url={url} />
             ) : data.kind === "spreadsheet" && mode === "preview" ? (
               <SpreadsheetPreview key={key} source={source} />
-            ) : data.kind === "pdf" && navigator.pdfViewerEnabled === false ? (
-              <div className="resource-state">
-                当前环境无法内嵌 PDF，请使用上方下载查看。
-              </div>
             ) : data.kind === "pdf" ? (
-              <object
-                className="resource-pdf"
-                data={url}
-                type="application/pdf"
-              >
-                <div className="resource-state">
-                  当前环境无法内嵌此 PDF，请使用上方下载。
-                </div>
-              </object>
+              <PdfPreview key={key} url={url}/>
             ) : data.kind === "image" ? (
               <div className="resource-image">
-                <img src={url} alt={data.name} />
+                <Button variant="ghost" className="resource-image-open" aria-label={`放大查看 ${data.name}`} onClick={() => openGallery([{ url, name: data.name }])}><img src={url} alt={data.name} /></Button>
               </div>
             ) : data.kind === "unsupported" ? (
               <div className="resource-state">

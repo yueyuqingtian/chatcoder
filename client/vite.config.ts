@@ -2,6 +2,30 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import dns from "node:dns";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import type { Plugin } from "vite";
+
+// plan-20261105-file-review：PDF 字体、字库与解码器随应用离线打包，禁止依赖 CDN。
+function pdfAssets(): Plugin {
+  const assets = new Map<string, Uint8Array>();
+  for (const dir of ["cmaps", "standard_fonts", "wasm"]) {
+    const root = new URL(`./node_modules/pdfjs-dist/${dir}/`, import.meta.url);
+    for (const name of readdirSync(root)) {
+      if (/\.(bcmap|pfb|ttf|wasm|js)$/.test(name) || /^LICENSE/.test(name)) assets.set(`${dir}/${name}`, readFileSync(fileURLToPath(new URL(name, root))));
+    }
+  }
+  return { name: "local-pdf-assets",
+    configureServer(server) { server.middlewares.use((req, res, next) => {
+      const key = req.url?.split("?")[0].replace(/^\/pdf-assets\//, "");
+      const data = key && assets.get(key);
+      if (!data) { next(); return; }
+      res.setHeader("Content-Type", key.endsWith(".wasm") ? "application/wasm" : "application/octet-stream");
+      res.end(data);
+    }); },
+    generateBundle() { assets.forEach((source, name) => this.emitFile({ type: "asset", fileName: `pdf-assets/${name}`, source })); },
+  };
+}
 
 // Node.js 18+ 默认使用 internalConnectMultiple，会同时尝试 IPv6(::1) 和 IPv4(127.0.0.1)。
 // http-proxy 库底层用 net.connect，dns.setDefaultResultOrder 对它无效。
@@ -13,7 +37,7 @@ const backendTarget = process.env.CHATCODER_BACKEND || "http://localhost:8000";
 const backendWsTarget = backendTarget.replace(/^http/, "ws");
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), pdfAssets()],
   // 桌面版用 file:// 加载,必须用相对路径,否则资源找不到导致黑屏
   base: "./",
   // plan-73-323：宠物窗口作为第二个 HTML 入口（独立置顶浮窗）——

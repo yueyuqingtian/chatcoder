@@ -12,7 +12,26 @@ logger = logging.getLogger(__name__)
 SCAN_TIMEOUT = 20.0
 
 
+def normalize_ta3_config(kwargs, current=None):
+    """plan-20261106-ta3-080：自定义地址不隐式附加默认平台。"""
+    from app.auth.ta3 import endpoints
+    fmt = kwargs.get("api_format") or getattr(current, "api_format", None)
+    if fmt != "ta3":
+        return kwargs
+    kwargs = dict(kwargs)
+    base = endpoints.normalize_base(kwargs.get("base_url") or getattr(current, "base_url", None) or endpoints.DEFAULT_TA3_API_BASE)
+    kwargs["base_url"] = base
+    alts = kwargs.get("ta3_alt_base_urls")
+    if alts is None:
+        alts = getattr(current, "ta3_alt_base_urls", None)
+    if alts is None:
+        alts = endpoints.DEFAULT_ALT_BASES if base == endpoints.DEFAULT_TA3_API_BASE else []
+    kwargs["ta3_alt_base_urls"] = endpoints.normalize_alternates(alts, base)
+    return kwargs
+
+
 async def create_provider(db: AsyncSession, **kwargs) -> int:
+    kwargs = normalize_ta3_config(kwargs)
     from sqlalchemy import func
 
     from app.persistence.database import run_write_locked
@@ -56,10 +75,20 @@ async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> bool:
     """更新供应商字段(只更新非 None 字段；写引擎单写线程)。api_key 空字符串 = 清除。"""
     from app.persistence.database import run_write_locked
 
+    current = await get_provider(db, provider_id)
+    kwargs = normalize_ta3_config(kwargs, current)
+
     def patch(s):
         provider = s.get(Provider, provider_id)
         if provider is None:
             return False
+        # plan-20261106-ta3-080：修改入口后，旧目录/续期结果不得回写新配置。
+        if provider.api_format == "ta3" and any(k in kwargs and kwargs[k] != getattr(provider, k, None)
+                                               for k in ("base_url", "ta3_alt_base_urls")):
+            from app.auth.ta3.session import _row
+            auth = _row(s, provider_id)
+            if auth is not None:
+                auth.session_generation = (auth.session_generation or 0) + 1
         for k, v in kwargs.items():
             if v is None:
                 continue

@@ -10,36 +10,44 @@
 /* ── 输入卡 ─────────────────────────────────────────────── */
 /* plan-20261104-session-mentions：不透明分组选择器，浮层动画与消息流布局隔离。 */
 .mention-anchor { position: absolute; bottom: calc(100% + 8px); left: 32px; right: 32px; z-index: 1000; container-type: inline-size; }
-.mention-menu { border: 1px solid var(--border); position: static; min-width: 0; max-height: none; overflow: hidden; padding: 8px; border-radius: var(--r-pop); background: var(--bg-elevated); box-shadow: var(--shadow-md); line-height: 1.5; }
-.mention-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding: 4px 8px 8px; }
+/* plan-20261105-compact-menus：双行候选保留文字层级，以紧凑行高和留白增加同屏可见项。 */
+.mention-menu { border: 1px solid var(--border); position: static; min-width: 0; max-height: none; overflow: hidden; padding: 6px; border-radius: var(--r-pop); background: var(--bg-panel); box-shadow: var(--shadow-md); line-height: 1.35; }
+.mention-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; padding: 6px 8px 8px; }
 .mention-heading strong { color: var(--text-1); font-size: 13px; font-weight: 600; }
-.mention-heading > span { color: var(--text-3); font-size: 11px; }
+.mention-heading > span { margin-left: auto; color: var(--text-3); font-size: 11px; }
 .mention-filters { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 0 4px; }
 .mention-categories { display: flex; gap: 4px; }
-.mention-menu .mention-filters button { width: auto; }
+.mention-filter-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 12px; margin-left: auto; }
+.mention-menu .mention-filters .btn { width: auto; }
 .mention-menu .ui-select-trigger { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-panel); }
 .mention-menu .mention-categories .btn { justify-content: center; border-color: transparent; }
-.mention-archive { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 8px 0; color: var(--text-3); font-size: 11px; }
+.mention-archive { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 11px; line-height: 1.35; white-space: nowrap; }
 .mention-menu .mention-archive .ui-switch-root { padding: 0; border-radius: var(--r-pill); }
 .mention-list { overflow-y: auto; overscroll-behavior: contain; max-height: min(340px, 42vh); margin-top: 8px; scrollbar-gutter: stable; }
-.mention-group-heading { position: sticky; top: 0; z-index: 1; padding: 6px 8px; background: var(--bg-elevated); color: var(--text-3); font-size: 11px; font-weight: 600; line-height: 1.5; }
-.mention-list .mention-group-heading:not(:first-child) { margin-top: 8px; }
-.mention-menu .mention-option.active { background: var(--bg-active); color: var(--text-1); }
-.mention-menu .mention-option { height: auto; min-height: 48px; padding: 8px; border-radius: var(--r-md); gap: 10px; border-color: transparent; white-space: normal; justify-content: flex-start; text-align: left; }
+.mention-group-heading { position: sticky; top: 0; z-index: 1; padding: 4px 8px; background: var(--bg-panel); color: var(--text-3); font-size: 11px; font-weight: 600; line-height: 1.35; }
+.mention-list .mention-group-heading:not(:first-child) { margin-top: 4px; }
+.mention-menu .mention-option.active { background: var(--bg-hover); color: var(--text-1); }
+.mention-menu .mention-option { height: auto; min-height: 38px; padding: 4px 8px; border-radius: var(--r-md); gap: 8px; border-color: transparent; white-space: normal; justify-content: flex-start; text-align: left; }
 .mention-menu .mention-option > .mention-option-icon { flex: 0 0 20px; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
-.mention-menu .mention-option > .mention-option-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; line-height: 1.5; }
+.mention-menu .mention-option > .mention-option-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; line-height: 1.3; }
 .mention-option-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); font-size: 12px; font-weight: 500; }
 .mention-option-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
 .mention-menu .mention-option > .mention-badge { flex: 0 0 auto; font-size: 10px; color: var(--text-3); border-radius: var(--r-pill); background: var(--bg-panel); padding: 2px 6px; }
 .mention-time { flex: 0 0 auto; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.mention-status { display: flex; align-items: center; gap: 8px; min-height: 0; padding: 0 8px; color: var(--text-3); font-size: 12px; line-height: 1.6; }
-.mention-status:not(:empty) { padding-top: 8px; padding-bottom: 8px; }
+.mention-status { display: flex; align-items: center; gap: 8px; min-height: 0; padding: 0 8px; color: var(--text-3); font-size: 12px; line-height: 1.35; }
+.mention-status:not(:empty) { padding-top: 4px; padding-bottom: 4px; }
 .mention-menu .mention-status > .btn, .mention-menu .mention-more { width: auto; }
 .mention-menu .mention-more { margin: 4px 8px; }
-.mention-footer { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 8px 2px; margin-top: 8px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 10px; line-height: 1.5; }
+.mention-footer { display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 6px 8px 2px; margin-top: 4px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 10px; line-height: 1.35; }
+/* plan-20261105-minimal-panels：命令以固定名称列搭配同行说明，避免重复双行形成大块留白。 */
+.command-menu .mention-option { min-height: 34px; padding-block: 6px; }
+.command-menu .mention-option > .mention-option-copy { flex-direction: row; align-items: baseline; gap: 16px; }
+.command-menu .mention-option-copy strong { flex: 0 0 clamp(80px, 18cqi, 112px); }
+.command-menu .mention-option-copy > span { flex: 1; min-width: 0; }
 @container (max-width: 360px) {
   .mention-time, .mention-heading > span { display: none; }
   .mention-menu .mention-filters { gap: 8px 4px; }
+  .command-menu .mention-option > .mention-option-copy { gap: 8px; }
 }
 
 .composer-main {

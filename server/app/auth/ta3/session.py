@@ -1,272 +1,295 @@
-"""ta3 登录态存储与会话管理。
-
-- load/save/clear：Ta3Auth 表单行读写（对齐参考项目 auth-session.json 结构）
-- ensure_token：业务请求 401 时自动 refresh（带 in-flight 锁防并发 stampede，
-  对齐参考项目 authService.ts:787-792 refreshIfNeeded）
-- refresh_token 失效（invalid_grant）→ 清会话并抛错，调用方提示重新登录
-"""
+"""plan-20261106-ta3-080：OAuth 会话按供应商隔离，代次保护避免退出后的迟到回写。"""
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.ta3 import endpoints
+from app.persistence.database import run_write_locked
 from app.persistence.models.ta3_auth import Ta3Auth
+from app.persistence.models.model_reg import Provider, ProviderCredential, Model
 
 logger = logging.getLogger(__name__)
-
 OAUTH_TOKEN_PATH = "/api/oauth/token"
-YINHAI_OAUTH_CLIENT_ID = "ide-vscode"  # 复用服务端已注册 ClientRegistry（参考项目 auth/settings.ts:44）
-_TOKEN_TIMEOUT = 10.0
+YINHAI_OAUTH_CLIENT_ID = endpoints.OAUTH_CLIENT_ID
+_refresh_locks: dict[int, asyncio.Lock] = {}
+
+
+class Ta3AuthError(Exception):
+    def __init__(self, message: str, kind: str = "login_required"):
+        super().__init__(message)
+        self.kind = kind
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def load_auth(db: AsyncSession, provider_id: int) -> Ta3Auth | None:
-    """读取登录态行（始终以数据库最新值为准）。
+def expires_at(seconds) -> str | None:
+    try:
+        seconds = float(seconds or 0)
+        return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat() if seconds > 0 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
 
-    plan-90-392：登录态写入全部经写引擎独立 session（run_write_locked），与请求读
-    会话不是同一个 identity map——不强制刷新时，同一请求内「静默重登录写入新 token
-    → 重试」会命中缓存里的旧对象，重试仍带旧 token 而必然失败（用户实测：点击
-    「打开网页查看额度」报「生成后台登录 token 失败：服务未返回 token」，IM 重登录
-    成功但重试不生效）。populate_existing 保证每次读取都覆盖为库内最新值。
-    """
-    res = await db.execute(
-        select(Ta3Auth)
-        .where(Ta3Auth.provider_id == provider_id)
-        .execution_options(populate_existing=True)
-    )
-    return res.scalars().first()
+
+def is_expiring(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (when - datetime.now(timezone.utc)).total_seconds() <= 300
+    except (ValueError, TypeError):
+        return False
+
+
+def _row(s, provider_id: int):
+    return s.execute(select(Ta3Auth).where(Ta3Auth.provider_id == provider_id).order_by(Ta3Auth.id.desc())).scalars().first()
+
+
+async def load_auth(db: AsyncSession, provider_id: int) -> Ta3Auth | None:
+    result = await db.execute(select(Ta3Auth).where(Ta3Auth.provider_id == provider_id)
+                              .order_by(Ta3Auth.id.desc()).execution_options(populate_existing=True))
+    return result.scalars().first()
 
 
 async def get_auth_row(db: AsyncSession, provider_id: int) -> Ta3Auth:
-    """取或建（惰性创建）登录态行（写引擎单写线程）。"""
-    from app.persistence.database import run_write_locked
-
     def patch(s):
-        row = s.get(Ta3Auth, provider_id)
-        if row is None:
-            row = Ta3Auth(provider_id=provider_id, updated_at=_now())
-            s.add(row)
-            s.flush()
-            s.commit()
-        return True
-
-    await run_write_locked(patch, label=f"ta3.auth.row.{provider_id}")
+        if _row(s, provider_id) is None:
+            s.add(Ta3Auth(provider_id=provider_id, auth_version=endpoints.AUTH_VERSION,
+                          oauth_client_id=YINHAI_OAUTH_CLIENT_ID, session_generation=0, updated_at=_now()))
+        s.commit()
+    await run_write_locked(patch, label="ta3.auth.row")
     return await load_auth(db, provider_id)
+
+
+async def generation(db: AsyncSession, provider_id: int) -> int:
+    row = await get_auth_row(db, provider_id)
+    return row.session_generation or 0
+
+
+async def advance_generation(db: AsyncSession, provider_id: int) -> int:
+    def patch(s):
+        row = _row(s, provider_id)
+        if row is None:
+            row = Ta3Auth(provider_id=provider_id, auth_version=endpoints.AUTH_VERSION, session_generation=0)
+            s.add(row)
+        row.session_generation = (row.session_generation or 0) + 1
+        s.commit()
+        return row.session_generation
+    return await run_write_locked(patch, label="ta3.auth.generation")
+
+
+def _account_credential(s, provider_id, account):
+    creds = s.execute(select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)).scalars().all()
+    credential = next((c for c in creds if (c.extra or {}).get("kind") == "ta3_account"), None)
+    if credential is None:
+        credential = ProviderCredential(provider_id=provider_id, extra={"kind": "ta3_account"}, priority=0)
+        s.add(credential)
+    account = account or {}
+    credential.label = str(account.get("label") or account.get("id") or "TA3 账号")[:80]
+    credential.is_active = True
+    credential.status = "ok"
+    credential.cooldown_until = credential.last_error = None
+    credential.fail_count = 0
+    s.flush()
+    return credential.id
+
+
+async def ensure_account_credential(db, provider_id, account):
+    def patch(s):
+        cid = _account_credential(s, provider_id, account)
+        s.commit()
+        return cid
+    return await run_write_locked(patch, label="ta3.auth.credential")
 
 
 async def save_auth(db: AsyncSession, provider_id: int, *, access_token: str,
                     refresh_token: str | None = None, account: dict | None = None,
-                    catalog: dict | None = None) -> None:
-    from app.persistence.database import run_write_locked
-
+                    catalog: dict | None = None, expires_in=None,
+                    expected_generation: int | None = None) -> bool:
     def patch(s):
-        row = s.get(Ta3Auth, provider_id)
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            return False
+        row = _row(s, provider_id)
+        if expected_generation is not None and (row is None or row.session_generation != expected_generation):
+            return False
         if row is None:
-            row = Ta3Auth(provider_id=provider_id, updated_at=_now())
+            row = Ta3Auth(provider_id=provider_id, session_generation=0)
             s.add(row)
         row.access_token = access_token
-        if refresh_token is not None:
-            row.refresh_token = refresh_token
-        if account is not None:
-            row.account = account
-        if catalog is not None:
-            row.catalog = catalog
-        row.updated_at = _now()
+        row.refresh_token = refresh_token or None
+        row.account = account or {}
+        row.catalog = catalog
+        row.auth_version = endpoints.AUTH_VERSION
+        row.oauth_client_id = YINHAI_OAUTH_CLIENT_ID
+        row.issued_at = row.updated_at = _now()
+        row.access_expires_at = expires_at(expires_in)
+        row.credential_id = _account_credential(s, provider_id, account)
+        provider.auth_status = "logged_in"
+        provider.account_label = str((account or {}).get("label") or (account or {}).get("id") or "已登录")[:120]
         s.commit()
-
-    await run_write_locked(patch, label=f"ta3.auth.save.{provider_id}")
-    # plan-282-1441 修复：登录成功同时落一条「账号凭据」，否则界面凭据列表永远为空
-    # （用户实测："登录后下面没有显示 key，会话里也无法使用模型"）。
-    await ensure_account_credential(db, provider_id, account)
+        return True
+    return await run_write_locked(patch, label="ta3.auth.save")
 
 
-async def ensure_account_credential(db: AsyncSession, provider_id: int,
-                                    account: dict | None) -> int | None:
-    """确保该 ta3 账号在凭据表里有一行（幂等）。
-
-    为什么需要：多凭据/轮询体系（credential_service）是按 ProviderCredential 工作的，
-    但 ta3 登录此前只写 Ta3Auth（token 行），从不建凭据行 —— 于是：
-      · 设置页「凭据」区永远显示"暂无凭据"（用户看不到登录的账号）；
-      · 会话里取 Key 时 available_credentials 为空，模型自然用不了。
-    这里在登录/刷新 token 后补齐凭据行（label 取账号显示名，extra 标记账号身份）。
-    """
-    from sqlalchemy import select
-
-    from app.persistence.models.model_reg import ProviderCredential
-
-    label = None
-    if isinstance(account, dict):
-        label = str(account.get("label") or account.get("name") or account.get("id") or "")[:80] or None
-    label = label or "ta3 账号"
-
-    res = await db.execute(
-        select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)
-    )
-    existing = list(res.scalars().all())
-    for c in existing:
-        extra = c.extra if isinstance(c.extra, dict) else {}
-        # 已有 ta3 账号凭据（同类型）则复用，只补齐启用态与状态
-        if extra.get("kind") == "ta3_account":
-            if not c.is_active:
-                c.is_active = True
-            if (c.status or "ok") != "ok":
-                c.status = "ok"
-                c.cooldown_until = None
-                c.last_error = None
-                c.fail_count = 0  # plan-290: 重新登录即视为健康，清连续失败计数
-            if label and c.label != label:
-                c.label = label
-            await db.commit()
-            return c.id
-
-    # 没有则新建（借用既有 create_credential，保持 priority 与状态口径一致）
-    from app.services import credential_service
-
-    cid = await credential_service.create_credential(
-        db, provider_id,
-        label=label,
-        is_active=True,
-        status="ok",
-        extra={"kind": "ta3_account"},
-    )
-    return cid
-
-
-async def clear_auth(db: AsyncSession, provider_id: int) -> None:
-    from app.persistence.database import run_write_locked
-
+async def clear_auth(db: AsyncSession, provider_id: int, *, expected_generation=None) -> bool:
     def patch(s):
-        row = s.get(Ta3Auth, provider_id)
+        row = _row(s, provider_id)
+        if expected_generation is not None and (row is None or row.session_generation != expected_generation):
+            return False
         if row is not None:
-            s.delete(row)
-            s.commit()
-
-    await run_write_locked(patch, label=f"ta3.auth.clear.{provider_id}")
+            row.session_generation = (row.session_generation or 0) + 1
+            row.access_token = row.refresh_token = None
+            row.catalog = None
+            row.access_expires_at = row.issued_at = None
+        provider = s.get(Provider, provider_id)
+        if provider is not None:
+            provider.auth_status = "login_required"
+            provider.account_label = None
+        s.execute(update(Model).where(Model.provider_id == provider_id).values(api_key=None))
+        for cred in s.execute(select(ProviderCredential).where(ProviderCredential.provider_id == provider_id)).scalars():
+            if (cred.extra or {}).get("kind") == "ta3_account":
+                cred.status = "error"
+                cred.last_error = "请重新网页登录"
+                cred.cooldown_until = None
+        s.commit()
+        return True
+    changed = await run_write_locked(patch, label="ta3.auth.clear")
+    if changed:
+        from app.auth.ta3.quota import clear_cache
+        clear_cache(provider_id)
+    return changed
 
 
 async def get_access_token(db: AsyncSession, provider_id: int) -> str | None:
     row = await load_auth(db, provider_id)
-    return row.access_token if row else None
+    return row.access_token if row and row.auth_version == endpoints.AUTH_VERSION else None
 
 
-# refresh 续期 in-flight 锁（按 provider_id），防多个 401 并发触发 stampede
-# （refresh_token 轮转会让并发的第二次失败）
-_refresh_locks: dict[int, asyncio.Lock] = {}
-
-
-def _get_refresh_lock(provider_id: int):
-    import asyncio
-    lock = _refresh_locks.get(provider_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _refresh_locks[provider_id] = lock
-    return lock
-
-
-class Ta3AuthError(Exception):
-    """ta3 认证错误。kind: login_required | refresh_failed | network"""
-
-    def __init__(self, message: str, kind: str = "login_required"):
-        super().__init__(message)
-        self.kind = kind
-
-
-async def refresh_access_token(api_base: str, refresh_token: str,
-                               client_kwargs: dict | None = None) -> dict:
-    """POST {api_base}/api/oauth/token（grant_type=refresh_token），refresh 轮转。
-
-    返回 {accessToken, refreshToken, loginId, userId, orgId, userName}。
-    失败（invalid_grant）抛 Ta3AuthError(kind='login_required')。
-    """
-    url = f"{api_base.rstrip('/')}{OAUTH_TOKEN_PATH}"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": YINHAI_OAUTH_CLIENT_ID,
-    }
+async def request_oauth_token(api_base: str, data: dict, client_kwargs=None) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
-                                     **(client_kwargs or {})) as client:
-            resp = await client.post(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
-    except httpx.HTTPError as e:
-        raise Ta3AuthError(f"OAuth token 请求失败：{url}", "network") from e
-
+        async with httpx.AsyncClient(timeout=10, **{**(client_kwargs or {}), "follow_redirects": False}) as client:
+            response = await client.post(api_base.rstrip("/") + OAUTH_TOKEN_PATH, data=data,
+                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
+    except httpx.HTTPError as exc:
+        raise Ta3AuthError("OAuth 服务暂不可达，请检查网络后重试", "network") from exc
     try:
-        body = resp.json() if resp.content else {}
+        body = response.json()
+        if not isinstance(body, dict):
+            body = {}
     except ValueError:
         body = {}
-    access_token = body.get("access_token") or body.get("accessToken") or body.get("token")
-    if not resp.is_success or not access_token:
-        code = body.get("error") or body.get("error_code") or f"http_{resp.status_code}"
-        if code == "invalid_grant":
-            raise Ta3AuthError("登录已过期（refresh_token 失效），请重新登录", "login_required")
-        raise Ta3AuthError(f"OAuth token 刷新失败：{code}", "refresh_failed")
+    token = body.get("access_token") or body.get("accessToken") or body.get("token")
+    if not response.is_success or not token:
+        code = body.get("error") or body.get("errorCode") or body.get("error_code") or f"http_{response.status_code}"
+        raise Ta3AuthError(f"OAuth 凭据换取失败：{code}", "login_required" if code == "invalid_grant" else "refresh_failed")
     return {
-        "accessToken": access_token,
-        "refreshToken": body.get("refresh_token") or body.get("refreshToken") or "",
-        "loginId": body.get("login_id") or body.get("loginId"),
-        "userId": body.get("user_id") or body.get("userId"),
-        "orgId": body.get("org_id") or body.get("orgId"),
-        "userName": body.get("user_name") or body.get("userName"),
+        "accessToken": token, "refreshToken": body.get("refresh_token") or body.get("refreshToken") or "",
+        "expiresIn": body.get("expires_in"),
+        **{k: body.get(snake) or body.get(k) for k, snake in
+           (("loginId", "login_id"), ("userId", "user_id"), ("orgId", "org_id"), ("userName", "user_name"))},
     }
 
 
-async def ensure_token(db: AsyncSession, provider_id: int, api_base: str) -> str:
-    """返回可用 access_token；无 refresh_token 或刷新失败时抛 Ta3AuthError。"""
+async def refresh_access_token(api_base: str, refresh_token: str, client_kwargs=None) -> dict:
+    return await request_oauth_token(api_base, {"grant_type": "refresh_token", "refresh_token": refresh_token,
+                                              "client_id": YINHAI_OAUTH_CLIENT_ID}, client_kwargs)
+
+
+async def ensure_token(db: AsyncSession, provider_id: int, api_base: str, *,
+                       failed_token: str | None = None) -> str:
     row = await load_auth(db, provider_id)
-    if row is None or not row.access_token:
-        raise Ta3AuthError("请先登录 Ta+3 账号", "login_required")
-    if not row.refresh_token:
-        return row.access_token  # IM 静默登录路径无 refresh，直接返回（由调用方在 401 时引导重登）
-
-    # plan-110-438 M2: token 刷新按该供应商的代理配置出网
-    from app.persistence.models.model_reg import Provider
-    from app.services.credential_service import provider_client_kwargs
-
-    _provider = await db.get(Provider, provider_id)
-    _ckw = provider_client_kwargs(_provider)
-
-    lock = _get_refresh_lock(provider_id)
-    async with lock:
-        # 双检：等待锁期间可能已被其它协程刷新
+    if not row or not row.access_token or row.auth_version != endpoints.AUTH_VERSION:
+        raise Ta3AuthError("请先网页登录 Ta+3 账号")
+    if failed_token is None and not is_expiring(row.access_expires_at):
+        return row.access_token
+    async with _refresh_locks.setdefault(provider_id, asyncio.Lock()):
         row = await load_auth(db, provider_id)
-        if row is None or not row.access_token:
-            raise Ta3AuthError("请先登录 Ta+3 账号", "login_required")
+        if not row or not row.access_token:
+            raise Ta3AuthError("请先网页登录 Ta+3 账号")
+        if failed_token is not None and row.access_token != failed_token:
+            return row.access_token
+        if failed_token is None and not is_expiring(row.access_expires_at):
+            return row.access_token
+        gen, old_refresh = row.session_generation, row.refresh_token
+        if not old_refresh:
+            await clear_auth(db, provider_id, expected_generation=gen)
+            raise Ta3AuthError("登录无法续期，请重新网页登录")
+        provider = await db.get(Provider, provider_id, populate_existing=True)
+        if provider is None:
+            raise Ta3AuthError("供应商已删除")
+        base = await endpoints.resolve(provider)
         try:
-            result = await refresh_access_token(api_base, row.refresh_token, client_kwargs=_ckw)
-        except Ta3AuthError as e:
-            if e.kind == "login_required":
-                await clear_auth(db, provider_id)
+            result = await refresh_access_token(base, old_refresh, endpoints.client_options(provider))
+        except Ta3AuthError as exc:
+            if exc.kind == "login_required":
+                await clear_auth(db, provider_id, expected_generation=gen)
             raise
-        from app.persistence.database import run_write_locked
-
-        def _persist(s):
-            r = s.get(Ta3Auth, provider_id)
-            if r is None:
-                s.commit()
-                return
-            r.access_token = result["accessToken"]
-            if result.get("refreshToken"):
-                r.refresh_token = result["refreshToken"]
-            account = dict(r.account or {})
-            for key, src in (("id", "loginId"), ("label", "userName")):
-                if result.get(src):
-                    account[key] = result[src]
-            r.account = account
-            r.updated_at = _now()
+        def patch(s):
+            current = _row(s, provider_id)
+            if not current or current.session_generation != gen or current.refresh_token != old_refresh:
+                return False
+            current.access_token = result["accessToken"]
+            current.refresh_token = result.get("refreshToken") or old_refresh
+            account = dict(current.account or {})
+            for key in ("loginId", "userId", "orgId"):
+                if result.get(key):
+                    account[key] = result[key]
+            if result.get("loginId"):
+                account["id"] = result["loginId"]
+            if result.get("userName"):
+                account["label"] = result["userName"]
+            current.account = account
+            current.issued_at = current.updated_at = _now()
+            current.access_expires_at = expires_at(result.get("expiresIn"))
+            p = s.get(Provider, provider_id)
+            if p:
+                p.auth_status = "logged_in"
             s.commit()
-
-        await run_write_locked(_persist, label=f"ta3.auth.refresh.{provider_id}")
+            return True
+        if not await run_write_locked(patch, label="ta3.auth.refresh"):
+            raise Ta3AuthError("登录状态已变化，请重试")
         return result["accessToken"]
 
 
 async def mark_login_required(db: AsyncSession, provider_id: int) -> None:
-    """业务请求返回 401 且无 refresh_token 可用时，清会话要求重登。"""
     await clear_auth(db, provider_id)
+
+
+async def validate_sessions() -> None:
+    """plan-20261106-ta3-080：启动校验不阻塞启动，离线保留用户凭据。"""
+    from app.persistence.database import async_session_factory
+    from app.auth.ta3.catalog import fetch_catalog_probe, Ta3Unauthorized
+    async with async_session_factory() as db:
+        providers = (await db.execute(select(Provider).where(Provider.api_format == "ta3"))).scalars().all()
+        for provider in providers:
+            row = await load_auth(db, provider.id)
+            if not row or not row.access_token:
+                continue
+            try:
+                base = await endpoints.resolve(provider)
+                token = await ensure_token(db, provider.id, base)
+                try:
+                    await fetch_catalog_probe(provider, token)
+                except Ta3Unauthorized:
+                    await ensure_token(db, provider.id, base, failed_token=token)
+            except Exception:
+                logger.info("[ta3] provider=%s 启动校验未完成，保留可恢复状态", provider.id)
+
+
+async def revoke(refresh_token: str | None, api_base: str, client_kwargs=None) -> None:
+    if not refresh_token:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5, **{**(client_kwargs or {}), "follow_redirects": False}) as client:
+            await client.post(api_base.rstrip("/") + "/api/oauth/revoke", data={
+                "token": refresh_token, "token_type_hint": "refresh_token", "client_id": YINHAI_OAUTH_CLIENT_ID})
+    except httpx.HTTPError:
+        logger.info("[ta3] 远端吊销未完成，本地已退出")

@@ -44,7 +44,8 @@ def _resolve_ta3_base_url(model, provider, meta: dict | None) -> str:
     """
     root = (getattr(provider, "base_url", None) or "").rstrip("/")
     candidate = (getattr(model, "base_url", None) or "").rstrip("/")
-    if _TA3_DISPATCH_SEGMENT in candidate:
+    # plan-20261106-ta3-080：目录下发的自定义网关不要求包含固定 dispatch 路径。
+    if candidate and candidate not in (root, root + "/v1"):
         return candidate
     base = candidate or root
     if not base:

@@ -42,11 +42,13 @@ export const MentionMenu = forwardRef<HTMLDivElement, Props>(function MentionMen
           <Button key={value} size="xs" variant={m.category === value ? "subtle" : "ghost"} aria-pressed={m.category === value}
             onClick={() => { m.setCategory(value); onIndex(0); }}>{label}</Button>)}
       </div>
-      {m.category !== "file" && <Select size="sm" aria-label="会话项目范围" value={m.allProjects ? "all" : "current"}
-        onChange={(v) => { m.setAllProjects(v === "all"); onIndex(0); onFocusInput(); }} options={[{ value: "current", label: "当前项目" }, { value: "all", label: "全部项目" }]} />}
+      {m.category !== "file" && <div className="mention-filter-actions">
+        <div className="mention-archive"><span>显示归档</span>
+          <Switch aria-label="显示归档会话" checked={m.archived} onChange={(v) => { m.setArchived(v); onIndex(0); onFocusInput(); }} /></div>
+        <Select size="sm" aria-label="会话项目范围" value={m.allProjects ? "all" : "current"}
+          onChange={(v) => { m.setAllProjects(v === "all"); onIndex(0); onFocusInput(); }} options={[{ value: "current", label: "当前项目" }, { value: "all", label: "全部项目" }]} />
+      </div>}
     </div>
-    {m.category !== "file" && <div className="mention-archive"><span>显示归档</span>
-      <Switch aria-label="显示归档会话" checked={m.archived} onChange={(v) => { m.setArchived(v); onIndex(0); onFocusInput(); }} /></div>}
     <div className="mention-list" ref={ref} role="listbox" id={listId} aria-label="引用候选">
       {m.category !== "file" && <><div className="mention-group-heading">会话</div>
         {m.sessionItems.map((item, i) => renderItem(item, i))}{empty("session")}

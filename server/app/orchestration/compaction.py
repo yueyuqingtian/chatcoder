@@ -137,7 +137,7 @@ def repair_tool_call_ids(messages: list[ChatMessage]) -> list[ChatMessage]:
     处理：
     1. assistant(tool_calls) 中缺失的 id 分配 uuid
     2. 跨消息重复的 id 重分配为 uuid（保留首次出现的 id 及其 tool 配对）
-    3. 按"同 id 出现次序"同步改写后续重复的 tool 消息 tool_call_id，
+    3. 在同一调用批次内同步改写 tool 消息 tool_call_id，
        保持 assistant(tool_calls) 与 tool 消息的配对一致
     """
     if not messages:
@@ -145,116 +145,81 @@ def repair_tool_call_ids(messages: list[ChatMessage]) -> list[ChatMessage]:
 
     import uuid as _uuid
 
-    # 第一遍：assistant(tool_calls) —— 统计 id 出现次数，重命名重复/空 id
-    id_count: dict[str, int] = {}          # id → assistant 中出现次数
-    rename_queue: dict[str, list[str]] = {}  # 旧id → 第2、3...次的替换 id
-    empty_queue: list[str] = []               # 空 id 的替换 id（按顺序）
+    # plan-20261105-tool-pairing：压缩可能丢掉前一批结果，不能按全局出现次数
+    # 把后一批真实结果重命名给前一批；映射只在当前调用批次内消费。
+    from collections import deque
+
+    reserved = {tc.get("id") for m in messages for tc in (m.tool_calls or []) if tc.get("id")}
+    seen: set[str] = set()
+    pending: dict[str, deque[str]] = {}
     for m in messages:
         if m.role == "assistant" and m.tool_calls:
+            pending = {}
             for tc in m.tool_calls:
-                tc_id = tc.get("id")
-                if not tc_id:
+                old_id = tc.get("id") or ""
+                new_id = old_id
+                if not new_id or new_id in seen:
                     new_id = "call_" + _uuid.uuid4().hex[:12]
-                    empty_queue.append(new_id)
-                    tc["id"] = new_id
-                else:
-                    n = id_count.get(tc_id, 0) + 1
-                    id_count[tc_id] = n
-                    if n > 1:
+                    while new_id in reserved:
                         new_id = "call_" + _uuid.uuid4().hex[:12]
-                        rename_queue.setdefault(tc_id, []).append(new_id)
-                        tc["id"] = new_id
-
-    if not rename_queue and not empty_queue:
-        return messages
-
-    # 第二遍：tool 消息 —— 首次出现的 id 保持不动；
-    # 第 n 次（n>1）出现的 id 改写成 rename_queue 中第 n-1 个替换 id；
-    # 空 tool_call_id 依次消费 empty_queue。
-    seen_tool: dict[str, int] = {}
-    renamed = 0
-    for m in messages:
-        if m.role != "tool":
-            continue
-        tc_id = m.tool_call_id
-        if not tc_id:
-            if empty_queue:
-                m.tool_call_id = empty_queue.pop(0)
-                renamed += 1
-            continue
-        n = seen_tool.get(tc_id, 0) + 1
-        seen_tool[tc_id] = n
-        q = rename_queue.get(tc_id)
-        if q and n > 1 and n - 1 <= len(q):
-            m.tool_call_id = q[n - 2]
-            renamed += 1
-
-    if renamed:
-        logger.info("[normalize] repair_tool_call_ids 重分配 %d 个 tool_call id", renamed)
-
+                    reserved.add(new_id)
+                    tc["id"] = new_id
+                seen.add(new_id)
+                pending.setdefault(old_id, deque()).append(new_id)
+        elif m.role == "tool":
+            queue = pending.get(m.tool_call_id or "")
+            if queue:
+                m.tool_call_id = queue.popleft()
     return messages
 
 
 def ensure_tool_pairing(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """确保 tool_call/tool_result 配对完整。
-
-    对应 codex 的:
-    - ensure_call_outputs_present: 补充缺失的 function call output
-    - remove_orphan_outputs: 删除孤立的 function call output
-
-    OpenAI function-calling 协议要求：
-    1. 每个 assistant(tool_calls) 中的每个 tool_call 必须有对应的 tool result
-    2. 每个 tool result 必须有对应的 assistant(tool_calls)
-    """
+    """按调用批次补齐结果、删除孤儿和重复结果，并将夹层消息移到结果之后。"""
     if not messages:
         return messages
 
-    # 收集所有 assistant tool_call_id → name
-    call_ids: dict[str, str] = {}
-    for m in messages:
-        if m.role == "assistant" and m.tool_calls:
-            for tc in m.tool_calls:
-                tc_id = tc.get("id")
-                if tc_id:
-                    call_ids[tc_id] = tc.get("name", "unknown")
-
-    # 收集已有的 tool result ids
-    result_ids: set[str] = set()
-    for m in messages:
-        if m.role == "tool" and m.tool_call_id:
-            result_ids.add(m.tool_call_id)
-
-    # 构建修复后的消息列表
+    # plan-20261105-tool-pairing：整段历史有同 ID 的结果不代表当前批次已闭合；
+    # 下一批调用是硬边界，不能挪用它的结果，也不能让缺失项拖住后续所有调用。
     fixed: list[ChatMessage] = []
-    fixed_count = 0
-    for m in messages:
-        # 删除孤立的 tool result（没有对应 assistant tool_call 的）
-        if m.role == "tool" and m.tool_call_id and m.tool_call_id not in call_ids:
-            logger.debug("[normalize] 删除孤立 tool result: %s", m.tool_call_id)
-            fixed_count += 1
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if m.role != "assistant" or not m.tool_calls:
+            if m.role != "tool":
+                fixed.append(m)
+            i += 1
             continue
-
+        expected = {tc.get("id") for tc in m.tool_calls if tc.get("id")}
+        results: dict[str, ChatMessage] = {}
+        deferred: list[ChatMessage] = []
+        j = i + 1
+        while j < len(messages):
+            item = messages[j]
+            if item.role == "assistant" and item.tool_calls:
+                break
+            if item.role == "tool":
+                if item.tool_call_id in expected:
+                    results.setdefault(item.tool_call_id, item)
+            else:
+                deferred.append(item)
+            j += 1
         fixed.append(m)
-
-        # 对每个 assistant(tool_calls)，在其后补充缺失的 tool result
-        if m.role == "assistant" and m.tool_calls:
-            for tc in m.tool_calls:
-                tc_id = tc.get("id")
-                tc_name = tc.get("name", "unknown")
-                if tc_id and tc_id not in result_ids:
-                    # v1.0: 明确标注“结果丢失”而非注入假数据
-                    fixed.append(ChatMessage(
-                        role="tool",
-                        content=f"[系统提示: 工具 {tc_name} 的调用结果因上下文压缩已丢失，请勿依赖此结果做决策]",
-                        tool_call_id=tc_id,
-                        name=tc_name,
-                    ))
-                    logger.debug("[normalize] 补充缺失 tool result: %s", tc_name)
-                    fixed_count += 1
-
-    if fixed_count:
-        logger.info("[normalize] ensure_tool_pairing 修复了 %d 条消息", fixed_count)
-
+        for tc in m.tool_calls:
+            key = tc.get("id")
+            if not key:
+                continue
+            name = tc.get("name", "unknown")
+            result = results.get(key)
+            if result is None:
+                result = ChatMessage(
+                    role="tool",
+                    content=f"[系统提示: 工具 {name} 的调用结果因上下文压缩已丢失，请勿依赖此结果做决策]",
+                    tool_call_id=key,
+                    name=name,
+                )
+            fixed.append(result)
+        fixed.extend(deferred)
+        i = j
     return fixed
 
 
@@ -399,6 +364,7 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
                 role="user",
                 content=new_content,
                 content_blocks=new_blocks,
+                skill_load_snapshots=(prev.skill_load_snapshots or []) + (m.skill_load_snapshots or []) or None,
             )
             continue
 
@@ -426,6 +392,7 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
 def build_api_copy(
     messages: list[ChatMessage],
     workspace_root: str | None = None,
+    *, preserve_reasoning: bool = False,
 ) -> list[ChatMessage]:
     """v6.0 + v16: 基于原始历史构造发给模型的 API 副本。
 
@@ -447,7 +414,10 @@ def build_api_copy(
     # plan-282-0: 先剥离较旧工具回合的 reasoning_content——thinking 在真实 prompt
     # 中占比极高（实测全库 69%），且按 token 预算保留时会霸占保留区，是「压缩后
     # 占用不降」的首要原因。剥离后再做体积折叠，两者叠加收益最大。
-    api, reasoning_stripped = strip_stale_reasoning(api)
+    if preserve_reasoning:
+        reasoning_stripped = 0
+    else:
+        api, reasoning_stripped = strip_stale_reasoning(api)
 
     # v2.2 (对齐 zcode 3.10 micro-compact): 单条超长 tool result 就地折叠——
     # 原文落盘 .compact-cache，占位符提示可用 fs_read 恢复（防模型失忆重复读取）。

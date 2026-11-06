@@ -1,26 +1,23 @@
 """ta3 模型目录同步（对齐参考项目 authService.ts:484-586 fetchYinhaiCatalog）。
 
-端点（按序尝试候选，首个成功即用）：
-- 组织列表：GET {apiBase}/ide/list-organizations
-            GET {apiBase}/ai/continue/ide/list-organizations (GET→POST)
-- 各组织配置：GET {apiBase}/ide/list-assistants?organizationId={encoded}
-             GET {apiBase}/ai/continue/ide/list-assistants?organizationId=
-             POST {apiBase}/ai/continue/ide/list-assistants?appId=
+端点：POST {apiBase}/ai/continue/ide/list-organizations；
+POST {apiBase}/ai/continue/ide/list-assistants?appId=；全部为空时请求默认配置。
 
-鉴权：Authorization: <ide-session-…> 裸值（不带 Bearer）+ X-Client-Type: app
+鉴权：Authorization: Bearer <ide-session-…>+ X-Client-Type: app
 （参考项目 auth/http.ts:91-103 authHeaders 契约）
 """
 from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.ta3 import session as ta3_session
+from app.auth.ta3 import endpoints
 from app.persistence.models.ta3_auth import Ta3Auth
 
 logger = logging.getLogger(__name__)
@@ -55,7 +52,7 @@ def _first_text(*values) -> str:
 
 
 def _auth_headers(token: str) -> dict:
-    return {"Authorization": token, "X-Client-Type": "app"}
+    return {"Authorization": f"Bearer {token}", "X-Client-Type": "app"}
 
 
 def _request_name(model: dict) -> str:
@@ -358,14 +355,20 @@ def _is_success(body: dict) -> bool:
 
 
 async def _fetch_first_json(client: httpx.AsyncClient, candidates: list[dict],
-                            stage: str, token: str) -> dict:
+                            stage: str, token: str, provider=None) -> dict:
     """按序尝试候选请求，首个业务成功返回（对齐 fetchFirstJson）。"""
     errors = []
     for cand in candidates:
         url = cand["url"]
         method = cand.get("method", "GET")
         try:
-            resp = await client.request(method, url, headers={**_auth_headers(token), **cand.get("headers", {})})
+            headers = {**_auth_headers(token), **cand.get("headers", {})}
+            if provider is not None:
+                parsed = urlsplit(url)
+                path = parsed.path[parsed.path.index("/ai/continue/ide/"):] + (("?" + parsed.query) if parsed.query else "")
+                resp = await endpoints.request(provider, method, path, headers=headers)
+            else:
+                resp = await client.request(method, url, headers=headers, follow_redirects=False)
             text = resp.text
             if not resp.is_success:
                 if resp.status_code == 401:
@@ -397,82 +400,68 @@ class Ta3Unauthorized(Exception):
     """业务接口 401 —— 调用方应 refresh 后重试一次。"""
 
 
-async def _list_organizations(client: httpx.AsyncClient, api_base: str, token: str) -> list[dict]:
-    body = await _fetch_first_json(client, [
-        {"url": f"{api_base}/ide/list-organizations"},
-        {"url": f"{api_base}/ai/continue/ide/list-organizations"},
-        {"url": f"{api_base}/ai/continue/ide/list-organizations", "method": "POST"},
-    ], "加载项目列表", token)
-    data = _as_dict(body.get("data"))
-    result = _as_dict(data.get("result"))
-    orgs = _first_list(
-        body.get("organizations"), data.get("organizations"), result.get("organizations"),
-        body.get("data"), data.get("records"), data.get("items"), data.get("list"),
-        body.get("records"), body.get("items"), body.get("list"),
-    )
-    if not orgs:
-        return [dict(_DEFAULT_ORG)]
-    return orgs
-
-
-async def _list_assistants(client: httpx.AsyncClient, api_base: str, token: str, org_id: str) -> list[dict]:
-    """对齐参考项目 fetchYinhaiCatalog 的 3 候选：organizationId GET×2 + appId POST。"""
-    candidates = [
-        {"url": f"{api_base}/ide/list-assistants?{urlencode({'organizationId': org_id})}"},
-        {"url": f"{api_base}/ai/continue/ide/list-assistants?{urlencode({'organizationId': org_id})}"},
-        {"url": f"{api_base}/ai/continue/ide/list-assistants?{urlencode({'appId': org_id})}", "method": "POST"},
-    ]
-    try:
-        body = await _fetch_first_json(client, candidates, f"加载 {org_id} 配置", token)
-    except RuntimeError:
-        return []
-    # 裸数组（POST appId 端点）或信封结构（data/result/records/items/list 多层兼容）
+def _items(body, key):
     if isinstance(body, list):
         return body
+    body = _as_dict(body)
     data = _as_dict(body.get("data"))
-    result = _as_dict(data.get("result"))
-    return _first_list(
-        body.get("assistants"), data.get("assistants"), result.get("assistants"),
-        body.get("data"), data.get("records"), data.get("items"), data.get("list"),
-        body.get("records"), body.get("items"), body.get("list"),
-    )
+    result = _as_dict(body.get("result") or data.get("result"))
+    return _first_list(body.get(key), data.get(key), result.get(key), body.get("data"),
+                       data.get("records"), data.get("items"), data.get("list"),
+                       body.get("records"), body.get("items"), body.get("list"))
 
 
-async def fetch_catalog_raw(api_base: str, token: str,
-                           client_kwargs: dict | None = None) -> dict:
-    """拉取完整目录（组织 + 各组织 assistants 原始结构），供同步与调试。
+async def _list_organizations(client, api_base, token, provider=None):
+    body = await _fetch_first_json(client, [{"url": api_base + "/ai/continue/ide/list-organizations",
+        "method": "POST", "headers": {"Cache-Control": "no-cache", "Pragma": "no-cache"}}], "加载项目列表", token, provider)
+    return _items(body, "organizations") or [dict(_DEFAULT_ORG)]
 
-    plan-110-438 M2: client_kwargs 由调用方按供应商代理配置传入（见
-    credential_service.provider_client_kwargs），保证「同步模型」与「测试该配置」同口径。
-    """
-    async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
+
+async def _list_assistants(client, api_base, token, org_id, provider=None):
+    suffix = ("?" + urlencode({"appId": org_id})) if org_id is not None else ""
+    body = await _fetch_first_json(client, [{"url": api_base + "/ai/continue/ide/list-assistants" + suffix,
+        "method": "POST", "headers": {"Cache-Control": "no-cache", "Pragma": "no-cache"}}],
+        "加载模型配置", token, provider)
+    return _items(body, "assistants")
+
+
+async def fetch_catalog_raw(api_base, token, client_kwargs=None, provider=None):
+    async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT, follow_redirects=False,
                                  headers={"Accept-Encoding": "gzip, deflate"},
                                  **(client_kwargs or {})) as client:
-        organizations = await _list_organizations(client, api_base, token)
-        assistants_by_org: dict[str, list[dict]] = {}
+        organizations = await _list_organizations(client, api_base, token, provider)
+        assistants_by_org = {}
+        errors = []
         for org in organizations:
             org_id = str(org.get("id") or org.get("organizationId") or "").strip()
             if not org_id:
                 continue
-            assistants_by_org[org_id] = await _list_assistants(client, api_base, token, org_id)
-        if not assistants_by_org:
-            assistants_by_org["personal"] = await _list_assistants(client, api_base, token, "personal")
+            try:
+                assistants_by_org[org_id] = await _list_assistants(client, api_base, token, org_id, provider)
+            except Ta3Unauthorized:
+                raise
+            except RuntimeError as exc:
+                errors.append(exc)
+                assistants_by_org[org_id] = []
+        if not any(assistants_by_org.values()):
+            try:
+                assistants_by_org[str(organizations[0].get("id") or "personal")] = await _list_assistants(
+                    client, api_base, token, None, provider)
+            except Ta3Unauthorized:
+                raise
+            except RuntimeError:
+                if errors:
+                    raise errors[-1]
+                raise
         return {"organizations": organizations, "assistants_by_org": assistants_by_org}
 
 
-async def warm_ide_session(api_base: str, token: str,
-                           client_kwargs: dict | None = None) -> None:
-    """会话预热（plan-90-392）：登录后调一次组织列表接口，完成 IDE 会话初始化。
-
-    背景：/api/ai-sso/generate-token 只接受走过 IDE 目录初始化的会话——IM 静默
-    重登录得到的新会话若未先调用目录接口，生成 SSO 链接仍被 418「未提供有效的
-    认证信息」拒绝（用户实测：重登录成功但重试仍失败）。这里模拟 IDE 端登录后
-    的目录加载（只取组织列表，不拉各组织配置），失败向上抛出由调用方决定忽略。
-    """
-    async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                 headers={"Accept-Encoding": "gzip, deflate"},
-                                 **(client_kwargs or {})) as client:
-        await _list_organizations(client, api_base, token)
+async def fetch_catalog_probe(provider, token):
+    response = await endpoints.request(provider, "POST", "/ai/continue/ide/list-organizations",
+                                       headers=_auth_headers(token), timeout=8)
+    if response.status_code == 401:
+        raise Ta3Unauthorized()
+    response.raise_for_status()
 
 
 async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dict]:
@@ -490,11 +479,16 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
 
     _client_kwargs = provider_client_kwargs(provider)
     token = await ta3_session.ensure_token(db, provider.id, api_base)
+    auth = await ta3_session.load_auth(db, provider.id)
+    generation = auth.session_generation if auth else None
     try:
-        catalog = await fetch_catalog_raw(api_base, token, _client_kwargs)
+        catalog = await fetch_catalog_raw(api_base, token, _client_kwargs, provider)
     except Ta3Unauthorized:
-        token = await ta3_session.ensure_token(db, provider.id, api_base)
-        catalog = await fetch_catalog_raw(api_base, token, _client_kwargs)
+        token = await ta3_session.ensure_token(db, provider.id, api_base, failed_token=token)
+        try:
+            catalog = await fetch_catalog_raw(api_base, token, _client_kwargs, provider)
+        except Ta3Unauthorized as exc:
+            raise ta3_session.Ta3AuthError("登录验证失败，请重新网页登录") from exc
 
     # 组织选择：第一个有 assistants 的组织（参考项目默认行为）
     orgs = catalog["organizations"]
@@ -562,6 +556,10 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
     from app.persistence.database import run_write_locked
 
     def _persist(s):
+        # plan-20261106-ta3-080：目录结果必须属于发起时的登录代次。
+        auth_now = ta3_session._row(s, provider.id)
+        if auth_now is None or not auth_now.access_token or auth_now.session_generation != generation:
+            raise ta3_session.Ta3AuthError("登录状态已变化，请重新同步模型")
         # 在同步会话内重新查询（跨会话复用 async ORM 对象不会落库，见上）
         by_name_local = {
             m.name: m for m in s.execute(
@@ -592,7 +590,7 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
         # v0.5.13 修复：Ta3Auth 主键是自增 id，不是 provider_id——此前 s.get(Ta3Auth,
         # provider.id) 永远取不到行，目录缓存从未落库（对齐 workbuddy 的同类修复）。
         auth_row = s.execute(
-            select(Ta3Auth).where(Ta3Auth.provider_id == provider.id)
+            select(Ta3Auth).where(Ta3Auth.provider_id == provider.id).order_by(Ta3Auth.id.desc())
         ).scalars().first()
         if auth_row is not None:
             auth_row.catalog = sanitized

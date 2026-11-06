@@ -10,7 +10,8 @@
  *  「当前会话」语义直接读写这些字段，保留同名投影让它们零改动继续工作；真正的数据源是
  *  `buckets`，顶层字段只是当前桶的镜像（任何写入都会同步回桶），读取方无需感知分桶。
  */
-import type { PreviewSource } from "../api/client";
+import { api, previewApi, type PreviewSource, type FileChangeOut } from "../api/client";
+import { openGallery } from "./gallery";
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
@@ -38,8 +39,20 @@ export interface DiffPreview {
   before: string | null;
   after: string | null;
   truncated: boolean;
+  reason?: string | null;
   /** plan-20261019-toolcard-v2：文件在本轮被删除——磁盘上已不存在，预览不读盘、不提供「当前内容」 */
   deleted?: boolean;
+}
+
+/** plan-20261105-file-review：导航固定在点击的变更卡，不混入其他轮次。 */
+export interface TurnFileReview {
+  turnId: number;
+  extraTurnIds: number[];
+  files: FileChangeOut[];
+  index: number;
+  mode: "content" | "diff";
+  loading?: boolean;
+  error?: string;
 }
 
 /** 单个会话（或无会话的 home）持有的面板内容状态。 */
@@ -55,6 +68,7 @@ export interface PanelBucket {
   previewLine: number | null;
   /** v11: 变更审核 diff 预览（path 匹配 previewPath 时 FileTreePanel 展示 DiffEditor） */
   diffPreview: DiffPreview | null;
+  turnFileReview: TurnFileReview | null;
   /** 从计划卡打开完整计划后置位：文件管理在可见时消费一次，收起目录树（用户仍可手动展开） */
   planCollapsePending: boolean;
 }
@@ -78,7 +92,7 @@ export function bucketSessionId(key: string): number | null {
 }
 
 function emptyBucket(): PanelBucket {
-  return { tabs: [], activeKey: null, closedStack: [], previewRequestId: 0, previewTarget: null, previewPath: null, previewLine: null, diffPreview: null, planCollapsePending: false };
+  return { tabs: [], activeKey: null, closedStack: [], previewRequestId: 0, previewTarget: null, previewPath: null, previewLine: null, diffPreview: null, turnFileReview: null, planCollapsePending: false };
 }
 /** 桶 → 顶层投影（当前桶字段镜像）。 */
 function projectionOf(b: PanelBucket) {
@@ -91,6 +105,7 @@ function projectionOf(b: PanelBucket) {
     previewPath: b.previewPath,
     previewLine: b.previewLine,
     diffPreview: b.diffPreview,
+    turnFileReview: b.turnFileReview ?? null,
     planCollapsePending: b.planCollapsePending,
   };
 }
@@ -191,6 +206,7 @@ interface PanelState extends PanelBucket {
   /** 文件管理在可见时消费「收起目录树」请求 */
   ackPlanCollapse: () => void;
   setDiffPreview: (diff: DiffPreview | null) => void;
+  openTurnFile: (review: TurnFileReview, index: number, mode: "content" | "diff") => Promise<void>;
   reset: () => void;
 }
 
@@ -240,7 +256,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const key = get().activeBucket;
     applyPaneUpdate(() => {
       set({ expanded: false, fullscreen: false });
-      writeBucket(key, (b) => ({ ...b, diffPreview: null }));
+      writeBucket(key, (b) => ({ ...b, diffPreview: null, turnFileReview: null }));
     });
   },
   togglePanel: () => applyPaneUpdate(() => set((s) => ({ expanded: !s.expanded }))),
@@ -384,18 +400,51 @@ export const usePanelStore = create<PanelState>((set, get) => ({
   // v2.2: 支持行号定位（grep path:line 跳转）
   openResource: (target, viewSessionId) => {
     const key = bucketKeyOf(viewSessionId === undefined ? target.session_id : viewSessionId);
-    writeBucket(key, (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: target, previewPath: null, previewLine: null, diffPreview: null }));
+    writeBucket(key, (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: target, previewPath: null, previewLine: null, diffPreview: null, turnFileReview: null }));
     if (get().activeBucket === key) { get().openPanel(); get().openTab("files"); }
   },
   setPreviewPath: (path, line = null) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: line, diffPreview: null })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: line, diffPreview: null, turnFileReview: null })),
   openPlanPreview: (path) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: null, planCollapsePending: true })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: null, turnFileReview: null, planCollapsePending: true })),
   ackPlanCollapse: () => writeBucket(get().activeBucket, (b) => ({ ...b, planCollapsePending: false })),
-  setDiffPreview: (diff) => writeBucket(get().activeBucket, (b) => ({ ...b, diffPreview: diff })),
+  setDiffPreview: (diff) => writeBucket(get().activeBucket, (b) => ({ ...b, diffPreview: diff, turnFileReview: null })),
   // plan-20261018-turn-changes: 预览路径与 diff 一次写入，避免中间态让 DiffEditor 卸载重建
   openDiffPreview: (path, diff) => writeBucket(get().activeBucket,
-    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: diff })),
+    (b) => ({ ...b, previewRequestId: (b.previewRequestId ?? 0) + 1, previewTarget: null, previewPath: path, previewLine: null, diffPreview: diff, turnFileReview: null })),
+
+  openTurnFile: async (review, index, requestedMode) => {
+    const file = review.files[index];
+    if (!file) return;
+    const key = get().activeBucket;
+    const mode = file.action === "deleted" ? "diff" : requestedMode;
+    const context: TurnFileReview = { ...review, index, mode, loading: mode === "diff", error: undefined };
+    writeBucket(key, b => ({ ...b, previewRequestId: b.previewRequestId + 1, previewTarget: null,
+      previewPath: file.path, previewLine: null, diffPreview: null, turnFileReview: context, planCollapsePending: true }));
+    const requestId = get().buckets[key].previewRequestId;
+    get().openPanel();
+    get().openTab("files");
+    if (mode === "content") {
+      if (/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(file.path)) {
+        const chat = (await import("./chat")).useChatStore.getState();
+        const sessionId = bucketSessionId(key);
+        const projectId = chat.sessions.find(s => s.id === sessionId)?.project_id;
+        if (sessionId != null && projectId != null && get().activeBucket === key && get().buckets[key]?.previewRequestId === requestId) {
+          openGallery([{ url: previewApi.contentUrl({ source: "project", session_id: sessionId, project_id: projectId, path: file.path }), name: file.path.split(/[\\/]/).pop() ?? file.path }]);
+        }
+      }
+      return;
+    }
+    try {
+      const d = await api.getFileDiff(review.turnId, file.path, undefined, review.extraTurnIds, true);
+      writeBucket(key, b => b.previewRequestId !== requestId || b.turnFileReview !== context ? b : ({ ...b,
+        diffPreview: { path: file.path, before: d.before, after: d.after, truncated: d.truncated, reason: d.reason, deleted: d.action === "deleted" },
+        turnFileReview: { ...context, loading: false } }));
+    } catch (error) {
+      writeBucket(key, b => b.previewRequestId !== requestId || b.turnFileReview !== context ? b : ({ ...b,
+        turnFileReview: { ...context, loading: false, error: `无法读取本轮变更：${String(error)}` } }));
+    }
+  },
 
   reset: () => set({ expanded: false, fullscreen: false, buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),
 }));

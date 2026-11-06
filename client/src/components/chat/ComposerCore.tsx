@@ -16,6 +16,8 @@ import {
   type WheelEvent,
 } from "react";
 import { isBusy } from "../../perf/bus";
+import { scrollActiveMenuOption } from "../../utils/menuScroll";
+import { questionEnterIndex } from "./questionKeyboard";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
   IconPaperclip,
@@ -695,15 +697,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
    *  不用 scrollIntoView：它会连带滚动祖先容器（消息流会跟着动），
    *  这里只改弹层自己的 scrollTop，副作用最小。
    *  plan-404-1892：改用 rect 相对位移计算，不再依赖「弹层是子项 offsetParent」的假设。 */
-  const scrollActiveIntoView = (menu: HTMLDivElement | null) => {
-    if (!menu) return;
-    const el = menu.querySelector<HTMLElement>("button.active");
-    if (!el) return;
-    const mr = menu.getBoundingClientRect();
-    const er = el.getBoundingClientRect();
-    if (er.top < mr.top) menu.scrollTop -= mr.top - er.top;
-    else if (er.bottom > mr.bottom) menu.scrollTop += er.bottom - mr.bottom;
-  };
+  const scrollActiveIntoView = scrollActiveMenuOption;
 
   // 键盘 ↑/↓ 切换后选中项必须滚入可视区（仅键盘导航触发，见 kbScrollRef）
   useEffect(() => {
@@ -2483,11 +2477,14 @@ function QuestionWizardBox({
     if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
     // 自定义回答已含换行：上下键交给光标在多行文本内移动，不抢占选项导航
     if ((e.key === "ArrowUp" || e.key === "ArrowDown") && ae === customInputRef.current && customText.includes("\n")) return;
-    const hl = Math.min(kbIndex, optionCount - 1);
+    const hl = questionEnterIndex(kbIndex, optionCount, customIdx, ae === customInputRef.current);
     if (e.key === "Tab" || e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const back = e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey);
-      setKbIndex(back ? (hl - 1 + optionCount) % optionCount : (hl + 1) % optionCount);
+      const nextIdx = back ? (hl - 1 + optionCount) % optionCount : (hl + 1) % optionCount;
+      setKbIndex(nextIdx);
+      // plan-20261105-question-custom：离开输入行时释放焦点，让显式导航后的回车仍能选择选项。
+      if (nextIdx !== customIdx && ae === customInputRef.current) customInputRef.current?.blur();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -2597,7 +2594,10 @@ function QuestionWizardBox({
                 rows={1}
                 placeholder={multiple ? "可补充自定义输入，回车确认，Shift+回车换行…" : "输入自定义回答，回车确认，Shift+回车换行…"}
                 value={customText}
-                onChange={(e) => setCustomText(e.target.value)}
+                onChange={(e) => {
+                  setCustomText(e.target.value);
+                  setKbIndex(customIdx);
+                }}
                 onFocus={() => setKbIndex(customIdx)}
               />
             </div>

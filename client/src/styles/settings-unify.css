@@ -155,6 +155,8 @@
  * 现在：固定两列等宽；每栏为纵向 flex，说明合并为单行省略，按钮行用 margin-top:auto 压到栏底 ⇒ 同一水平线。 */
 .ta3-quota-plan { gap: 16px; padding: 2px 0 4px; color: var(--text-3); }
 .ta3-quota-windows { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; align-items: stretch; }
+/* plan-20261105-ta3-empty-center：空状态需以整个额度区为中心，避免被限制在左侧网格列。 */
+.ta3-quota-windows > .ta3-quota-empty { grid-column: 1 / -1; }
 @media (max-width: 760px) { .ta3-quota-windows { grid-template-columns: 1fr; } }
 .ta3-quota-window { display: flex; flex-direction: column; padding: 0; min-width: 0; }
 .ta3-quota-window-head { align-items: center; min-height: 20px; }

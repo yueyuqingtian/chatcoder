@@ -126,11 +126,7 @@ def test_extension_derivation_preserves_parameters_exactly():
 
 
 def test_native_schemas_are_frozen_official_snapshots():
-    """官方快照是冻结副本：内置通道的 schema 必须与真实 schema 无关（不随注册表漂移）。
-
-    计划要求：官方内置工具的 description / parameters 逐项对齐官方客户端，因此**不能**
-    从真实 schema 派生；这里用「快照对象原样返回」来固定该语义（返回同一对象即未派生）。
-    """
+    """plan-20261105-file-tools：文件工具使用执行定义，其余内置工具保持官方快照。"""
     real_schemas = _registry_schemas()
     disguised = disguise_tools(real_schemas)
     checked = 0
@@ -143,8 +139,12 @@ def test_native_schemas_are_frozen_official_snapshots():
         assert got is not None, f"{real_name} 有内置映射，但伪装结果里没有 {alias}"
         # Bash 描述随当前 shell 追加运行环境提示（官方 appendShellEnvironmentNote），
         # 取自 native_schema 而非静态表；其余必须是静态快照对象本身
-        from app.models.providers.ta3_tool_schemas import native_schema
+        from app.models.providers.ta3_tool_schemas import execution_schema, native_schema
 
+        if alias in {"Read", "Search", "Diff"}:
+            assert got == execution_schema(alias)
+            checked += 1
+            continue
         assert got is native_schema(alias), (
             f"{alias} 未使用官方快照（被派生或被改写）：内置通道必须是冻结副本"
         )

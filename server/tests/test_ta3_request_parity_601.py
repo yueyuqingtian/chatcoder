@@ -329,14 +329,14 @@ def test_endpoint_resolution(base, anthropic, endpoints, expected):
 # ───────────────────────── 6. 辅助文本请求 ─────────────────────────
 
 
-def test_text_request_body_has_no_thinking_and_stream_false():
+def test_text_request_body_explicit_thinking_080_and_stream_false():
     p = _p(completionOptions={"thinkingEnabled": True})
     body = p._build_openai_body(_req(ChatMessage(role="user", content="u"), reasoning_effort="high"),
                                 [], text=True)
     assert body["stream"] is False
-    assert "thinking" not in body and "reasoning_effort" not in body
+    assert body["thinking"] == {"type": "disabled"} and "reasoning_effort" not in body
     zai = _p(provider="zai")._build_openai_body(_req(ChatMessage(role="user", content="u")), [], text=True)
-    assert zai["thinking"] == {"type": "disabled"} and "stream_options" not in zai
+    assert zai["thinking"] == {"type": "enabled"} and "stream_options" not in zai
     ds = _p("deepseek-v4", provider="deepseek")._build_openai_body(
         _req(ChatMessage(role="user", content="u")), [], text=True)
     assert "stream_options" not in ds

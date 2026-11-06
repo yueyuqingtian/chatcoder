@@ -21,6 +21,7 @@ from app.gateway.schemas import (
 )
 from app.persistence.database import get_db
 from app.services import credential_service, provider_service
+from app.auth.ta3 import endpoints as ta3_endpoints
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -88,6 +89,9 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
             if not credential_service.is_demoted(c)
         ]
     return ProviderOut(
+        ta3_alt_base_urls=getattr(p, "ta3_alt_base_urls", None) or [],
+        ta3_resolved_base_url=(ta3_endpoints.resolved_base(p)
+                               if p.api_format == "ta3" else None),
         id=p.id,
         name=p.name,
         base_url=p.base_url,
@@ -119,10 +123,15 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
 
 @router.post("/providers", response_model=ProviderOut)
 async def create_provider(body: ProviderCreate, db: AsyncSession = Depends(get_db)):
+    try:
+        provider_service.normalize_ta3_config(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     pid = await provider_service.create_provider(
         db,
         name=body.name.strip(),
         base_url=body.base_url,
+        ta3_alt_base_urls=body.ta3_alt_base_urls,
         api_key=body.api_key,
         api_format=body.api_format,
         is_active=body.is_active,
@@ -151,10 +160,16 @@ async def reorder_providers(body: ProviderReorder, db: AsyncSession = Depends(ge
 
 @router.patch("/providers/{provider_id}", response_model=ProviderOut)
 async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSession = Depends(get_db)):
+    current = await provider_service.get_provider(db, provider_id)
+    try:
+        provider_service.normalize_ta3_config(body.model_dump(exclude_unset=True), current)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     ok = await provider_service.update_provider(
         db, provider_id,
         name=body.name.strip() if body.name else None,
         base_url=body.base_url,
+        ta3_alt_base_urls=body.ta3_alt_base_urls,
         api_key=body.api_key,
         api_format=body.api_format,
         is_active=body.is_active,

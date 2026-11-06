@@ -714,6 +714,7 @@ def _resolve_alias_for_outbound(real_name: str) -> str | None:
 
 
 class Ta3Provider(ModelProvider):
+    api_format = "ta3"
     name = "ta3"
 
     def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None,
@@ -919,15 +920,46 @@ class Ta3Provider(ModelProvider):
             if effort != "none":
                 body["reasoning_effort"] = effort
         elif mode == "thinking-object":
-            if effort == "none":
+            if effort == "none" and not self._is_zai():
                 body["thinking"] = {"type": "disabled"}
             else:
                 body["thinking"] = {"type": "enabled"}
-                body["reasoning_effort"] = effort
+                levels = self._completion_opts.get("thinkingLevels") or []
+                body["reasoning_effort"] = effort if effort != "none" else next(
+                    (str(x.get("level")) for x in levels if isinstance(x, dict) and x.get("level") not in (None, "", "none")), "low")
         elif mode == "reasoning-effort" and effort != "none":
             body["reasoning_effort"] = effort
 
     # ─────────────────────────── 消息转换 ───────────────────────────
+
+    def _prepare_tool_history(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """将当前供应商不可用的历史调用与结果成对转成文本记录。"""
+        from app.orchestration.history_sequence import prepare_history
+
+        rows = prepare_history(messages)
+        unavailable: set[str] = set()
+        converted: list[ChatMessage] = []
+        for m in rows:
+            if m.role == "assistant" and m.tool_calls:
+                calls, notes = [], []
+                for tc in m.tool_calls:
+                    name = str(tc.get("name") or "")
+                    if _resolve_alias_for_outbound(name) is None:
+                        unavailable.add(tc["id"])
+                        notes.append(f"（历史工具调用 {name} 在当前模型下不可用，已保留为文本记录。）")
+                    else:
+                        calls.append(tc)
+                if notes:
+                    m = m.model_copy(update={
+                        "tool_calls": calls or None,
+                        "content": "\n\n".join(filter(None, [m.content, *notes])),
+                    })
+            elif m.role == "tool" and m.tool_call_id in unavailable:
+                m = ChatMessage(role="user", content=f"（历史工具调用结果：{m.content or ''}）")
+            converted.append(m)
+        # plan-20261105-tool-pairing：文本结果不能插在仍可用的并行调用与结果之间；
+        # 在请求副本上再次规范化，让双协议都保留真实结果且满足紧邻配对。
+        return prepare_history(converted)
 
     def _disguise_message(self, m: ChatMessage) -> dict:
         """出站：ChatMessage → OpenAI dict，工具名/参数伪装 + reasoning 策略 + 出站脱敏。
@@ -942,7 +974,7 @@ class Ta3Provider(ModelProvider):
             out["role"] = "system"
         if m.role == "assistant":
             has_tool_calls = bool(m.tool_calls)
-            if m.reasoning_content and has_tool_calls:
+            if m.reasoning_content is not None:
                 out["reasoning_content"] = sanitize_outbound_text(m.reasoning_content)
             if has_tool_calls:
                 tc_list = []
@@ -1042,7 +1074,11 @@ class Ta3Provider(ModelProvider):
             m = messages[i]
             role = m.get("role")
             if role == "assistant" and m.get("tool_calls"):
-                expected_ids = [tc.get("id") for tc in m["tool_calls"] if tc.get("id")]
+                unique_calls: dict[str, dict] = {}
+                for tc in m["tool_calls"]:
+                    if tc.get("id"):
+                        unique_calls.setdefault(tc["id"], tc)
+                expected_ids = list(unique_calls)
                 # 收集紧随其后所有 tool 消息的结果（按 id 建索引，不依赖顺序）
                 results: dict[str, dict] = {}
                 j = i + 1
@@ -1062,10 +1098,9 @@ class Ta3Provider(ModelProvider):
                     cleaned.append(m_copy)
                 else:
                     # 只保留有结果的 tool_calls，避免部分缺失造成的悬空
-                    if len(matched) != len(m["tool_calls"]):
-                        m = dict(m)
-                        m["tool_calls"] = [tc for tc in m["tool_calls"]
-                                           if not tc.get("id") or tc.get("id") in results]
+                    m = dict(m)
+                    # plan-20261105-tool-pairing：空 ID 与重复 ID 同样违反严格一一配对。
+                    m["tool_calls"] = [unique_calls[tid] for tid in matched]
                     cleaned.append(m)
                     cleaned.extend(results[tid] for tid in matched)
                 i = j
@@ -1089,7 +1124,7 @@ class Ta3Provider(ModelProvider):
     def _is_zai(self) -> bool:
         # 官方判定是 `String(model.provider).toLowerCase() === 'zai'`（openAiAdapter.js:137、170），
         # 不是 identity 子串匹配
-        return str(self._meta.get("provider") or "").lower() == "zai"
+        return str(self._meta.get("provider") or self._meta.get("providerName") or self._meta.get("modelProvider") or "").lower() == "zai"
 
     def _build_openai_body(self, request: ChatRequest, disguised: list[dict], *,
                            text: bool = False) -> dict:
@@ -1106,14 +1141,15 @@ class Ta3Provider(ModelProvider):
         opts = self._completion_opts
         # plan-598-2517：压缩后可能一条 user 也没有（保留区从 assistant 起切）——
         # 网关要求以 user 开场，否则直接判非法（ta3 表现为「AI服务异常，请稍后重试」）。
-        msgs = _ensure_user_lead(_ta3_relocate_inline_system(list(request.messages)))
+        msgs = _ensure_user_lead(_ta3_relocate_inline_system(self._prepare_tool_history(request.messages)))
         from app.orchestration.history_sequence import prepare_history, validate_openai_wire
         msgs = prepare_history(msgs)
-        raw_msgs = [self._disguise_message(m) for m in msgs]
+        from app.orchestration.ta3_skill_snapshots import replay, reasoning_passthrough
+        raw_msgs = [self._disguise_message(m) for m in replay(msgs)]
         runtime_max = self._runtime_max_tokens(request)
         body: dict = {
             "model": request.model or self._model_name,
-            "messages": validate_openai_wire(self._sanitize_openai_tool_pairing(raw_msgs)),
+            "messages": validate_openai_wire(reasoning_passthrough(self._sanitize_openai_tool_pairing(raw_msgs))),
             "stream": not text,
             "temperature": _to_number(_opt(opts, "temperature"), _DEFAULT_TEMPERATURE),
             "top_p": _opt(opts, "topP", "top_p"),
@@ -1122,19 +1158,22 @@ class Ta3Provider(ModelProvider):
             "max_tokens": _to_number(_nullish(runtime_max, _opt(opts, "maxTokens", "max_tokens")), _UNDEF),
             "stop": _opt(opts, "stop"),
         }
-        if not text:
-            # 官方文本请求不带思考字段；流式聊天按目录 thinkingControl 下发
-            self._apply_thinking_openai(body, request)
+        # plan-20261106-ta3-080：文本路径同样显式控制思考，避免压缩请求继承网关默认。
+        self._apply_thinking_openai(body, request.model_copy(update={"thinking": False, "reasoning_effort": None}) if text else request)
         if disguised:
             body["tools"] = disguised
             body["tool_choice"] = "auto"
         _prune(body)
         if text:
             if self._is_zai():
-                body["thinking"] = {"type": "disabled"}
+                body.setdefault("thinking", {"type": "enabled"})
         elif self._is_zai():
+            body.setdefault("thinking", {"type": "enabled"})
             body["stream_options"] = {"include_usage": True}
             body["tool_stream"] = True
+            if request.session_id:
+                digest = hashlib.sha256(f"ta3-prompt-cache:{request.session_id}".encode("utf-8")).hexdigest()
+                body["prompt_cache_key"] = "ta3-" + digest[:32]
         if self._deepseek:
             # DeepSeek 只在 stream=true 时接受 stream_options.include_usage
             if body.get("stream") is False:
@@ -1253,7 +1292,7 @@ class Ta3Provider(ModelProvider):
         system = ""
         # plan-598-2517：重定位后可能没有任何 user（压缩摘要被改写成 assistant，
         # 边界标记被丢弃），必须以 user 开场，否则 Anthropic 面同样拒请求。
-        for m in _ensure_user_lead(_ta3_relocate_inline_system(list(messages))):
+        for m in _ensure_user_lead(_ta3_relocate_inline_system(self._prepare_tool_history(messages))):
             raw_text = sanitize_outbound_text(m.content or "")
             if m.role in ("system", "developer"):
                 system = system or raw_text
@@ -1354,7 +1393,8 @@ class Ta3Provider(ModelProvider):
         """
         opts = self._completion_opts
         from app.orchestration.history_sequence import prepare_history, validate_anthropic_wire
-        system, messages = self._convert_anthropic_messages(prepare_history(request.messages))
+        from app.orchestration.ta3_skill_snapshots import replay
+        system, messages = self._convert_anthropic_messages(replay(prepare_history(request.messages)))
         validate_anthropic_wire(messages)
         max_tokens = _to_number(
             _nullish(self._runtime_max_tokens(request), _opt(opts, "maxTokens", "max_tokens")),
@@ -1615,7 +1655,7 @@ class Ta3Provider(ModelProvider):
             return None
         try:
             from app.auth.ta3.catalog import sync_ta3_models
-            from app.auth.ta3.oauth import DEFAULT_TA3_API_BASE
+            from app.auth.ta3 import endpoints
             from app.persistence.database import async_session_factory
             from app.persistence.models.model_reg import Provider
 
@@ -1623,7 +1663,7 @@ class Ta3Provider(ModelProvider):
                 provider = await db.get(Provider, provider_id)
                 if provider is None:
                     return None
-                api_base = (provider.base_url or DEFAULT_TA3_API_BASE).rstrip("/")
+                api_base = await endpoints.resolve(provider)
                 entries = await sync_ta3_models(db, provider, api_base)
         except Exception:
             logger.warning("[ta3] 401 自愈：目录刷新失败，放弃重发", exc_info=True)
@@ -1632,6 +1672,10 @@ class Ta3Provider(ModelProvider):
             if entry.get("name") == self._model_name:
                 key = str(entry.get("api_key") or "").strip()
                 if key and key != self._api_key:
+                    from app.auth.ta3.catalog import entry_meta
+                    self._base_url = str(entry.get("base_url") or self._base_url).rstrip("/")
+                    self._meta = {**self._meta, **entry_meta(entry, self._model_name)}
+                    self._request_headers = self._meta.get("requestHeaders") or {}
                     return key
                 break
         return None
@@ -1697,6 +1741,7 @@ class Ta3Provider(ModelProvider):
                             if new_key:
                                 self._api_key = new_key
                                 headers = self._base_headers(accept, workspace_dir=request.workspace_dir)
+                                url = self._endpoint()
                                 logger.warning("[ta3] 401：已重取 llm key 并重发一次")
                                 continue
                         # plan-601-2495 内置拦截（第二层）收窄：只在 **403 且响应体含风控/拦截

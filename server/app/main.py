@@ -165,6 +165,10 @@ async def lifespan(app: FastAPI):
 
                 _lg2.getLogger(__name__).warning("启动修复：残留行收尾失败（不阻塞启动）", exc_info=True)
         await seed()
+        # plan-20261106-ta3-080：远端登录态校验不占用应用启动关键路径。
+        from app.auth.ta3.session import validate_sessions
+        import asyncio
+        ta3_validation = asyncio.create_task(validate_sessions())
 
         # 启动时自动扫描一次外部工具技能目录（skills CLI / Claude / Codex 等），
         # 这样用户无需手动点「刷新扫描」即可在「拓展 → 技能」看到已安装的技能。
@@ -241,6 +245,9 @@ async def lifespan(app: FastAPI):
 
         logging.getLogger(__name__).exception("数据库初始化失败: %s", e)
     yield
+    if "ta3_validation" in locals():
+        ta3_validation.cancel()
+        await asyncio.gather(ta3_validation, return_exceptions=True)
     # 工作流调度循环先停（在途节点随进程结束，下次启动由恢复扫描转为可续跑）
     try:
         from app.orchestration.workflow import service as workflow_service

@@ -21,6 +21,7 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
+import { Ta3ConnectionFields } from "./Ta3ConnectionFields";
 import { KiroQuotaSection } from "./KiroQuotaSection";
 import { ProviderSideList } from "./ProviderSideList";
 import { ProviderAvatar } from "./ProviderAvatar";
@@ -38,7 +39,7 @@ const PROVIDER_OPTS = ["openai", "anthropic", "commandcode", "openai_compatible"
 // 账号登录类供应商（无 Base URL/Key，走 OAuth）的集合 OAUTH_FORMATS 定义在 chat/modelGroups——
 // plan-20261025-composer：输入框模型浮层的「API / 账号」标签与这里共用同一口径
 const OAUTH_DEFAULT_BASE: Record<string, string> = {
-  ta3: "https://lc.yinhaiyun.com/newcoder",
+  ta3: "https://newcoder-inner.yinhaiyun.com/ta3api",
   workbuddy: "https://copilot.tencent.com",
   trae: "https://trae-api-cn.mchost.guru",
   commandcode: "https://api.commandcode.ai",
@@ -106,7 +107,7 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
         : isKiro
           ? (trimmedBase || OAUTH_DEFAULT_BASE.kiro)
           : isOAuthFormat
-            ? OAUTH_DEFAULT_BASE[form.api_format]
+            ? (form.api_format === "ta3" && trimmedBase ? trimmedBase : OAUTH_DEFAULT_BASE[form.api_format])
             : trimmedBase;
       const data: Record<string, unknown> = {
         name: form.name.trim(),
@@ -146,7 +147,7 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
         {isOAuthFormat && <div className="models-hint">{form.api_format === "kiro"
           ? "kiro 类型需先在 Kiro IDE/CLI 中登录；保存后在详情面板点击「登录账号」导入本机登录态。默认使用 us-east-1 端点（模型最全），可在「端点覆盖」中改走其它区域或反代。"
           : form.api_format === "ta3"
-          ? "ta3 类型使用账号登录获取模型，服务端地址已内置（lc.yinhaiyun.com/newcoder）；保存后在详情面板点击「登录账号」。"
+          ? "TA3 使用系统浏览器网页登录，已内置内外网主备地址；创建后可在连接设置修改，点击「网页登录」授权。"
           : form.api_format === "workbuddy"
             ? "workbuddy 类型使用账号登录获取模型，服务端地址已内置（copilot.tencent.com）；保存后在详情面板点击「登录账号」，支持登录多个账号。"
             : "trae 类型使用账号登录获取模型，服务端地址已内置（trae-api-cn.mchost.guru）；保存后在详情面板点击「登录账号」。"}</div>}
@@ -436,6 +437,7 @@ export function ModelsPanel() {
 
   // 登录/同步状态（ta3/workbuddy/trae 共用：providerId → phase）
   const [authStatus, setAuthStatus] = useState<Record<number, { phase: "idle" | "pending" | "done" | "failed"; label?: string; error?: string }>>({});
+  const loginSequence = useRef<Record<number, number>>({});
   const [syncBusy, setSyncBusy] = useState<number | null>(null);
   const [proxyTest, setProxyTest] = useState<string | null>(null);
 
@@ -720,6 +722,8 @@ export function ModelsPanel() {
   // plan-271-1364: workbuddy 每次登录视为「登录新账号」——成功后服务端自动建凭据行，
   // 这里刷新凭据列表即可看到新账号；ta3/trae 保持原有单账号语义。
   const handleLogin = async (p: ProviderOut) => {
+    const sequence = (loginSequence.current[p.id] || 0) + 1;
+    loginSequence.current[p.id] = sequence;
     setAuthStatus((s) => ({ ...s, [p.id]: { phase: "pending" } }));
     const fmt = p.api_format;
     const isWorkbuddy = fmt === "workbuddy";
@@ -728,11 +732,15 @@ export function ModelsPanel() {
         : fmt === "ta3" ? await api.ta3LoginStart(p.id)
           : fmt === "kiro" ? await api.kiroLoginStart(p.id)
             : await api.traeLoginStart(p.id);
+      if (loginSequence.current[p.id] !== sequence) return;
       const url = (start as { auth_url?: string; authorize_url?: string }).auth_url || (start as { authorize_url?: string }).authorize_url;
       const statusOf = async () => isWorkbuddy ? api.workbuddyLoginStatus(p.id)
         : fmt === "ta3" ? api.ta3LoginStatus(p.id)
           : fmt === "kiro" ? api.kiroLoginStatus(p.id) : api.traeLoginStatus(p.id);
       const onLoggedIn = async (label?: string) => {
+        if (loginSequence.current[p.id] !== sequence) return;
+        await load();
+        if (loginSequence.current[p.id] !== sequence) return;
         setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: label || "已登录" } }));
         if (isWorkbuddy) {
           // 多账号：刷新凭据列表（新账号已在服务端建行），并同步模型目录
@@ -761,7 +769,13 @@ export function ModelsPanel() {
       const deadline = Date.now() + (((start as { expires_in?: number }).expires_in ?? 300) + 10) * 1000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2000));
+        if (loginSequence.current[p.id] !== sequence) return;
         const st = await statusOf();
+        if (loginSequence.current[p.id] !== sequence) return;
+        if (st.status === "cancelled") {
+          setAuthStatus(s => ({ ...s, [p.id]: { phase: "idle" } }));
+          return;
+        }
         if (st.status === "logged_in") {
           const wSt = st as { account_label?: string | null; account?: Record<string, unknown> | null };
           await onLoggedIn(wSt.account_label || (wSt.account as Record<string, string>)?.label);
@@ -774,6 +788,7 @@ export function ModelsPanel() {
       }
       setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: "登录超时，请重试" } }));
     } catch (e) {
+      if (loginSequence.current[p.id] !== sequence) return;
       setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: String(e) } }));
     }
   };
@@ -787,7 +802,12 @@ export function ModelsPanel() {
       if (reloadList) await load();
       await loadDetail(p, true);
       if (showMsg) notify(`同步完成：${r.synced} 个模型`);
-    } catch (e) { if (showMsg) notify(String(e)); }
+    } catch (e) {
+      if (p.api_format === "ta3") {
+        setAuthStatus(s => ({ ...s, [p.id]: { phase: "failed", error: `已登录，模型同步失败：${String(e)}` } }));
+        await load();
+      } else if (showMsg) notify(String(e));
+    }
     finally { setSyncBusy(null); }
   };
 
@@ -935,7 +955,7 @@ export function ModelsPanel() {
               {/* plan-114-450：连接区改为「左标签 / 右控件」行（参照 Qoder 设置行），三项对齐在同一条竖线上 */}
               <div className="models-section models-sec-conn">
                 <div className="models-section-title">连接</div>
-              <div className="models-field is-row">
+              {selected.api_format === "ta3" ? <Ta3ConnectionFields key={selected.id} provider={selected} onSaved={load} /> : <div className="models-field is-row">
                 <label>Base URL</label>
                 {/* key=provider.id：defaultValue 不随 props 更新，切换供应商时必须重挂载，
                     否则残留上一个供应商的 URL（OAuth 类禁用态下尤其误导） */}
@@ -946,7 +966,7 @@ export function ModelsPanel() {
                   onBlur={(e) => { if (e.target.value.trim() !== (selected.base_url || "")) patchProvider(selected.id, { base_url: e.target.value.trim() }); }}
                   aria-label="Base URL"
                 />
-              </div>
+              </div>}
               <div className="models-field is-row">
                 <label>API 格式</label>
                 <Select
@@ -1061,8 +1081,16 @@ export function ModelsPanel() {
                     <button className="btn btn-secondary btn-sm" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
                       {authStatus[selected.id]?.phase === "pending" ? "登录中…"
                         : selected.api_format === "workbuddy" ? "登录新账号"
-                          : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
+                          : selected.api_format === "ta3" ? "网页登录"
+                            : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
                     </button>
+                    {selected.api_format === "ta3" && authStatus[selected.id]?.phase === "pending" && (
+                      <Button variant="ghost" size="sm" onClick={async () => {
+                        loginSequence.current[selected.id] = (loginSequence.current[selected.id] || 0) + 1;
+                        try { await api.ta3LoginCancel(selected.id); } catch (error) { notify(String(error)); }
+                        setAuthStatus(s => ({ ...s, [selected.id]: { phase: "idle" } }));
+                      }}>取消登录</Button>
+                    )}
                     {selected.auth_status === "logged_in" && (
                       <>
                         <button className="btn btn-secondary btn-sm" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</button>
@@ -1072,6 +1100,11 @@ export function ModelsPanel() {
                     )}
                     </span>
                   </div>
+                  {selected.api_format === "ta3" && <div className="models-hint" role="status" style={{ padding: 0, lineHeight: 1.6, minHeight: "1.6em" }}>
+                    {authStatus[selected.id]?.phase === "pending" ? "等待浏览器授权，请在系统浏览器完成登录。"
+                      : selected.auth_status === "login_required" ? "TA3 登录方式已升级，请重新网页登录。"
+                        : selected.auth_status === "logged_in" ? "已通过网页登录连接。" : "点击「网页登录」，在系统浏览器授权后自动同步模型。"}
+                  </div>}
                   <Collapse open={authStatus[selected.id]?.phase === "failed"}>
                     <div className="models-err" style={{ marginTop: 6 }}>{authStatus[selected.id]?.error}</div>
                   </Collapse>
@@ -1084,7 +1117,7 @@ export function ModelsPanel() {
               )}
 
               {/* ta3 额度与用量（plan-270-1358：对齐 Ta+3 v0.4.6 额度查看） */}
-              {selected.api_format === "ta3" && <Ta3QuotaSection provider={selected} />}
+              {selected.api_format === "ta3" && <Ta3QuotaSection key={selected.id} provider={selected} />}
 
               {/* kiro 剩余积分（plan-116-456：与 Kiro IDE 积分计同源） */}
               {selected.api_format === "kiro" && <KiroQuotaSection provider={selected} />}

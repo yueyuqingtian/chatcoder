@@ -8,9 +8,7 @@
 .right-panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; overflow: hidden; background: var(--bg-panel); color: var(--text-1); }
 /* plan-20261101-performance：宽度变化只影响内容节奏，状态和标题始终可读。 */
 .subagent-panel { container-type: inline-size; width: 100%; }
-.subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 12px 16px; }
-.subagent-panel .subagent-panel-title { align-items: flex-start; }
-.subagent-panel .subagent-panel-icon { padding-top: 3px; }
+.subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 6px 12px; }
 /* plan-630-2590：facts 单行、不换行。
  *
  * 为什么改掉 flex-wrap：「已用 N 分 M 秒」每秒变宽（59 秒→1 分 0 秒时位数还会跳），
@@ -19,12 +17,17 @@
  * 每次重写 scrollTop，用户看到的就是「没滚轮、消息流却自己在动」。
  * 改为单行 + 溢出省略（与 global.css 里 facts 的原始设计一致），头部高度恒定；
  * 用时再给固定槽位，秒数变化不推动同行其它项左右移动。 */
-.subagent-panel .subagent-panel-facts { flex-wrap: nowrap; overflow: hidden; }
-.subagent-panel .subagent-panel-meta { flex: 0 0 auto; min-width: 7.5em; text-align: right; font-variant-numeric: tabular-nums; }
-.subagent-panel .subagent-panel-facts .subagent-panel-stop { margin-left: auto; }
+.subagent-panel .subagent-panel-facts { flex-wrap: nowrap; overflow: hidden; gap: 6px; min-height: 28px; }
+.subagent-panel .subagent-panel-status { flex: 0 1 auto; }
+.subagent-panel .subagent-panel-status svg { width: 12px; height: 12px; }
+.subagent-panel-status-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 12px; width: 12px; height: 12px; }
+.subagent-panel .subagent-panel-meta { flex: 0 0 auto; min-width: 8.5em; text-align: left; font-variant-numeric: tabular-nums; }
+.subagent-panel .subagent-panel-facts > * + *::before { content: none; }
+.subagent-panel .subagent-panel-facts > .subagent-panel-detail-toggle { margin-left: auto; }
+.subagent-panel .subagent-panel-facts > .subagent-panel-stop { margin-left: 0; }
 .subagent-panel-details { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; line-height: 18px; color: var(--text-2); }
 .subagent-panel-facts > .btn::before { content: none; }
-.subagent-panel-facts > .btn { margin-left: 8px; }
+.subagent-panel-facts > .btn { margin-left: 0; }
 .rp-head {
   position: relative;
   display: flex;
@@ -166,145 +169,77 @@
 }
 @container (min-width: 620px) { .rp-launch-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .rp-launch-inner { max-width: 560px; } }
 
-/* ── ③ 摘要（plan-633-2604 改版：去卡片化）──────────────────
- * 四个固定模块（进度 / 产物 / 子代理 / 拓展）。此前每个模块是一块带边框 + 底色 + 阴影的封闭卡片，
- * 四个框把窄面板切得很碎、也很占地方；现在改为「浅灰小标题 + 圆角图标块 + 文字 + 大留白」，
- * 分组之间只靠 18px 留白分隔，状态色只落在图标与进度条上。
- * 统一左轴：行内图标块 24px + 行内距 8px + 间距 10px，标题文字统一从 42px 起，扫读时列不跳。
- * 字号三档（13 / 12.5 / 12px），颜色三层（--text-1 / -2 / -3）。
- *
- * plan-633-2604 滚动修复：卡片必须 flex:0 0 auto —— 滚动由外层 .rp-body 承担。
- * 此前 .ts-panel 是 flex 列容器、卡片默认 flex-shrink:1 且带 overflow:hidden，
- * 内容超长时卡片被逐张压扁、scrollHeight 恒等于 clientHeight，滚动条永不出现。 */
-.ts-panel { display: flex; flex-direction: column; gap: 18px; padding: 14px 10px 28px; }
-.ts-panel > .ts-card { flex: 0 0 auto; }
-/* 去卡片化后只剩裁切职责（Collapse 的网格高度动画需要），不再有边框/底色/阴影 */
-.ts-card { overflow: hidden; }
-/* 表头：[图标] 标题 …… [计数] [折叠箭头]；高度固定，折叠/展开不抖动 */
-.ts-card-head {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%; height: 28px; padding: 0 8px;
-  border: 0; border-radius: var(--r-sm);
-  background: transparent; color: var(--text-3);
-  font: inherit; text-align: left; cursor: pointer;
-  transition: color var(--dur-2) var(--ease-standard);
-}
-.ts-card-head:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
-.ts-card-ic { flex: none; display: inline-flex; color: var(--text-3); transition: color var(--dur-2) var(--ease-standard); }
-.ts-card-title {
-  flex: 1; min-width: 0;
-  font-size: 12.5px; font-weight: 500; color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: color var(--dur-2) var(--ease-standard);
-}
-.ts-card-end { flex: none; display: inline-flex; align-items: center; gap: 6px; }
-/* 计数用同行的淡色小字（原灰底胶囊在去卡片化后显得过重） */
-.ts-card-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.ts-chev {
-  flex: none; width: 16px; height: 16px;
-  display: inline-grid; place-items: center; color: var(--text-3);
-  transition: rotate var(--dur-3) var(--ease-standard), color var(--dur-2) var(--ease-standard);
-}
+/* ── ③ 摘要索引（plan-20261105-summary-index）───────────────
+ * 索引始终留在滚动视口外；正文换行、完成项保持可读，固定状态槽避免更新时挤压。 */
+.ts-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg-panel); }
+.ts-index { display: flex; flex: none; align-items: center; gap: 4px; padding: 12px 14px 0; background: var(--bg-panel); }
+.ts-index .btn-summary-tab { flex: 1 1 0; min-width: 0; gap: 8px; border-color: transparent; color: var(--text-2); }
+.ts-index .btn-summary-tab[aria-selected="true"] { background: var(--bg-elevated); color: var(--text-1); box-shadow: 0 1px 4px rgb(0 0 0 / 5%); }
+.ts-index-count { min-width: 1ch; font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.ts-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 24px 18px 28px; }
+.ts-page { min-width: 0; animation: ts-page-enter var(--dur-3) var(--ease-standard) both; }
+@keyframes ts-page-enter { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+.ts-overview { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.ts-overview .dada-sketch { color: var(--text-2); }
+.ts-overview-text { flex: 1; min-width: 0; }
+.ts-overview-status { display: flex; align-items: center; gap: 7px; }
+.ts-overview-status strong { font-size: 16px; line-height: 1.65; font-weight: 600; overflow-wrap: anywhere; }
+.ts-overview-text > p { margin: 3px 0 0; font-size: 12px; line-height: 1.8; color: var(--text-2); overflow-wrap: anywhere; }
+.ts-status-lead { display: inline-grid; place-items: center; flex: 0 0 16px; width: 16px; height: 20px; }
+.ts-status-dot { display: block; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--info); }
+.ts-status-hint { margin: 0 0 18px; font-size: 12px; line-height: 1.8; color: var(--text-2); overflow-wrap: anywhere; }
+.ts-goal { display: flex; align-items: flex-start; gap: 8px; padding: 12px; margin-bottom: 18px; border-radius: var(--r-lg); background: var(--bg-elevated); font-size: 12px; line-height: 1.8; }
+.ts-goal > svg { flex: none; margin-top: 3px; color: var(--text-2); }
+.ts-goal > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ts-goal > small { flex: none; color: var(--text-2); font-size: 11px; line-height: 1.8; }
+.ts-progress { margin: 18px 0 24px; }
+.ts-progress-caption { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 11px; line-height: 1.6; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.ts-bar { height: 3px; border-radius: var(--r-pill); background: var(--border); overflow: hidden; }
+.ts-bar-fill { display: block; width: 100%; height: 100%; border-radius: inherit; background: var(--text-2); transform-origin: left; transition: transform var(--dur-3) var(--ease-standard), background-color var(--dur-3) var(--ease-standard); }
+.ts-bar[data-tone="done"] .ts-bar-fill { background: var(--success); }
+.ts-bar[data-tone="paused"] .ts-bar-fill { background: var(--warning); }
+.ts-bar[data-tone="failed"] .ts-bar-fill { background: var(--error); }
+.ts-card { margin-top: 24px; min-width: 0; }
+.ts-card:first-child { margin-top: 0; }
+.ts-card .btn-summary-heading { display: flex; justify-content: flex-start; gap: 8px; border-color: transparent; padding-inline: 0; margin-bottom: 8px; color: var(--text-2); text-align: left; }
+.ts-card .btn-summary-heading:hover { background: transparent; color: var(--text-1); }
+.ts-card-ic { display: inline-flex; flex: none; }
+.ts-card-title { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; font-weight: 500; }
+.ts-card-end { display: inline-flex; flex: none; gap: 8px; align-items: center; }
+.ts-card-count { font-size: 11px; line-height: 1.6; font-weight: 400; font-variant-numeric: tabular-nums; }
+.ts-chev { display: inline-grid; place-items: center; width: 14px; height: 14px; transition: rotate var(--dur-3) var(--ease-standard); }
 .ts-card[data-fold="1"] .ts-chev { rotate: -90deg; }
-/* 悬停只提亮标题与箭头，不再整条变底色（去卡片化后没有底色可变） */
-.ts-card-head:hover { color: var(--text-1); }
-.ts-card-head:hover .ts-card-ic,
-.ts-card-head:hover .ts-card-title,
-.ts-card-head:hover .ts-chev { color: var(--text-1); }
-.ts-card-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 0; }
-
-/* 行：进度步骤 / 产物文件 / 子代理 / 拓展共用：[圆角图标块 24px] 标题 …… 备注 */
-.ts-rows { display: flex; flex-direction: column; gap: 2px; }
-.ts-row {
-  display: flex; align-items: center; gap: 10px;
-  width: 100%; min-height: 36px; padding: 0 8px;
-  border: 0; border-radius: var(--r-md);
-  background: transparent; color: var(--text-1);
-  font: inherit; text-align: left;
-}
-button.ts-row { cursor: pointer; transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
-button.ts-row:hover:not(:disabled) { background: var(--bg-hover); }
-button.ts-row:disabled { cursor: default; }
-button.ts-row:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
-/* plan-633-2604：前导槽位由 16px 纯图标改为 24px 圆角图标块（浅灰底），
- * 这一层底色承担「行与行之间的视觉锚点」，去卡片化后仍然分得清每一行。 */
-.ts-row-lead {
-  flex: none; width: 24px; height: 24px;
-  display: inline-grid; place-items: center;
-  border-radius: var(--r-sm);
-  background: var(--bg-muted); color: var(--text-2);
-}
-.ts-row-title { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ts-row-note { flex: none; max-width: 45%; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 运行中的步骤突出高亮与进行态感知；未开始的次之；已完成的淡化 */
-.ts-row.is-running { background: var(--accent-soft); }
-.ts-row.is-running .ts-row-title { font-weight: 600; color: var(--accent); }
-.ts-row.is-running .ts-row-lead { background: transparent; color: var(--accent); }
-.ts-row.is-pending .ts-row-title { color: var(--text-2); }
-.ts-row.is-done .ts-row-title { color: var(--text-3); }
-.ts-row.is-goal .ts-row-lead { color: var(--accent); }
-
-/* 进度组：状态行（前导图标 + 状态 + 百分比）+ 说明 + 细进度条，组内 6px；与下方步骤列表之间留 8px */
-.ts-progress { display: flex; flex-direction: column; gap: 6px; }
-.ts-status {
-  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
-  align-items: center; column-gap: 10px; row-gap: 4px;
-  min-height: 32px; padding: 0 8px;
-}
-/* 与行图标块同尺寸同轴（plan-633-2604）：状态行与下方步骤的文字左缘对齐 */
-.ts-status-lead {
-  width: 24px; height: 24px;
-  display: inline-grid; place-items: center;
-  border-radius: var(--r-sm);
-  background: var(--bg-muted);
-}
-.ts-status-title { min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 空闲：标题降一档，与其它状态区分开，但仍是完整的一行 */
-.ts-status-title.is-pending { font-weight: 500; color: var(--text-2); }
-/* 备注槽位定宽（右对齐）：百分比从 0 变到 100 时右侧不跳动 */
-.ts-status-note { min-width: 2.5em; text-align: right; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* 说明对齐到标题左缘（跨过前导槽位），不另起一条左轴 */
-.ts-status-hint { grid-column: 2 / -1; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
-.ts-bar { height: 4px; margin: 0 8px; border-radius: var(--r-pill); background: color-mix(in oklab, var(--text-1) 8%, transparent); overflow: hidden; }
-.ts-bar-fill { display: block; height: 100%; width: calc(var(--ratio, 0) * 100%); border-radius: var(--r-pill); background: var(--accent); transition: width var(--dur-spring) var(--spring-soft), background-color var(--dur-3) var(--ease-standard); }
-/* 进度条随状态取色：完成 = 成功色，停止 / 待续接 / 待确认 = 警示色，执行中 = 主色，
-   已结束但有未完成项 = 中性灰（plan-20261025-progress-keep：清单保留展示，不再用主色冒充在跑） */
-.ts-bar[data-tone="done"] .ts-bar-fill { background: var(--success); }
-.ts-bar[data-tone="paused"] .ts-bar-fill { background: var(--warning); }
-.ts-bar[data-tone="pending"] .ts-bar-fill { background: color-mix(in oklab, var(--text-1) 32%, transparent); }
-/* 待确认：按钮与说明文字对齐到同一条标题线（24px 图标块 + 8px 行内距 + 10px 间距 = 42px） */
-.ts-plan-actions { display: flex; gap: 8px; padding: 2px 8px 0 42px; }
-/* 模块无内容时的一行说明：版面恒定，不动态增删模块 */
-.ts-empty { margin: 0; padding: 2px 8px 4px; font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
-/* 运行中的总览呼吸圆点 */
-.ts-status-dot {
-  width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--accent);
-  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent);
-  animation: ts-dot-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
-}
-@keyframes ts-dot-pulse {
-  0% { transform: scale(0.95); box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 70%, transparent); }
-  70% { transform: scale(1); box-shadow: 0 0 0 5px transparent; }
-  100% { transform: scale(0.95); box-shadow: 0 0 0 0 transparent; }
-}
-.ts-status-title { min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 空闲：标题降一档，与其它状态区分开，但仍是完整的一行 */
-.ts-status-title.is-pending { font-weight: 500; color: var(--text-2); }
-/* 备注槽位定宽（右对齐）：百分比从 0 变到 100 时右侧不跳动 */
-.ts-status-note { min-width: 2.5em; text-align: right; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* 说明对齐到标题左缘（跨过前导槽位），不另起一条左轴 */
-.ts-status-hint { grid-column: 2 / -1; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
-.ts-bar { height: 4px; margin: 0 8px; border-radius: var(--r-pill); background: color-mix(in oklab, var(--text-1) 8%, transparent); overflow: hidden; }
-.ts-bar-fill { display: block; height: 100%; width: calc(var(--ratio, 0) * 100%); border-radius: var(--r-pill); background: var(--accent); transition: width var(--dur-spring) var(--spring-soft), background-color var(--dur-3) var(--ease-standard); }
-/* 进度条随状态取色：完成 = 成功色，停止 / 待续接 / 待确认 = 警示色，执行中 = 主色，
-   已结束但有未完成项 = 中性灰（plan-20261025-progress-keep：清单保留展示，不再用主色冒充在跑） */
-.ts-bar[data-tone="done"] .ts-bar-fill { background: var(--success); }
-.ts-bar[data-tone="paused"] .ts-bar-fill { background: var(--warning); }
-.ts-bar[data-tone="pending"] .ts-bar-fill { background: color-mix(in oklab, var(--text-1) 32%, transparent); }
-/* 待确认：按钮与说明文字对齐到同一条标题线（36px） */
-.ts-plan-actions { display: flex; gap: 8px; padding: 2px 8px 0 36px; }
-/* 模块无内容时的一行说明：版面恒定，不动态增删模块 */
-.ts-empty { margin: 0; padding: 2px 8px 4px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.ts-rows { display: flex; flex-direction: column; gap: 4px; }
+.ts-steps { gap: 16px; padding: 2px 0; }
+.ts-step { display: flex; align-items: flex-start; gap: 9px; padding: 0; font-size: 13px; line-height: 1.8; }
+.ts-step-status { display: inline-grid; place-items: center; flex: 0 0 20px; width: 20px; height: 23px; }
+.ts-row-text { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 3px; }
+.ts-row-title { display: block; font-size: 13px; line-height: 1.75; color: var(--text-1); font-weight: 400; overflow-wrap: anywhere; }
+.ts-row-note { display: block; font-size: 11px; line-height: 1.75; color: var(--text-2); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ts-step.is-running .ts-row-title { font-weight: 600; }
+.ts-step.is-pending .ts-row-title { color: var(--text-2); }
+.ts-row-lead { display: inline-grid; place-items: center; flex: 0 0 28px; width: 28px; height: 30px; border-radius: var(--r-md); color: var(--text-2); background: var(--bg-elevated); }
+.ts-panel .btn-summary-row { justify-content: flex-start; align-items: center; gap: 10px; height: auto; min-height: var(--btn-h-lg); padding: 8px 4px; border-color: transparent; text-align: left; white-space: normal; }
+.ts-panel .btn-summary-row > svg:last-child { flex: none; color: var(--text-3); }
+.ts-panel .btn-summary-row.ts-step { align-items: flex-start; gap: 9px; min-height: 0; padding: 0; }
+.ts-plan-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 24px; }
+.ts-shortcuts { display: flex; flex-direction: column; gap: 8px; margin-top: 26px; }
+.ts-shortcuts .btn-summary-shortcut { justify-content: flex-start; gap: 12px; min-height: 52px; height: auto; padding: 12px; border-radius: var(--r-lg); border-color: var(--border); background: var(--bg-elevated); text-align: left; white-space: normal; }
+.btn-summary-shortcut > span { flex: 1; min-width: 0; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.ts-page-heading { margin-bottom: 24px; }
+.ts-page-heading > span { font-size: 11px; line-height: 1.6; color: var(--text-2); }
+.ts-page-heading > h3 { margin: 6px 0; font-size: 17px; font-weight: 600; line-height: 1.6; }
+.ts-page-heading > p { margin: 0; font-size: 12px; line-height: 1.8; color: var(--text-2); }
+.ts-file-directory { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-footnote, .ts-empty { margin: 14px 0 0; font-size: 12px; line-height: 1.8; color: var(--text-2); }
+.ts-empty { margin-top: 0; padding: 4px 0; }
+.ts-welcome.ui-empty.is-lg { padding: 32px 0 28px; }
+.ts-welcome .dada-sketch { color: var(--text-2); }
+.ts-empty-guide { display: flex; flex-direction: column; gap: 22px; padding: 24px 8px 0; border-top: 1px solid var(--border); }
+.ts-empty-guide > div { display: flex; gap: 14px; align-items: center; color: var(--text-2); }
+.ts-empty-guide strong { display: block; font-size: 12px; font-weight: 500; line-height: 1.7; }
+.ts-empty-guide small { display: block; margin-top: 2px; font-size: 11px; line-height: 1.8; }
+.ts-welcome-foot { margin: 32px 0 0; text-align: center; font-size: 11px; line-height: 1.8; color: var(--text-2); }
 .ui-icon-btn.is-danger:hover:not(:disabled) { color: var(--error); background: var(--error-soft); }
 
 /* ── ④ 文件管理：虚拟化目录树 + 预览 ─────────────────────── */
@@ -735,3 +670,49 @@ body.panel-dragging .ft-tree-col { transition: none; }
   .resource-sheet-picker .ui-select-trigger { min-width:80px; max-width:150px; }
   .resource-format-hint, .resource-origin { display:none; }
 }
+
+/* plan-20261105-file-review：本轮文件与修改处各自导航，格式工具保留固定高度。 */
+.file-review-navigation { display:flex; align-items:center; gap:8px; min-height:32px; padding:2px 12px; border-top:1px solid var(--border); background:var(--bg-panel); line-height:1.5; }
+.file-review-name, .file-diff-count { color:var(--text-3); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.file-diff-count { min-width:44px; text-align:center; }
+.file-diff-view, .resource-document { display:flex; flex-direction:column; flex:1 1 0; min-width:0; min-height:0; overflow:hidden; }
+.file-diff-toolbar { flex-wrap:wrap; justify-content:flex-start; gap:8px; }
+.file-diff-toolbar .ui-select-trigger { min-width:108px; }
+.file-diff-editors { position:relative; flex:1; min-width:0; min-height:0; }
+.file-diff-editor { position:absolute; inset:0; }
+.file-diff-editor.is-hidden { visibility:hidden; pointer-events:none; }
+.file-change-legend { display:flex; gap:8px; font-size:10px; line-height:1.5; }
+.file-change-legend .added { color:var(--success); }
+.file-change-legend .deleted { color:var(--error); }
+.file-change-legend .modified { color:var(--color-sky-600); }
+.monaco-editor .file-change-added { background:color-mix(in srgb, #4f9d70 12%, transparent); }
+.monaco-editor .file-change-modified { background:color-mix(in srgb, #5b92c5 12%, transparent); }
+.monaco-editor .file-change-deleted { background:color-mix(in srgb, #c55b64 16%, transparent); }
+/* 用户要求 IDE 式代码变更标记；仅代码行号栏表达真实行级差异。 */
+.monaco-editor .file-change-mark-added { background:#4f9d70; width:3px!important; margin-left:3px; }
+.monaco-editor .file-change-mark-modified { background:#5b92c5; width:3px!important; margin-left:3px; }
+.monaco-editor .file-change-mark-deleted { background:#c55b64; width:8px!important; height:3px!important; margin-top:6px; }
+.resource-sheet-tabs { display:flex; flex:0 0 auto; gap:4px; overflow-x:auto; padding:6px 10px; min-height:38px; background:var(--bg-panel); border-top:1px solid var(--border); }
+.resource-sheet-tabs .btn { flex:none; }
+.resource-sheet-tabs [aria-selected="true"] { color:var(--text-1); font-weight:600; }
+.resource-column-resize { position:absolute; right:-3px; top:0; width:8px; height:100%; z-index:3; cursor:col-resize; touch-action:none; }
+.resource-column-resize:hover, .resource-column-resize:focus-visible { background:var(--border-strong); }
+.resource-cell { padding:calc(4px * var(--sheet-scale, 1)) calc(8px * var(--sheet-scale, 1)); }
+.resource-column, .resource-row, .resource-grid-corner { font-size:calc(11px * var(--sheet-scale, 1)); }
+.resource-column, .resource-grid-corner { height:calc(28px * var(--sheet-scale, 1)); }
+.resource-row, .resource-grid-corner { width:calc(48px * var(--sheet-scale, 1)); }
+.resource-pages-scroll { flex:1; min-height:0; overflow:auto; background:var(--bg-sunken, #e8e8e8); }
+.resource-pages { display:flex; flex-wrap:wrap; justify-content:safe center; align-items:flex-start; gap:24px 16px; padding:16px; min-width:100%; width:100%; box-sizing:border-box; }
+.resource-pdf-page { position:relative; flex:none; background:white; box-shadow:0 1px 5px #00000012; }
+.resource-page-number { position:absolute; bottom:-19px; left:0; right:0; text-align:center; font-size:10px; color:var(--text-3); line-height:1.5; }
+.resource-image-open.btn { display:block; height:auto; width:100%; padding:0; cursor:zoom-in; }
+@container (max-width:380px) { .file-change-legend { display:none; } }
+
+/* plan-20261105-file-review：PDF 文本层只接管选择与复制，不加载交互表单或活动链接。 */
+.resource-pdf-text { position:absolute; inset:0; overflow:clip; line-height:1; text-align:initial; transform-origin:0 0; text-size-adjust:none; --min-font-size:1; --text-scale-factor:calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv:calc(1 / var(--min-font-size)); }
+.resource-pdf-text :is(span, br) { color:transparent; position:absolute; white-space:pre; cursor:text; transform-origin:0 0; }
+.resource-pdf-text > :not(.markedContent), .resource-pdf-text .markedContent span:not(.markedContent) { z-index:1; --font-height:0; font-size:calc(var(--text-scale-factor) * var(--font-height)); --scale-x:1; --rotate:0deg; transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
+.resource-pdf-text .markedContent { display:contents; }
+.resource-pdf-text ::selection { background:#6da8df66; }
+
+.resource-word-stage { position:relative; display:flex; flex:1; min-height:0; min-width:0; }

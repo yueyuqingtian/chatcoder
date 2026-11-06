@@ -27,7 +27,37 @@ EXPLORE_TOOLS = [
     # 关键词反复 grep，调研质量与主代理不一致。压缩块查看（compaction_index /
     # compaction_view）不进本表：子代理是新上下文、没有压缩块可查，暴露只会误导。
     "feature_lookup",
+    # plan-20261105-subagent-tools：调研也需要查看页面和桌面，交互写入仍由执行模式拦截。
+    "browser_navigate", "browser_tabs", "browser_snapshot", "browser_get_text", "browser_screenshot",
+    "browser_scroll", "browser_hover", "browser_wait", "browser_logs",
+    "desktop_windows", "desktop_snapshot", "desktop_screenshot",
 ]
+
+
+async def available_subagent_tools(db, *, readonly: bool = False) -> list[dict]:
+    """plan-20261105-subagent-tools：每次从启用配置装配拓展，避免依赖注册顺序或残留工具。"""
+    from app.orchestration.tools.registry import tool_registry
+    from app.orchestration.tools.mcp_wrapper import build_mcp_tools_for_agent
+    from app.services.skill_service import get_global_mcp_servers
+    from app.core.config import settings
+
+    schemas = [
+        s for s in tool_registry.all_schemas(EXPLORE_TOOLS if readonly else None)
+        if not s["function"]["name"].startswith("mcp_")
+        and (not s["function"]["name"].startswith("desktop_") or settings.desktop_enabled)
+    ]
+    try:
+        servers = await get_global_mcp_servers(db)
+        for tool in build_mcp_tools_for_agent(servers):
+            if readonly and tool.risk_level != "low":
+                continue
+            # plan-20261105-subagent-tools：刷新配置同时刷新执行包装器，防止连接参数仍指向旧服务。
+            tool_registry.register(tool)
+            schemas.append(tool.function_schema())
+    except Exception:
+        logger.warning("[subagent-tools] 拓展工具装配失败，仅使用内置工具", exc_info=True)
+    return strip_for_subagent(schemas)
+
 
 SPAWN_SUBAGENT_SCHEMA = {
     "type": "function",
@@ -54,7 +84,8 @@ SPAWN_SUBAGENT_SCHEMA = {
             "other things and the completion report is pushed back to you automatically (do NOT poll).\n"
             "- `mode` is the subagent's execution mode and the ONLY thing that decides what it may do: "
             "`readonly` = research/review only (no writes, no commands); `agent` = may write and run "
-            "commands. Default `agent`. It never changes how the dispatch is scheduled.\n"
+            "commands, use the built-in browser, desktop controls and enabled MCP extensions. "
+            "Default `agent`. It never changes how the dispatch is scheduled.\n"
             "- `explore` is the legacy alias of the same read/write switch (true = readonly) — prefer `mode`.\n"
             "- Independent subtasks: send SEVERAL spawn_subagent calls in ONE message so they run concurrently.\n"
             "- NEVER dispatch the same subtask twice, and give each subtask a distinct task_title; "
@@ -95,7 +126,7 @@ SPAWN_SUBAGENT_SCHEMA = {
                     "description": (
                         "The subagent's execution mode — the only switch that decides what it may do. "
                         "readonly = research/review only (no writes, no commands); "
-                        "agent = may write files and run commands. Default agent. "
+                        "agent = may write files, run commands and use enabled browser, desktop and MCP tools. Default agent. "
                         "Plan mode and workflow tools are never available to a subagent, and the "
                         "approval mode is always inherited from this session."
                     ),

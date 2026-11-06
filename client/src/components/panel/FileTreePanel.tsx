@@ -10,14 +10,15 @@
  *  · 预览头：路径面包屑（点目录 → 在树里定位）+ 分段切换（变更对比 / 当前内容，预览 / 源码）+ 外部打开 + 关闭；
  *  · 没有预览时树占满整个面板，打开预览后树收成侧栏（宽度带弹簧过渡）。 */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { FileDiffView } from "./FileDiffView";
+import { ResourceLoading } from "./ResourceLoading";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { previewApi, type PreviewSource, type TreeNode } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { bucketKeyOf, usePanelStore } from "../../store/panel";
-import { IconArrowLeft, IconArrowToggle, IconChevronRight, IconCompress, IconExternalLink, IconPanelLeft, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
+import { IconArrowLeft, IconArrowToggle, IconChevronLeft, IconChevronRight, IconCompress, IconExternalLink, IconPanelLeft, IconRefresh, IconSearch, IconX, IconFolderTree } from "../icons";
 import ResourcePreview from "./ResourcePreview";
-import { Empty, Segmented, Tooltip } from "../ui";
+import { Button, Empty, Segmented, Tooltip } from "../ui";
 import { FileIcon } from "../iconkit/FileIcon";
 import { ProjectIcon } from "../project/ProjectIcon";
 import { projectColorKey, projectIconKey } from "../project/projectMeta";
@@ -90,41 +91,6 @@ interface FlatRow {
 }
 
 const ROW_H = 26;
-
-/** plan-20261020-retry-cred-perf D11：预览编辑器自己接管尺寸重排。
- *  Monaco 的 automaticLayout 在拖右面板 / 面板折叠过渡期会逐帧重排整个可见视口（一帧甚至多次）；
- *  这里改为 rAF 合帧的 ResizeObserver——每帧最多 layout 一次，拖拽期内容仍与容器同帧跟随，
- *  视觉与自动布局一致，只是把重复重排压成一次。只作用于预览编辑器。
- *  尺寸一律量宿主容器、显式传给 layout()，不让 Monaco 量自己的根节点：diff 编辑器关闭 automaticLayout 后
- *  会把根节点高度写成上一次测到的值（至少 5px）。若在隐藏（0 高）时测过一次，根节点就被钉在 5px，
- *  之后容器撑开也量不到变化，变更对比只剩一行。 */
-interface LayoutTarget {
-  layout: (dimension: { width: number; height: number }) => void;
-  onDidDispose: (listener: () => void) => unknown;
-  /** 代码编辑器与 diff 编辑器都挂在这个容器里 */
-  getContainerDomNode: () => HTMLElement;
-}
-
-function attachManualLayout(target: LayoutTarget): void {
-  const host = target.getContainerDomNode();
-  let raf = 0;
-  const ro = new ResizeObserver(() => {
-    if (raf) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      const width = host.clientWidth;
-      const height = host.clientHeight;
-      // 隐藏态（0 尺寸）不排版：重新可见时容器尺寸变化会再触发一次
-      if (width === 0 || height === 0) return;
-      try { target.layout({ width, height }); } catch { /* 实例已销毁 */ }
-    });
-  });
-  ro.observe(host);
-  target.onDidDispose(() => {
-    ro.disconnect();
-    if (raf) cancelAnimationFrame(raf);
-  });
-}
 
 /** 面板窄于此值时，目录树与预览不再并排（各 200px 上下的代码预览根本放不下）：打开预览就占满面板，用「返回」回到目录树 */
 const NARROW_PX = 540;
@@ -206,6 +172,7 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const previewPath = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewPath ?? null);
   const previewLine = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.previewLine ?? null);
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
+  const turnFileReview = usePanelStore(s => s.buckets[bucketKeyOf(sessionId)]?.turnFileReview ?? null);
   const diffPreview = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.diffPreview ?? null);
   // 按本实例所属会话桶读取「计划查看后收起目录树」请求（各会话的文件面板常驻挂载，不能共用投影值）
   const planCollapsePending = usePanelStore((s) => s.buckets[bucketKeyOf(sessionId)]?.planCollapsePending ?? false);
@@ -219,6 +186,7 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const [contentError, setContentError] = useState<string | null>(null);
   useEffect(()=>setContentError(null),[previewPath,previewTarget]);
   // v11: 变更对比 / 当前内容 视图切换（仅当 diff 与当前文件匹配时生效）
+  const [diffLayout, setDiffLayout] = useState("side");
   const [viewMode, setViewMode] = useState<"diff" | "content">("diff");
   // v17: Markdown 文件支持 预览/源码 切换（默认预览渲染）
   const panelRef = useRef<HTMLDivElement>(null);
@@ -302,7 +270,7 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
   const hasDiff = diffPreview != null && diffPreview.path === previewPath;
   /** 本轮被删除的文件：磁盘上已没有，只能看变更对比 */
   const isDeletedDiff = hasDiff && diffPreview!.deleted === true;
-  const showDiff = (viewMode === "diff" || isDeletedDiff) && hasDiff;
+  const showDiff = (turnFileReview ? turnFileReview.mode === "diff" : viewMode === "diff" || isDeletedDiff) && hasDiff;
 
   /** plan-20261018-turn-changes: diff 的 model 唯一键。
    *  连续点不同轮次的「审查」时，@monaco-editor/react 会复用同一 model URI；
@@ -641,11 +609,11 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                   <span className="ft-ph-name">{fileName}</span>
                 </span>
                 {isDeletedDiff && <span className="ft-ph-deleted">已删除</span>}
-                {hasDiff && !isDeletedDiff && (
+                {(hasDiff || turnFileReview) && !isDeletedDiff && (
                   <Segmented
                     size="sm"
-                    value={viewMode}
-                    onChange={setViewMode}
+                    value={turnFileReview?.mode ?? viewMode}
+                    onChange={value => { if (turnFileReview) void usePanelStore.getState().openTurnFile(turnFileReview, turnFileReview.index, value); else setViewMode(value); }}
                     aria-label="预览方式"
                     options={[{ value: "diff", label: "变更对比" }, { value: "content", label: "当前内容" }]}
                   />
@@ -661,6 +629,14 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                   </Tooltip>
                 )}
               </div>
+              {turnFileReview && <div className="file-review-navigation">
+                <span className="resource-origin">本轮文件</span>
+                <span className="file-review-name">{turnFileReview.index + 1} / {turnFileReview.files.length}</span>
+                <div className="resource-actions">
+                  <Tooltip content="上一个文件"><Button variant="ghost" size="xs" iconOnly icon={<IconChevronLeft size={14}/>} aria-label="上一个变更文件" disabled={turnFileReview.index <= 0} onClick={() => void usePanelStore.getState().openTurnFile(turnFileReview, turnFileReview.index - 1, turnFileReview.mode)}/></Tooltip>
+                  <Tooltip content="下一个文件"><Button variant="ghost" size="xs" iconOnly icon={<IconChevronRight size={14}/>} aria-label="下一个变更文件" disabled={turnFileReview.index >= turnFileReview.files.length - 1} onClick={() => void usePanelStore.getState().openTurnFile(turnFileReview, turnFileReview.index + 1, turnFileReview.mode)}/></Tooltip>
+                </div>
+              </div>}
               {dirParts.length > 0 && (
                 <div className="ft-crumbs" ref={crumbsRef} aria-label="文件路径">
                   {dirParts.map((seg, i) => (
@@ -672,29 +648,19 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
                 </div>
               )}
             </div>
-            {showDiff ? (
+            {turnFileReview?.loading ? <ResourceLoading>正在读取本轮变更…</ResourceLoading>
+            : turnFileReview?.error ? <div className="resource-state" role="alert"><p>{turnFileReview.error}</p><Button size="sm" variant="outline" onClick={() => void usePanelStore.getState().openTurnFile(turnFileReview, turnFileReview.index, "diff")}>重试</Button></div>
+            : showDiff ? (
               <div className="ft-diff-body">
                 {/* plan-20261018-turn-changes: 只有 mountedDiffKey 与当前 diff 一致时才挂载编辑器。
                     旧实例先卸载、隔一帧再挂载新实例，避免 monaco 0.55 在同一个 tick 里
                     dispose 旧 TextModel 又 reset 新 model，抛
                     "TextModel got disposed before DiffEditorWidget model got reset"。 */}
                 {mountedDiffKey === diffModelKey && (
-                  <DiffEditor
-                    key={mountedDiffKey}
-                    originalModelPath={`inmemory://chatcoder/${encodeURIComponent(mountedDiffKey)}/original`}
-                    modifiedModelPath={`inmemory://chatcoder/${encodeURIComponent(mountedDiffKey)}/modified`}
-                    keepCurrentOriginalModel
-                    keepCurrentModifiedModel
-                    height="100%"
-                    language={contentLang}
-                    original={diffPreview!.before ?? ""}
-                    modified={diffPreview!.after ?? ""}
-                    theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
-                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, renderSideBySide: true, automaticLayout: false }}
-                    onMount={(editor) => { attachManualLayout(editor); }}
-                  />
+                  <FileDiffView key={`${previewRequestId}:${mountedDiffKey}`} diff={diffPreview!} language={contentLang} mode={diffLayout} onModeChange={setDiffLayout}/>
+
                 )}
-                {diffPreview!.truncated && <div className="ft-diff-truncated">变更行数过大，内容已截断显示</div>}
+
               </div>
             ) : resourceSource ? (
               <ResourcePreview showName={false} key={`${previewRequestId}:${JSON.stringify(resourceSource)}:${previewChangeSignature}`} source={resourceSource} line={previewLine} onDirectory={path=>void revealDirectory(path)} />

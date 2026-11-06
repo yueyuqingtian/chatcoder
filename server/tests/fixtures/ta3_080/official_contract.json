@@ -1,0 +1,270 @@
+{
+  "version": "0.8.0",
+  "scenarios": {
+    "zai": {
+      "model": {
+        "model": "fixture-model",
+        "provider": "zai",
+        "apiBase": "https://models.example.test/v2",
+        "apiKey": "llm-fixture",
+        "completionOptions": {
+          "thinkingEnabled": true,
+          "thinkingLevels": [
+            {
+              "level": "low"
+            },
+            {
+              "level": "high"
+            }
+          ],
+          "maxTokens": 4096
+        }
+      },
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "X-Call-Source": "APP",
+        "lcappid": "app-fixture",
+        "x-app-id": "app-fixture",
+        "x-ws-id": "ws-fixture",
+        "Authorization": "Bearer llm-fixture",
+        "api-key": "llm-fixture"
+      },
+      "stream": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": true,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low",
+        "stream_options": {
+          "include_usage": true
+        },
+        "tool_stream": true,
+        "prompt_cache_key": "ta3-7aa237ac9524b144b80e940284f1ed63"
+      },
+      "text": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": false,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "low"
+      }
+    },
+    "deepseek": {
+      "model": {
+        "model": "fixture-model",
+        "provider": "deepseek",
+        "apiBase": "https://models.example.test/v2",
+        "apiKey": "llm-fixture",
+        "completionOptions": {
+          "thinkingEnabled": true,
+          "thinkingLevels": [
+            {
+              "level": "low"
+            },
+            {
+              "level": "high"
+            }
+          ],
+          "maxTokens": 4096
+        }
+      },
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "X-Call-Source": "APP",
+        "lcappid": "app-fixture",
+        "x-app-id": "app-fixture",
+        "x-ws-id": "ws-fixture",
+        "Authorization": "Bearer llm-fixture",
+        "api-key": "llm-fixture"
+      },
+      "stream": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": true,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "text": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": false,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    "openai": {
+      "model": {
+        "model": "fixture-model",
+        "provider": "openai",
+        "apiBase": "https://models.example.test/v2",
+        "apiKey": "llm-fixture",
+        "completionOptions": {
+          "thinkingEnabled": true,
+          "thinkingLevels": [
+            {
+              "level": "low"
+            },
+            {
+              "level": "high"
+            }
+          ],
+          "maxTokens": 4096
+        }
+      },
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "X-Call-Source": "APP",
+        "lcappid": "app-fixture",
+        "x-app-id": "app-fixture",
+        "x-ws-id": "ws-fixture",
+        "Authorization": "Bearer llm-fixture",
+        "api-key": "llm-fixture"
+      },
+      "stream": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": true,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "text": {
+        "model": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "stream": false,
+        "temperature": 0.1,
+        "max_tokens": 4096,
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    "anthropic": {
+      "model": {
+        "model": "fixture-kimi",
+        "provider": "kimi",
+        "apiBase": "https://models.example.test/anthropic",
+        "apiKey": "llm-fixture",
+        "completionOptions": {
+          "maxTokens": 4096
+        }
+      },
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "X-Call-Source": "APP",
+        "lcappid": "app-fixture",
+        "x-app-id": "app-fixture",
+        "x-ws-id": "ws-fixture",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "llm-fixture"
+      },
+      "stream": {
+        "model": "fixture-kimi",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hello",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "temperature": 0.1,
+        "max_tokens": 4096
+      }
+    }
+  },
+  "reasoning": [
+    {
+      "role": "user",
+      "content": "hello"
+    },
+    {
+      "role": "assistant",
+      "content": "progress",
+      "reasoning_content": ""
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "tool-1",
+          "type": "function",
+          "function": {
+            "name": "Read",
+            "arguments": "{}"
+          }
+        }
+      ],
+      "reasoning_content": ""
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "tool-1",
+      "content": "result"
+    },
+    {
+      "role": "assistant",
+      "content": "done",
+      "reasoning_content": ""
+    }
+  ],
+  "cacheKey": "ta3-7aa237ac9524b144b80e940284f1ed63"
+}

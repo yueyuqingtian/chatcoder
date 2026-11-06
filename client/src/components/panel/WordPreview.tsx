@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconMinus, IconPlus } from "../icons";
 import { wheelZoom } from "./wordZoom";
+import { ResourceLoading } from "./ResourceLoading";
 import { Button, Tooltip } from "../ui";
 
 /** plan-20261103-attachment-preview：文档 CSS 隔离，禁止活动内容与远程资源。 */
@@ -12,18 +13,23 @@ export default function WordPreview({ url }: { url: string }) {
     const doc = frame.current?.contentDocument;
     const page = doc?.querySelector<HTMLElement>("section.docx");
     if (doc && page && frame.current) {
-      const factor =
-        zoom == null
-          ? Math.min(
-              1,
-              Math.max(
-                0.1,
-                (frame.current.clientWidth - 32) / (page.offsetWidth + 40),
-              ),
-            )
-          : zoom / 100;
+      const factor = zoom == null
+        ? Math.min(1, Math.max(0.1, (frame.current.clientWidth - 32) / page.offsetWidth))
+        : zoom / 100;
       effectiveZoom.current = factor * 100;
-      doc.body.style.zoom = String(factor);
+      // plan-20261105-file-review：页面独立缩放，外层保留实际占位，缩小时自然横向换行。
+      doc.querySelectorAll<HTMLElement>("section.docx").forEach(section => {
+        let slot = section.parentElement!;
+        if (!slot.classList.contains("docx-page-slot")) {
+          slot = doc.createElement("div");
+          slot.className = "docx-page-slot";
+          section.before(slot);
+          slot.append(section);
+        }
+        slot.style.width = `${section.offsetWidth * factor}px`;
+        slot.style.height = `${section.offsetHeight * factor}px`;
+        section.style.transform = `scale(${factor})`;
+      });
     }
   };
   const [error, setError] = useState("");
@@ -50,7 +56,7 @@ export default function WordPreview({ url }: { url: string }) {
       const left = scroll?.scrollLeft ?? 0;
       const top = scroll?.scrollTop ?? 0;
       effectiveZoom.current = next;
-      doc.body.style.zoom = String(next / 100);
+
       if (scroll) {
         scroll.scrollLeft =
           ((left + event.clientX) * next) / current - event.clientX;
@@ -66,6 +72,7 @@ export default function WordPreview({ url }: { url: string }) {
     const controller = new AbortController();
     let disposed = false;
     setLoading(true);
+    setZoom(null);
     setError("");
     void (async () => {
       try {
@@ -80,7 +87,7 @@ export default function WordPreview({ url }: { url: string }) {
         if (!doc) throw new Error("文档预览容器未就绪");
         doc.open();
         doc.write(
-          `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; font-src blob: data:; style-src 'unsafe-inline';"><style>body{margin:0;background:#e8e8e8;} .docx-wrapper{padding:20px!important;background:#e8e8e8!important;width:max-content;min-width:100%;box-sizing:border-box;} section.docx{margin-bottom:16px!important;} a{pointer-events:none;}</style></head><body></body></html>`,
+          `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; font-src blob: data:; style-src 'unsafe-inline';"><style>body{margin:0;background:#e8e8e8;} .docx-wrapper{padding:16px!important;background:#e8e8e8!important;display:flex!important;flex-flow:row wrap!important;justify-content:safe center;align-items:flex-start!important;gap:16px;width:100%;box-sizing:border-box;} .docx-page-slot{flex:0 0 auto;position:relative;} section.docx{margin:0!important;transform-origin:top left;background:white;box-shadow:0 1px 5px #00000012;} a{pointer-events:none;}</style></head><body></body></html>`,
         );
         doc.close();
         await lib.renderAsync(blob, doc.body, undefined, {
@@ -118,10 +125,10 @@ export default function WordPreview({ url }: { url: string }) {
           >
             −
           </Button>
-          <Tooltip content="按住 Ctrl 滚动鼠标滚轮可连续缩放">
-            <span className="resource-zoom" aria-label="文档缩放比例">
+          <Tooltip content="点击恢复 100%；按住 Ctrl 滚动鼠标滚轮可连续缩放">
+            <Button variant="ghost" size="xs" className="resource-zoom" aria-label="恢复文档原始大小" onClick={() => setZoom(100)}>
               {zoom == null ? "适应" : `${Math.round(zoom * 10) / 10}%`}
-            </span>
+            </Button>
           </Tooltip>
           <Button
             variant="ghost"
@@ -146,6 +153,8 @@ export default function WordPreview({ url }: { url: string }) {
           {error}
         </div>
       )}
+      <div className="resource-word-stage">
+      {loading && <div className="resource-grid-overlay"><ResourceLoading>正在排版文档…</ResourceLoading></div>}
       <iframe
         ref={frame}
         className="resource-word-frame"
@@ -159,6 +168,7 @@ export default function WordPreview({ url }: { url: string }) {
             });
         }}
       />
+      </div>
     </div>
   );
 }

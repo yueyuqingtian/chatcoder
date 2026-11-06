@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
+    # plan-20261106-ta3-080：宿主内部快照，协议发送层只展开正文。
+    skill_load_snapshots: list[dict[str, Any]] | None = Field(default=None, exclude=True)
     # v6.1: 支持 developer 角色（对齐 codex ContextualUserFragment role="developer"）
     # system = 行为准则（核心，不随任务变化）；developer = 分层注入的上下文片段
     role: Literal["system", "developer", "user", "assistant", "tool"]

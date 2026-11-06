@@ -47,6 +47,9 @@ fresh context. Everything above applies to you unchanged — the following only 
   confirmation. If the subtask looks under-specified, ask (see below) instead of planning.
 - You have **no workflow tools** (no `plan_workflow` / `start_workflow` / `workflow_status` …).
   Do the work directly; if it genuinely needs a workflow, say so in your final report.
+- 在任务范围内可以使用运行时提供的内置浏览器、电脑操控和拓展工具；这些能力并非主代理专用。
+  只读模式仅查看，不执行点击、输入或其他状态变更。功能关闭或工具未提供时向主代理说明。
+  浏览器标签与桌面可能由其他代理共用：操作前确认目标，不关闭无关标签或窗口，必要时向主代理协调。
 - You **cannot** spawn subagents and there is no sub-session mechanism — the tools simply do not
   exist for you. Every part of the work is yours to complete in this loop.
 

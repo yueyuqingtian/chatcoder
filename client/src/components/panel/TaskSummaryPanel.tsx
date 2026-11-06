@@ -1,13 +1,6 @@
-/** 摘要（plan-128-518 建立，plan-633-2604 去卡片化）：四个固定模块，始终显示，不做动态增删。
- *
- *  ① 进度   —— 状态行（图标 + 状态 + 百分比）+ 细进度条 + 步骤列表；方案待确认的「确认执行 / 停止」、目标行也在这里；
- *  ② 产物   —— 本会话产出的文件（点击在文件面板打开），只读展示：不在这里做审核、回滚（那些操作留在消息流的改动条里）；
- *  ③ 子代理 —— 本会话派出的子代理（运行中置顶），点击打开其详情标签；
- *  ④ 拓展   —— 本会话用到的技能 / 插件 / 连接器（来自用户引用与模型调用）。
- *  plan-633-2604：分组不再是一张带边框/底色/阴影的卡片，改为「浅灰小标题 + 圆角图标块 + 文字」，
- *  分组间只靠 18px 留白分隔（四个框在窄面板里把版面切得太碎）。计数也从灰底徽标降为同行淡色小字。
- *  无内容时模块内给一行说明，版面保持不变。折叠状态按「会话 + 模块」写 localStorage（store/tsFold.ts）。 */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+/** plan-20261105-summary-index：按用户选定的索引方案分层，保留共享进度与现有文件、协作入口。
+ * 按会话重建视图，避免页签和异步产物状态串入其他会话。 */
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useChatStore } from "../../store/chat";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { usePanelStore } from "../../store/panel";
@@ -18,8 +11,9 @@ import { recordComponentRender } from "../../perf/metrics";
 import { useProgressRows } from "../chat/taskProgress";
 import { isListedSubagent, subagentState, type SubagentState } from "../chat/subagentStatus";
 import { refsOf } from "../chat/AttachmentCard";
-import { IconChevronDown, IconTarget } from "../icons";
-import { Badge, Button, Collapse, Tooltip } from "../ui";
+import { IconArrowRight, IconChevronDown, IconTarget } from "../icons";
+import { Badge, Button, Collapse, Empty, Tooltip } from "../ui";
+import { Dada } from "../mascot/Dada";
 import { extKindIcon } from "../composer/ExtensionPicker";
 import { FileIcon, baseName } from "../iconkit/FileIcon";
 import { IxBot, IxExtensions, IxFiles, IxTasks } from "../iconkit/StackIcons";
@@ -39,9 +33,7 @@ function pathKey(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/{2,}/g, "/").replace(/\/+$/, "");
 }
 
-/** 模块分组：整条表头可点折叠。计数与折叠箭头收在表头右侧。
- *  plan-633-2604：分组去掉边框/底色/阴影后不再用灰底计数徽标（在浅灰小标题旁显得过重），
- *  改为同行淡色小字；折叠只转角度，不挤标题（plan-20261014-summary）。 */
+/** plan-20261105-summary-index：沿用会话级折叠记忆，分组用留白而非卡片区隔。 */
 function SummaryCard({ id, title, icon, count, children }: {
   id: string;
   title: string;
@@ -55,14 +47,14 @@ function SummaryCard({ id, title, icon, count, children }: {
   const toggle = useTsFoldStore((s) => s.toggle);
   return (
     <section className="ts-card" data-fold={folded ? "1" : "0"}>
-      <button type="button" className="ts-card-head" aria-expanded={!folded} onClick={() => toggle(key)}>
+      <Button block className="btn-summary-heading" aria-expanded={!folded} onClick={() => toggle(key)}>
         <span className="ts-card-ic">{icon}</span>
         <span className="ts-card-title">{title}</span>
         <span className="ts-card-end">
           {count != null && <span className="ts-card-count">{count}</span>}
           <span className="ts-chev" aria-hidden><IconChevronDown size={14} /></span>
         </span>
-      </button>
+      </Button>
       <Collapse open={!folded}><div className="ts-card-body">{children}</div></Collapse>
     </section>
   );
@@ -82,6 +74,22 @@ interface ExtUse { kind: ExtKind; name: string; count: number }
 const EXT_LABEL: Record<ExtKind, string> = { skill: "技能", plugin: "插件", connector: "连接器" };
 
 export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
+  const sessionId = useChatStore((s) => s.currentSessionId);
+  return <SessionSummary key={sessionId ?? "new"} visible={visible} />;
+}
+
+type SummaryView = "overview" | "products" | "collaboration";
+const SUMMARY_VIEWS: Array<{ id: SummaryView; label: string }> = [
+  { id: "overview", label: "概览" }, { id: "products", label: "产物" }, { id: "collaboration", label: "协作" },
+];
+
+function SessionSummary({ visible }: { visible: boolean }) {
+  const [view, setView] = useState<SummaryView>("overview");
+  const viewId = useId();
+  const sessionId = useChatStore((s) => s.currentSessionId);
+  const sessionLoading = useChatStore((s) => s.sessionLoading);
+  const sessionLoadError = useChatStore((s) => s.sessionLoadError);
+  const flowError = useChatStore((s) => s.flowError);
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("taskSummary");
 
@@ -110,19 +118,19 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
    *  被删除的文件、本轮新建又删除的临时文件都不算产物）；刷新时机跟随变更清单（写盘 / 轮次结束都会重拉）。
    *  清单请求失败时才回退到 artifact 消息并集，且不展示已知被删除的文件。 */
   const turnChanges = useChatStore((state) => state.turnChanges);
-  const [productPaths, setProductPaths] = useState<string[] | null>(null);
-  const productSessionId = session?.id ?? null;
+  const [productsResult, setProductsResult] = useState<{ sessionId: number; files: string[] } | null>(null);
+  const productSessionId = sessionId;
+  const productPaths = productsResult?.sessionId === productSessionId ? productsResult.files : null;
   useEffect(() => {
     if (!visible || productSessionId == null) return;
     let dead = false;
     const timer = window.setTimeout(() => {
       api.listSessionProducts(productSessionId)
-        .then((r) => { if (!dead) setProductPaths(r.files); })
-        .catch(() => { if (!dead) setProductPaths(null); });
+        .then((r) => { if (!dead) setProductsResult({ sessionId: productSessionId, files: r.files }); })
+        .catch(() => { if (!dead) setProductsResult(null); });
     }, 300);
     return () => { dead = true; window.clearTimeout(timer); };
   }, [visible, productSessionId, turnChanges, isRunning]);
-  useEffect(() => { setProductPaths(null); }, [productSessionId]);
   const productFiles = useMemo<string[]>(() => {
     if (productPaths) {
       // 后端已按归一路径去重；这里再按同一口径收一次，防止旧版本后端返回混合写法
@@ -237,6 +245,7 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
         : undefined;
       return { status: "running", title, hint };
     }
+    if (flowError) return { status: "failed", title: "执行遇到问题", hint: "可在主对话中查看原因并继续处理。" };
     if (progress.carried) return { status: "paused", title: `待续接 · ${progress.unfinished} 项` };
     if (progress.phase === "interrupted") return { status: "paused", title: `已停止 · ${progress.unfinished} 项未完成` };
     if (progressRows.length > 0) {
@@ -247,124 +256,146 @@ export function TaskSummaryPanel({ visible = true }: { visible?: boolean }) {
         : { status: "pending", title: `已结束 · ${progress.unfinished} 项未完成` };
     }
     return { status: "pending", title: "空闲", hint: "布置任务后，这里会显示执行步骤。" };
-  }, [hasPendingPlan, progress.phase, progress.unfinished, progress.carried, progress.fromPrevious, isRunning, workflowRunning, pendingSubagents, progressRows]);
+  }, [hasPendingPlan, progress.phase, progress.unfinished, progress.carried, progress.fromPrevious, isRunning, workflowRunning, pendingSubagents, progressRows, flowError]);
 
   const ratio = progressRows.length > 0 ? progressDone / progressRows.length : 0;
+  const collaborationCount = subagents.length + extUses.length;
+  const pristine = messages.length === 0 && progressRows.length === 0 && productFiles.length === 0
+    && collaborationCount === 0 && head.status === "pending" && !goalActive;
+  const mood = head.status === "done" ? "happy" : head.status === "running" ? "think" : "calm";
+  const tabId = (id: SummaryView) => `${viewId}-tab-${id}`;
+  const panelId = `${viewId}-content`;
+  const navigateView = (next: SummaryView) => {
+    setView(next);
+    // plan-20261105-summary-index：索引入口切页会卸载触发按钮，焦点转到对应页签以便继续键盘操作。
+    document.getElementById(tabId(next))?.focus();
+  };
+
+  const progressBar = progressRows.length > 0 ? (
+    <div className="ts-progress">
+      <div className="ts-progress-caption"><span>任务进度</span><span>{progressDone} / {progressRows.length}</span></div>
+      <div className="ts-bar" data-tone={head.status} role="progressbar" aria-valuemin={0} aria-valuemax={progressRows.length} aria-valuenow={progressDone} aria-label="任务进度">
+        <span className="ts-bar-fill" style={{ transform: `scaleX(${ratio})` }} />
+      </div>
+    </div>
+  ) : null;
+
+  const planActions = hasPendingPlan ? (
+    <div className="ts-plan-actions">
+      <Button variant="primary" size="md" onClick={() => confirmPlanTurn(true)}>确认执行</Button>
+      <Button variant="ghost" size="md" onClick={() => confirmPlanTurn(false)}>停止任务</Button>
+    </div>
+  ) : null;
 
   return (
-    <div className="rp-body ts-panel">
-      {/* ① 进度 */}
-      <SummaryCard id="progress" icon={<IxTasks size={16} />} title="进度" count={progressRows.length > 0 ? `${progressDone}/${progressRows.length}` : undefined}>
-        {goalActive && (
-          <div className="ts-row is-goal">
-            <span className="ts-row-lead"><IconTarget size={14} /></span>
-            <span className="ts-row-title">{session!.goal_text}</span>
-            <span className="ts-row-note">{`第 ${session!.goal_turns_used ?? 0} 轮`}</span>
-          </div>
-        )}
-        {/* 进度组：状态行与进度条同属一组，步骤列表在其下（plan-20261014-summary）。
-         *  执行中的总览用静态圆点——步骤行已有转圈，总览再转会重复（plan-128-518 的约定）。 */}
-        <div className="ts-progress">
-          <div className="ts-status">
-            <span className="ts-status-lead">
-              {head.status === "running" ? <span className="ts-status-dot" aria-hidden /> : <StatusIcon status={head.status} size={14} />}
-            </span>
-            <span className={`ts-status-title is-${head.status}`}>{head.title}</span>
-            {progressRows.length > 0 && <span className="ts-status-note">{Math.round(ratio * 100)}%</span>}
-            {head.hint && <p className="ts-status-hint">{head.hint}</p>}
-          </div>
-          {progressRows.length > 0 && (
-            <div className="ts-bar" data-tone={head.status} role="progressbar" aria-valuemin={0} aria-valuemax={progressRows.length} aria-valuenow={progressDone} aria-label="任务进度">
-              <span className="ts-bar-fill" style={{ ["--ratio" as string]: ratio }} />
-            </div>
+    <div className="ts-panel">
+      <div className="ts-index" role="tablist" aria-label="摘要分类" onKeyDown={(event) => {
+        const index = SUMMARY_VIEWS.findIndex((item) => item.id === view);
+        const next = event.key === "ArrowRight" ? (index + 1) % 3 : event.key === "ArrowLeft" ? (index + 2) % 3
+          : event.key === "Home" ? 0 : event.key === "End" ? 2 : null;
+        if (next == null) return;
+        event.preventDefault();
+        const id = SUMMARY_VIEWS[next].id;
+        setView(id);
+        document.getElementById(tabId(id))?.focus();
+      }}>
+        {SUMMARY_VIEWS.map(({ id, label }) => (
+          <Button key={id} id={tabId(id)} role="tab" className="btn-summary-tab" aria-selected={view === id}
+            aria-controls={panelId} tabIndex={view === id ? 0 : -1} onClick={() => setView(id)}>
+            <span>{label}</span>
+            {id !== "overview" && <span className="ts-index-count">{id === "products" ? productFiles.length : collaborationCount}</span>}
+          </Button>
+        ))}
+      </div>
+      <div key={view} className="ts-scroll" id={panelId} role="tabpanel" aria-labelledby={tabId(view)} tabIndex={0}>
+        <div className="ts-page">
+          {sessionLoading ? <Empty title="正在整理会话摘要" desc="加载完成后，进度与产物会显示在这里。" mood="think" size="lg" />
+          : sessionLoadError ? <Empty title="暂时无法读取会话" desc="请在主对话中重新加载，嗒嗒会同步整理摘要。" mood="oops" size="lg" />
+          : view === "overview" ? (
+            <>
+              {pristine ? (
+                <>
+                  <Empty className="ts-welcome" title="任务的脉络，会在这里展开" desc="开始对话后，嗒嗒会把进度、产物与协作信息整理在这里。" size="lg" />
+                  <div className="ts-empty-guide">
+                    <div><IxTasks size={16} /><span><strong>进度</strong><small>执行到哪一步，随时可查</small></span></div>
+                    <div><IxFiles size={16} /><span><strong>产物</strong><small>本次生成的文件，集中查看</small></span></div>
+                    <div><IxBot size={16} /><span><strong>协作</strong><small>子代理与拓展，按需出现</small></span></div>
+                  </div>
+                  <p className="ts-welcome-foot">从主对话发起任务，让嗒嗒开始整理。</p>
+                </>
+              ) : (
+                <>
+                  <div className="ts-overview">
+                    <Dada variant="sketch" mood={mood} size={48} />
+                    <div className="ts-overview-text">
+                      <div className="ts-overview-status"><span className="ts-status-lead">{head.status === "running" ? <span className="ts-status-dot" aria-hidden /> : <StatusIcon status={head.status} size={14} />}</span><strong>{head.title}</strong></div>
+                      <p>{session?.title || "当前会话"}</p>
+                    </div>
+                  </div>
+                  {head.hint && <p className="ts-status-hint">{head.hint}</p>}
+                  {goalActive && <div className="ts-goal"><IconTarget size={16} /><span>{session!.goal_text}</span><small>第 {session!.goal_turns_used ?? 0} 轮</small></div>}
+                  {progressBar}
+                  {planActions}
+                  {progressRows.length > 0 && (
+                    <SummaryCard id="progress" icon={<IxTasks size={16} />} title="执行步骤" count={`${progressDone}/${progressRows.length}`}>
+                      <div className="ts-rows ts-steps">
+                        {progressRows.map((row, i) => {
+                          const content = <><span className="ts-step-status"><StatusIcon status={row.status} size={14} /></span><span className="ts-row-text"><span className="ts-row-title">{row.title}</span>{row.note && <span className="ts-row-note">{row.note}</span>}</span></>;
+                          return row.agentId == null
+                            ? <div key={`${row.key}-${i}`} className={`ts-step is-${row.status}`}>{content}</div>
+                            : <Button key={`${row.key}-${i}`} block className={`btn-summary-row ts-step is-${row.status}`} onClick={() => useChatStore.getState().requestScrollTo({ threadId: row.agentId! })}>{content}</Button>;
+                        })}
+                      </div>
+                    </SummaryCard>
+                  )}
+                  <div className="ts-shortcuts">
+                    <Button block variant="outline" className="btn-summary-shortcut" onClick={() => navigateView("products")}><IxFiles size={16} /><span>{productFiles.length} 份产物</span><IconArrowRight size={15} /></Button>
+                    <Button block variant="outline" className="btn-summary-shortcut" onClick={() => navigateView("collaboration")}><IxBot size={16} /><span>{subagents.length > 0 ? `${subagents.length} 位子代理` : "嗒嗒直接处理"}{extUses.length > 0 ? ` · ${extUses.length} 项拓展` : ""}</span><IconArrowRight size={15} /></Button>
+                  </div>
+                </>
+              )}
+            </>
+          ) : view === "products" ? (
+            <>
+              <div className="ts-page-heading"><span>本会话产物 · {productFiles.length}</span><h3>文件都在这里</h3><p>选择文件查看内容与完整路径。</p></div>
+              {productFiles.length === 0 ? <Empty title="还没有产出文件" desc="嗒嗒生成的文件会集中放在这里，方便随时回看。" size="md" /> : (
+                <div className="ts-rows">
+                  {productFiles.map((path) => {
+                    const slash = path.lastIndexOf("/");
+                    const directory = slash < 0 ? "项目根目录" : path.slice(0, slash) || "/";
+                    return <Tooltip key={path} content={path} side="top"><Button block className="btn-summary-row" onClick={() => openFile(path)}>
+                      <span className="ts-row-lead"><FileIcon name={path} size={18} /></span><span className="ts-row-text"><span className="ts-row-title">{baseName(path)}</span><span className="ts-row-note ts-file-directory">{directory}</span></span><IconArrowRight size={13} />
+                    </Button></Tooltip>;
+                  })}
+                </div>
+              )}
+              {productFiles.length > 0 && <p className="ts-footnote">仅展示本会话产出且仍存在的文件。</p>}
+            </>
+          ) : (
+            <>
+              <div className="ts-page-heading"><span>协作记录</span><h3>一起完成的工作</h3><p>了解谁参与了任务，用到了哪些能力。</p></div>
+              {collaborationCount === 0 ? <Empty title="本轮由嗒嗒直接处理" desc="使用子代理、技能、插件或连接器后，协作记录会自动出现在这里。" size="md" /> : (
+                <>
+                  <SummaryCard id="subagents" icon={<IxBot size={16} />} title="子代理" count={runningSubagents > 0 ? `运行 ${runningSubagents} / 共 ${subagents.length}` : subagents.length}>
+                    {subagents.length === 0 ? <p className="ts-empty">本轮由嗒嗒直接处理，未使用子代理。</p> : <div className="ts-rows">
+                      {subagents.map((r) => <Button key={r.id} block className="btn-summary-row" onClick={() => openSubagent(r.id, r.meta.name)}>
+                        <span className="ts-row-lead"><StatusIcon status={r.status} size={16} /></span><span className="ts-row-text"><span className="ts-row-title">{r.meta.workflow ? `工作流 · ${r.meta.workflow.node_title}` : r.meta.name}</span><span className="ts-row-note">{r.status === "running" ? "执行中" : r.status === "done" ? "已完成" : r.status === "failed" ? "执行失败" : r.status === "paused" ? "已停止" : "等待中"}{fmtDuration(r.meta.startedAt, r.meta.endedAt) ? ` · ${fmtDuration(r.meta.startedAt, r.meta.endedAt)}` : ""}</span></span><IconArrowRight size={13} />
+                      </Button>)}
+                    </div>}
+                  </SummaryCard>
+                  <SummaryCard id="extensions" icon={<IxExtensions size={16} />} title="拓展" count={extUses.length}>
+                    {extUses.length === 0 ? <p className="ts-empty">用到的技能、插件与连接器会自动记录。</p> : <div className="ts-rows">
+                      {extUses.map((e) => <Tooltip key={`${e.kind}:${e.name}`} content={`在设置中管理${EXT_LABEL[e.kind]}`} side="top"><Button block className="btn-summary-row" onClick={() => openExtensionsManager(e.kind)}>
+                        <span className="ts-row-lead">{extKindIcon(e.kind, 16)}</span><span className="ts-row-text"><span className="ts-row-title">{e.name}</span><span className="ts-row-note">{EXT_LABEL[e.kind]}</span></span>{e.count > 1 && <Badge size="xs" tone="neutral">{e.count}</Badge>}<IconArrowRight size={13} />
+                      </Button></Tooltip>)}
+                    </div>}
+                  </SummaryCard>
+                </>
+              )}
+            </>
           )}
         </div>
-        {progressRows.length > 0 && (
-          <div className="ts-rows">
-            {progressRows.map((row, i) => (
-              <button
-                key={`${row.key}-${i}`}
-                type="button"
-                className={`ts-row is-${row.status}`}
-                disabled={row.agentId == null}
-                onClick={() => { if (row.agentId != null) useChatStore.getState().requestScrollTo({ threadId: row.agentId }); }}
-              >
-                <span className="ts-row-lead"><StatusIcon status={row.status} size={14} /></span>
-                <span className="ts-row-title">{row.title}</span>
-                {row.note && <span className="ts-row-note">{row.note}</span>}
-              </button>
-            ))}
-          </div>
-        )}
-        {hasPendingPlan && (
-          <div className="ts-plan-actions">
-            <Button variant="primary" size="md" onClick={() => confirmPlanTurn(true)}>确认执行</Button>
-            <Button variant="ghost" size="md" onClick={() => confirmPlanTurn(false)}>停止任务</Button>
-          </div>
-        )}
-      </SummaryCard>
-
-      {/* ② 产物 */}
-      <SummaryCard id="products" icon={<IxFiles size={16} />} title="产物" count={productFiles.length > 0 ? productFiles.length : undefined}>
-        {productFiles.length > 0 ? (
-          <div className="ts-rows">
-            {productFiles.map((path) => (
-              <Tooltip key={path} content={path} side="top">
-                <button type="button" className="ts-row" onClick={() => openFile(path)}>
-                  <span className="ts-row-lead"><FileIcon name={path} size={14} /></span>
-                  <span className="ts-row-title">{baseName(path)}</span>
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-        ) : (
-          <p className="ts-empty">本会话还没有产出文件。</p>
-        )}
-      </SummaryCard>
-
-      {/* ③ 子代理 */}
-      <SummaryCard
-        id="subagents"
-        icon={<IxBot size={16} />}
-        title="子代理"
-        count={subagents.length > 0 ? (runningSubagents > 0 ? `运行 ${runningSubagents} / 共 ${subagents.length}` : subagents.length) : undefined}
-      >
-        {subagents.length > 0 ? (
-          <div className="ts-rows">
-            {subagents.map((r) => (
-              <button key={r.id} type="button" className={`ts-row is-${r.status}`} onClick={() => openSubagent(r.id, r.meta.name)}>
-                <span className="ts-row-lead"><StatusIcon status={r.status} size={14} /></span>
-                <span className="ts-row-title">
-                  {r.meta.workflow ? `工作流 · ${r.meta.workflow.node_title}` : r.meta.name}
-                </span>
-                <span className="ts-row-note">{fmtDuration(r.meta.startedAt, r.meta.endedAt)}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="ts-empty">本会话还没有使用子代理。</p>
-        )}
-      </SummaryCard>
-
-      {/* ④ 拓展 */}
-      <SummaryCard id="extensions" icon={<IxExtensions size={16} />} title="拓展" count={extUses.length > 0 ? extUses.length : undefined}>
-        {extUses.length > 0 ? (
-          <div className="ts-rows">
-            {extUses.map((e) => (
-              <Tooltip key={`${e.kind}:${e.name}`} content={`在设置中管理${EXT_LABEL[e.kind]}`} side="top">
-                <button type="button" className="ts-row" onClick={() => openExtensionsManager(e.kind)}>
-                  <span className="ts-row-lead">{extKindIcon(e.kind, 14)}</span>
-                  <span className="ts-row-title">{e.name}</span>
-                  <span className="ts-row-note">{EXT_LABEL[e.kind]}</span>
-                  {e.count > 1 && <Badge size="xs" tone="neutral">{e.count}</Badge>}
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-        ) : (
-          <p className="ts-empty">本会话还没有用到技能、插件或连接器。</p>
-        )}
-      </SummaryCard>
+      </div>
     </div>
   );
 }

@@ -1156,10 +1156,10 @@ function MessageFlowCore({
     return () => window.clearTimeout(t);
   }, [positioned]);
 
-  // v0.3.1: 对话启动（running 由 false -> true）时强制滚到底部并恢复跟随
+  // plan-20261105-scroll-wake：后台任务恢复运行不能打断历史阅读，主动发送由 forceBottomKey 开启跟随。
   const prevRunningRef = useRef(running);
   useEffect(() => {
-    if (running && !prevRunningRef.current) sticky.stick();
+    if (running && !prevRunningRef.current) sticky.pin();
     prevRunningRef.current = running;
   }, [running, sticky]);
 

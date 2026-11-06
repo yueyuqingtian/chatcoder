@@ -9,6 +9,8 @@ import fnmatch
 import logging
 import os
 import re
+from collections import deque
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,6 @@ from app.orchestration.tools.safe_path import safe_resolve
 
 logger = logging.getLogger(__name__)
 
-_MAX_FILE_SIZE = 512 * 1024  # 跳过大于 512KB 的文件
 # 单次返回条数：默认 50，可经 max_matches 上调到 200。
 # plan-548-2276（阶段 4.1）：此前是固定硬截断，命中被切掉后模型永远看不到后续，
 # 只能换关键词反复试；现在改为可翻页，截断时头部直接给出下一次的完整调用串。
@@ -52,6 +53,20 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _line_windows(stream, context: int):
+    """plan-20261105-file-tools：流式扫描大源码，仅保留当前行及前后上下文。"""
+    rows = enumerate((row.removesuffix("\n").removesuffix("\r") for row in stream), 1)
+    before = deque(maxlen=context)
+    pending = deque(islice(rows, context + 1))
+    while pending:
+        current = pending.popleft()
+        yield current[0], current[1], [*before, current, *pending]
+        before.append(current)
+        following = next(rows, None)
+        if following is not None:
+            pending.append(following)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -300,9 +315,9 @@ class GrepTool(Tool):
                 yield root
                 return
             for dirpath, dirnames, filenames in os.walk(root):
-                # 跳过排除目录
-                dirnames[:] = [d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS]
-                for filename in filenames:
+                # plan-20261105-file-tools：续页必须沿用稳定遍历顺序，避免跨文件命中重漏。
+                dirnames[:] = sorted(d for d in dirnames if d not in _DEFAULT_EXCLUDE_DIRS)
+                for filename in sorted(filenames):
                     yield Path(dirpath) / filename
 
         # plan-549-2281 复盘修复：has_more 原先按「计数达到窗口」判定——末条恰好填满窗口时
@@ -324,43 +339,33 @@ class GrepTool(Tool):
             if not include_re and file_path.suffix.lower() in _BINARY_EXTENSIONS:
                 continue
 
-            # 大小过滤
-            try:
-                if file_path.stat().st_size > _MAX_FILE_SIZE:
-                    continue
-            except OSError:
-                continue
-
             files_searched += 1
-
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-                lines = text.splitlines()
-            except OSError:
-                continue
 
             try:
                 rel_path = str(file_path.relative_to(ws_root))
             except ValueError:
                 rel_path = str(file_path)
 
-            for line_no, line in enumerate(lines, 1):
-                if total_matches > window:
-                    break
-                if regex.search(line):
-                    total_matches += 1
-                    if total_matches <= offset or total_matches > window:
-                        continue  # 本页之前的命中 / 仅用于判定 has_more 的额外一条：计数但不出现在结果里
-                    if context_lines > 0:
-                        start = max(0, line_no - 1 - context_lines)
-                        end = min(len(lines), line_no + context_lines)
-                        snippet_lines = []
-                        for j in range(start, end):
-                            marker = ">>" if j == line_no - 1 else "  "
-                            snippet_lines.append(f"  {marker} {j+1}: {lines[j]}")
-                        results.append(f"\n{rel_path}:\n" + "\n".join(snippet_lines))
-                    else:
-                        results.append(f"{rel_path}:{line_no}: {line.strip()[:200]}")
+            try:
+                with file_path.open(encoding="utf-8", errors="replace", newline="\n") as stream:
+                    for line_no, line, surrounding in _line_windows(stream, context_lines):
+                        if total_matches > window:
+                            break
+                        if not regex.search(line):
+                            continue
+                        total_matches += 1
+                        if total_matches <= offset or total_matches > window:
+                            continue
+                        if context_lines > 0:
+                            snippet_lines = []
+                            for number, content in surrounding:
+                                marker = ">>" if number == line_no else "  "
+                                snippet_lines.append(f"  {marker} {number}: {content}")
+                            results.append(f"\n{rel_path}:\n" + "\n".join(snippet_lines))
+                        else:
+                            results.append(f"{rel_path}:{line_no}: {line.strip()[:200]}")
+            except OSError:
+                continue
 
         # plan-549-2281 复盘修复：has_more 只算一次，页头 / notes / data 共用同一个值
         has_more = total_matches > window
@@ -439,7 +444,7 @@ class GrepTool(Tool):
         """v1.1: ripgrep 快路径。任何异常/不可用返回 None，由调用方回退纯 Python。
 
         fixed=True：按字面文本搜索（-F），用于模型给的正则不合法时的降级。
-        注意：--max-filesize 只接受纯字节数或 K/M/G 后缀，不能带 B（否则 rg 报错，快路径形同虚设）。
+        plan-20261105-file-tools：不按文件大小排除源码，避免大组件被静默遗漏。
 
         plan-548-2276：offset/max_matches 为分页参数，Python 侧按条数跨文件累计截断。
 
@@ -457,7 +462,6 @@ class GrepTool(Tool):
             # -0：路径后接 NUL 而不是 ":"，匹配行为 "路径\0行号:内容"、上下文行为 "路径\0行号-内容"，
             # 解析时不会被路径或内容里的 ":数字:" 误导
             "-0",
-            "--max-filesize", str(_MAX_FILE_SIZE),
         ]
         if fixed:
             base_cmd.append("-F")

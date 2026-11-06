@@ -1,12 +1,12 @@
 """ta3 额度服务（对齐参考项目 Ta+3 v0.4.6 quotaService.js）。
 
-端点（业务接口契约：Authorization 裸 token、不带 Bearer；Accept: application/json）：
+端点（业务接口契约：Authorization 标准 Bearer；Accept: application/json）：
 - GET  {apiBase}/ai/v1/quota               本人额度（窗口百分比、重置时刻、可执行动作）
 - GET  {apiBase}/ai/v1/quota/trend         用量趋势（DAILY/MONTHLY；单区间 ≤366 天）
 - POST {apiBase}/ai/v1/quota/overdraft     日窗透支（form: remark；仅用户手动触发）
 - POST {apiBase}/ai/v1/quota/reset         周/月窗重置（form: windowType+remark；APPLIED/PENDING）
 - GET  {apiBase}/ai/v1/model-status        模型状态卡（倍率/负载/可用性）
-- POST {apiBase}/api/ai-sso/generate-token 后台网页 SSO 免登 token（form: loginId+appId）
+- 管理平台入口：同主机 /newcoder/index.html（浏览器自行登录）
 
 缓存对齐参考实现：quota 10s、model-status 30s（按 provider+token 失效，force 跳过）。
 401 自动 refresh 后重试一次（复用 session.ensure_token，与 catalog 同步同款模式）。
@@ -15,18 +15,19 @@ from __future__ import annotations
 
 import logging
 import time
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.ta3 import session as ta3_session
+from app.auth.ta3 import endpoints
+from app.persistence.models.model_reg import Provider
 
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 10.0
-_SSO_TIMEOUT = 8.0  # 对齐参考项目 fetchFirstJson(…, '生成后台登录 token', 8000)
 _QUOTA_CACHE_SECONDS = 10.0
 _MODEL_STATUS_CACHE_SECONDS = 30.0
 
@@ -54,69 +55,67 @@ def clear_cache(provider_id: int) -> None:
 
 
 def _headers(token: str, *, form: bool = False) -> dict:
-    """业务接口鉴权头：Authorization 裸值（不带 Bearer）；GET 不带 Content-Type。"""
-    headers = {"Accept": "application/json", "Authorization": token}
+    """业务接口鉴权头：Authorization 标准 Bearer；GET 不带 Content-Type。"""
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     if form:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     return headers
 
 
 async def _current_token(db: AsyncSession, provider_id: int) -> str:
-    token = await ta3_session.get_access_token(db, provider_id)
-    if not token:
-        raise ta3_session.Ta3AuthError("请先登录 Ta+3 账号", "login_required")
-    return token
+    provider = await db.get(Provider, provider_id, populate_existing=True)
+    if provider is None:
+        raise ta3_session.Ta3AuthError("供应商已删除")
+    return await ta3_session.ensure_token(db, provider_id, endpoints.current_base(provider))
+
+
+async def _cache_identity(db, provider_id, token):
+    provider = await db.get(Provider, provider_id, populate_existing=True)
+    auth = await ta3_session.load_auth(db, provider_id)
+    return (token, endpoints.current_base(provider, "quota"), auth.session_generation if auth else None,
+            str((auth.account or {}).get("id") or "") if auth else "")
 
 
 async def _request_json(db: AsyncSession, provider_id: int, api_base: str, path: str, *,
                         method: str = "GET", form: dict | None = None,
                         token: str | None = None, timeout: float = _REQUEST_TIMEOUT,
                         client_kwargs: dict | None = None) -> dict | list:
-    """发一次额度请求；401 时 refresh（ensure_token）后重试一次。
-
-    - token 参数用于复用调用方已读取的 token（避免重复查库），缺省时自行读取。
-    - 网络/超时/HTTP/解析错误统一转 Ta3QuotaError（认证失败保持 Ta3AuthError）。
-    - plan-110-438 M2: client_kwargs 由调用方按供应商代理配置传入
-      （credential_service.provider_client_kwargs），额度/趋势/模型状态/SSO 同口径出网。
-    """
-    url = f"{api_base.rstrip('/')}{path}"
-    if token is None:
-        token = await _current_token(db, provider_id)
-
-    async def _do(t: str) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=timeout, **(client_kwargs or {})) as client:
-            if form is None:
-                return await client.request(method, url, headers=_headers(t))
-            return await client.request(method, url, content=urlencode(form),
-                                        headers=_headers(t, form=True))
-
+    provider = await db.get(Provider, provider_id, populate_existing=True)
+    if provider is None:
+        raise ta3_session.Ta3AuthError("供应商已删除")
+    token = token or await _current_token(db, provider_id)
+    auth = await ta3_session.load_auth(db, provider_id)
+    gen = auth.session_generation if auth else None
+    account = str((auth.account or {}).get("id") or "") if auth else ""
+    async def send(value):
+        kwargs = {"headers": _headers(value, form=form is not None)}
+        if form is not None:
+            kwargs["content"] = urlencode(form)
+        return await endpoints.request(provider, method, path, timeout=timeout, client_kwargs=client_kwargs,
+                                       endpoint="quota", **kwargs)
     try:
-        resp = await _do(token)
-    except httpx.TimeoutException as e:
-        raise Ta3QuotaError("额度服务请求超时", "timeout") from e
-    except httpx.HTTPError as e:
-        raise Ta3QuotaError("无法连接额度服务，请检查网络", "network") from e
+        response = await send(token)
+        if response.status_code == 401:
+            fresh = await ta3_session.ensure_token(db, provider_id, api_base, failed_token=token)
+            current = await ta3_session.load_auth(db, provider_id)
+            if not current or current.session_generation != gen or str((current.account or {}).get("id") or "") != account:
+                raise ta3_session.Ta3AuthError("账号已变化，请重新操作")
+            response = await send(fresh)
+        if response.status_code == 401:
+            raise ta3_session.Ta3AuthError("登录验证失败，请重新网页登录")
+        if not response.is_success:
+            raise Ta3QuotaError(f"额度服务请求失败：HTTP {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, (dict, list)):
+            raise ValueError("无效 JSON")
+        return payload
+    except httpx.TimeoutException as exc:
+        raise Ta3QuotaError("额度请求超时；写操作结果可能未知，请先刷新额度确认", "timeout") from exc
+    except httpx.HTTPError as exc:
+        raise Ta3QuotaError("额度服务暂不可达，请检查网络", "network") from exc
+    except ValueError as exc:
+        raise Ta3QuotaError("额度服务返回了无法解析的数据", "parse") from exc
 
-    if resp.status_code == 401:
-        # 刷新后重试一次；IM 静默登录（无 refresh_token）会原样返回旧 token，
-        # 仍 401 则判定登录过期（对齐 catalog 同步的 401 重试模式）。
-        token = await ta3_session.ensure_token(db, provider_id, api_base)
-        try:
-            resp = await _do(token)
-        except httpx.TimeoutException as e:
-            raise Ta3QuotaError("额度服务请求超时", "timeout") from e
-        except httpx.HTTPError as e:
-            raise Ta3QuotaError("无法连接额度服务，请检查网络", "network") from e
-        if resp.status_code == 401:
-            raise ta3_session.Ta3AuthError("登录已过期，请重新登录 Ta+3 账号", "login_required")
-
-    if not resp.is_success:
-        raise Ta3QuotaError(f"额度服务请求失败：HTTP {resp.status_code}", "http")
-    try:
-        payload = resp.json() if resp.content else {}
-    except ValueError as e:
-        raise Ta3QuotaError("额度服务返回了无法解析的数据", "parse") from e
-    return payload
 
 
 def _as_payload(value: dict | list) -> dict:
@@ -131,13 +130,14 @@ async def get_quota(db: AsyncSession, provider_id: int, api_base: str, *,
                     force: bool = False, client_kwargs: dict | None = None) -> dict:
     """本人额度（窗口百分比、重置时刻、可执行动作）。身份即本人，不传 userId。"""
     token = await _current_token(db, provider_id)
+    identity = await _cache_identity(db, provider_id, token)
     cached = _quota_cache.get(provider_id)
-    if (not force and cached and cached[0] == token
+    if (not force and cached and cached[0] == identity
             and time.monotonic() - cached[1] < _QUOTA_CACHE_SECONDS):
         return cached[2]
     value = _as_payload(await _request_json(db, provider_id, api_base, "/ai/v1/quota",
                                            token=token, client_kwargs=client_kwargs))
-    _quota_cache[provider_id] = (token, time.monotonic(), value)
+    _quota_cache[provider_id] = (await _cache_identity(db, provider_id, token), time.monotonic(), value)
     return value
 
 
@@ -191,8 +191,9 @@ async def get_model_status(db: AsyncSession, provider_id: int, api_base: str, *,
     """模型状态卡（倍率 / 负载 / 可用性）。三端公共契约，用于模型列表与错峰提示。"""
     token = await _current_token(db, provider_id)
     cacheable = not model and not protocol
+    identity = await _cache_identity(db, provider_id, token)
     cached = _model_status_cache.get(provider_id)
-    if (not force and cacheable and cached and cached[0] == token
+    if (not force and cacheable and cached and cached[0] == identity
             and time.monotonic() - cached[1] < _MODEL_STATUS_CACHE_SECONDS):
         return cached[2]
     params: dict[str, str] = {}
@@ -205,7 +206,7 @@ async def get_model_status(db: AsyncSession, provider_id: int, api_base: str, *,
         db, provider_id, api_base, f"/ai/v1/model-status{('?' + qs) if qs else ''}",
         token=token, client_kwargs=client_kwargs))
     if cacheable:
-        _model_status_cache[provider_id] = (token, time.monotonic(), value)
+        _model_status_cache[provider_id] = (await _cache_identity(db, provider_id, token), time.monotonic(), value)
     return value
 
 
@@ -213,18 +214,7 @@ async def get_model_status(db: AsyncSession, provider_id: int, api_base: str, *,
 
 
 def _front_base(api_base: str) -> str:
-    """由 apiBase 推导前台地址（对齐 getYinhaiFrontBase：{host}{contextPath}-front）。
-
-    例：https://lc.yinhaiyun.com/newcoder → https://lc.yinhaiyun.com/newcoder-front
-    本地开发端口替换（8081→8080）为参考项目专用逻辑，当前项目不涉及。
-    """
-    parts = urlsplit(api_base)
-    path = (parts.path or "").rstrip("/")
-    if not path:
-        return api_base.rstrip("/")
-    seg = path.rsplit("/", 1)[-1]
-    front_path = path if seg.endswith("-front") else f"{path}-front"
-    return urlunsplit((parts.scheme, parts.netloc, front_path, "", ""))
+    return endpoints.front_url(api_base)
 
 
 async def resolve_app_id(db: AsyncSession, provider_id: int) -> str:
@@ -252,34 +242,7 @@ async def resolve_app_id(db: AsyncSession, provider_id: int) -> str:
 
 async def build_admin_web_url(db: AsyncSession, provider_id: int, api_base: str,
                               client_kwargs: dict | None = None) -> str:
-    """生成「后台网页」SSO 免登链接（对齐 openYinhaiAdminSystem）。
-
-    流程：POST {apiBase}/api/ai-sso/generate-token（form: loginId[+appId]）
-    → 打开 {frontBase}/aiSsoLogin.html?token=…&redirect={frontBase}/。
-    """
-    row = await ta3_session.load_auth(db, provider_id)
-    account = (row.account if row else None) or {}
-    login_id = str(account.get("loginId") or account.get("id") or "").strip()
-    if not login_id:
-        raise Ta3QuotaError("账号信息缺少 loginId，请重新登录 Ta+3 账号", "http")
-
-    form: dict[str, str] = {"loginId": login_id}
-    app_id = await resolve_app_id(db, provider_id)
-    if app_id:
-        form["appId"] = app_id
-
-    body = await _request_json(db, provider_id, api_base, "/api/ai-sso/generate-token",
-                               method="POST", form=form, timeout=_SSO_TIMEOUT,
-                               client_kwargs=client_kwargs)
-    data = body.get("data") if isinstance(body, dict) else None
-    sso_token = ""
-    if isinstance(data, dict):
-        sso_token = str(data.get("token") or "").strip()
-    if not sso_token and isinstance(body, dict):
-        sso_token = str(body.get("token") or "").strip()
-    if not sso_token:
-        raise Ta3QuotaError("生成后台登录 token 失败：服务未返回 token", "http")
-
-    front_base = _front_base(api_base)
-    query = urlencode({"token": sso_token, "redirect": f"{front_base}/"})
-    return f"{front_base}/aiSsoLogin.html?{query}"
+    """plan-20261106-ta3-080：管理平台独立处理浏览器会话，不再生成 SSO token。"""
+    if not await ta3_session.get_access_token(db, provider_id):
+        raise ta3_session.Ta3AuthError("请先网页登录后再打开管理平台")
+    return endpoints.front_url(api_base)

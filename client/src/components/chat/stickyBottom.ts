@@ -12,8 +12,8 @@
  * 「跟随」是**锁存状态**，只由用户意图改变：
  *  · 解除：用户向上滚轮 / 键盘上翻 / 拖滚动条 / 触摸 / 拖选文字，且滚动容器**确实向上移动**；
  *    或调用方主动跳转到某条消息前调用 release()。
- *  · 恢复：用户滚回底部；向下滚动途中进入近底区；尺寸变化后已处于底部；
- *    调用方 stick()（发送消息、切换会话、开始运行、点「回到底部」）。
+ *  · 恢复：用户滚回底部；向下滚动途中进入近底区；
+ *    调用方 stick()（发送消息、切换会话、点「回到底部」）。
  *  · 跟随期间：视口、内容、尾项任一尺寸变化都在同一帧贴底；非用户造成的位移立即补回。
  *  · 容器尺寸为 0（窗口最小化、隐藏的标签页）时不做任何判定，恢复尺寸即贴底。
  */
@@ -83,6 +83,7 @@ export class StickyBottom {
     window.addEventListener("keydown", this.onKeyDown, true);
     // 窗口从最小化 / 后台回来：尺寸未变时 ResizeObserver 不会回调，这里补一次
     window.addEventListener("focus", this.onWake);
+    window.addEventListener("blur", this.onSuspend);
     document.addEventListener("visibilitychange", this.onWake);
     this.rebuildObserver();
   }
@@ -101,6 +102,7 @@ export class StickyBottom {
     window.removeEventListener("touchcancel", this.onTouchEnd, true);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("focus", this.onWake);
+    window.removeEventListener("blur", this.onSuspend);
     document.removeEventListener("visibilitychange", this.onWake);
     this.ro?.disconnect();
     this.ro = null;
@@ -130,7 +132,7 @@ export class StickyBottom {
     return this.following;
   }
 
-  /** 恢复跟随并贴底：发送消息、切换会话、开始运行、点「回到底部」。 */
+  /** 恢复跟随并贴底：发送消息、切换会话、点「回到底部」。 */
   stick(smooth = false): void {
     this.pauseUntil = 0;
     this.setFollowing(true);
@@ -218,7 +220,7 @@ export class StickyBottom {
 
   /** 尺寸塌缩（最小化、隐藏标签、尚未布局）：此时的几何不代表任何东西，一律不判定。 */
   private collapsed(el: HTMLElement): boolean {
-    return !el.isConnected || el.clientHeight < 1 || el.clientWidth < 1;
+    return document.visibilityState === "hidden" || !el.isConnected || el.clientHeight < 1 || el.clientWidth < 1;
   }
 
   private distance(el: HTMLElement): number {
@@ -280,8 +282,8 @@ export class StickyBottom {
     if (!el) return;
     const top = el.scrollTop;
     const prev = this.lastTop;
-    this.lastTop = top;
     if (this.collapsed(el)) return;
+    this.lastTop = top;
     const now = performance.now();
     const dist = this.distance(el);
     const movedUp = top < prev - 0.5;
@@ -294,10 +296,8 @@ export class StickyBottom {
         // 非用户造成的位移（测量补偿、滚动锚定、位置钳制）：补回底部
         this.pin();
       }
-    } else if (dist <= AT_BOTTOM_PX) {
-      // 回到底部即恢复跟随；正在上滑经过底部附近的那一下除外
-      if (!(movedUp && this.userScrolling(now, "up"))) this.setFollowing(true);
     } else if (movedDown && dist <= NEAR_BOTTOM_PX && this.userScrolling(now, "down")) {
+      // plan-20261105-scroll-wake：恢复时的测量收缩和位置钳制不代表用户主动回底。
       this.setFollowing(true);
       this.pin();
     }
@@ -309,13 +309,6 @@ export class StickyBottom {
     if (!el || this.collapsed(el)) return;
     if (this.following) {
       this.pin();
-    } else if (
-      this.distance(el) <= AT_BOTTOM_PX
-      && !this.pointerDown && !this.touching
-      && performance.now() - this.lastWheelUpAt > INTENT_MS
-    ) {
-      // 内容变短 / 视口变高后已经在底部：用户此刻看到的就是末尾，恢复跟随
-      this.setFollowing(true);
     }
     this.updateJump();
   };
@@ -385,8 +378,22 @@ export class StickyBottom {
     if (up && this.following) this.pauseUntil = now + PAUSE_MS;
   };
 
+  private onSuspend = (): void => {
+    // plan-20261105-scroll-wake：失焦可能丢失松手事件，旧手势不能被恢复时的程序滚动复用。
+    this.pointerDown = false;
+    this.scrollbarDrag = false;
+    this.touching = false;
+    this.lastWheelUpAt = -Infinity;
+    this.lastWheelDownAt = -Infinity;
+    this.keyIntentUntil = 0;
+    this.pauseUntil = 0;
+    this.smoothUntil = 0;
+    window.clearTimeout(this.pinTimer);
+    this.pinTimer = 0;
+  };
+
   private onWake = (): void => {
-    if (document.visibilityState === "hidden") return;
+    if (document.visibilityState === "hidden") { this.onSuspend(); return; }
     this.schedulePin(0);
   };
 }

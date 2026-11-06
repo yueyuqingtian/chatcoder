@@ -39,6 +39,7 @@ class Provider(Base):
     # v23: ta3 供应商登录态（auth_status: pending | logged_in；account_label: 账号显示名）
     auth_status: Mapped[str | None] = mapped_column(String(20))
     account_label: Mapped[str | None] = mapped_column(String(120))
+    ta3_alt_base_urls: Mapped[list[str] | None] = mapped_column(JSON)
     # plan-248-1258 M2.3: 供应商级代理
     proxy_mode: Mapped[str] = mapped_column(String(12), default="inherit")
     proxy_url: Mapped[str | None] = mapped_column(String(255))

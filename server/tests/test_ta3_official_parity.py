@@ -140,8 +140,9 @@ def test_disguise_tools_dispatch_three_paths():
     cg = mcp_alias("mcp_codegraph_codegraph_explore")
     # 内置在前；MCP 按 serverId 字典序（codegraph-… < workspace-tools-…）
     assert _names(out) == ["Read", cg, f"mcp__{EXTENSION_SERVER_ID}__browser_click"]
-    # ① 内置通道：用官方快照（不是入参 schema）
-    assert out[0] is TA3_NATIVE_SCHEMAS["Read"]
+    # plan-20261105-file-tools：保留官方基线，执行定义补齐真实分页参数。
+    from app.models.providers.ta3_tool_schemas import execution_schema
+    assert out[0] == execution_schema("Read")
     assert out[0]["function"]["description"] != "真实描述（会被快照替换）"
     # ② 真实 MCP：`mcp__{serverId}__{tool}`，描述前缀用显示名
     assert cg.startswith("mcp__codegraph-")

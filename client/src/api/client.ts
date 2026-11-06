@@ -1122,11 +1122,11 @@ export const api = {
   },
   /** plan-89-387: 传 callKey 取「这一次编辑」的变更（同轮多次编辑各自独立）；不传为整轮累积。
    *  plan-20261026-round-changes: extraTurnIds 传整组续跑轮，取整组累积 diff。 */
-  getFileDiff: (turnId: number, path: string, callKey?: string, extraTurnIds?: readonly number[]) => {
+  getFileDiff: (turnId: number, path: string, callKey?: string, extraTurnIds?: readonly number[], fullFile = false) => {
     const qs = turnIdsQs(extraTurnIds);
     return get<FileDiffOut>(
       `/turns/${turnId}/changes/diff?path=${encodeURIComponent(path)}`
-      + `${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}${qs ? `&${qs}` : ""}`,
+      + `${callKey ? `&call_key=${encodeURIComponent(callKey)}` : ""}${qs ? `&${qs}` : ""}${fullFile ? "&full_file=true" : ""}`,
     );
   },
   reviewFiles: (turnId: number, paths: string[], reviewed: boolean) =>
@@ -1316,7 +1316,7 @@ export const api = {
 
   // ── 供应商 ──
   listProviders: () => get<ProviderOut[]>("/providers"),
-  createProvider: (data: { name: string; base_url?: string; api_key?: string; api_format?: string; is_active?: boolean }) =>
+  createProvider: (data: { name: string; base_url?: string; api_key?: string; api_format?: string; is_active?: boolean; ta3_alt_base_urls?: string[] }) =>
     post<ProviderOut>("/providers", data),
   updateProvider: (id: number, data: Record<string, unknown>) => patch<ProviderOut>(`/providers/${id}`, data),
   deleteProvider: (id: number) => del<{ ok: boolean }>(`/providers/${id}`),

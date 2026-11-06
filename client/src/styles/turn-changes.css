@@ -93,7 +93,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: calc(var(--fs-md, 13px) * 3.2);
+  min-height: calc(var(--fs-md, 13px) * 3);
   padding: 0 10px 0 8px;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
@@ -203,13 +203,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: calc(var(--fs-md, 13px) * 2.9);
+  min-height: calc(var(--fs-md, 13px) * 2.7);
   padding: 0 6px;
   border-radius: var(--r-md);
   transition: background var(--dur-2) var(--ease-standard);
 }
 
-.tcc-row:hover {
+.tcc-row:hover,
+.tcc-row:focus-within {
   background: var(--bg-hover);
 }
 
@@ -407,4 +408,22 @@
   .tcc-split > .btn {
     display: none;
   }
+}
+
+/* plan-20261105-file-review：维持原卡片结构，只收紧纵向节奏，文件主体承担查看入口。 */
+.tcc-list { padding-block:3px; }
+.tcc-row { cursor:pointer; }
+/* plan-20261105-change-row-border：文件名是行内查看入口，不能继承 ghost 的描边而看起来像输入框。 */
+.tcc-path.btn {
+  justify-content: flex-start;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  overflow: hidden;
+}
+
+.tcc-path.btn:hover:not(:disabled) {
+  background: transparent;
 }

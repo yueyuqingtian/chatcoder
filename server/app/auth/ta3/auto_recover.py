@@ -101,9 +101,9 @@ async def maybe_auto_recover(provider_id: int | None, *, reason: str = "") -> bo
             provider = await db.get(Provider, provider_id)
             if provider is None or (provider.api_format or "").lower() != "ta3":
                 return False
-            from app.auth.ta3.oauth import DEFAULT_TA3_API_BASE
+            from app.auth.ta3 import endpoints
 
-            api_base = (provider.base_url or DEFAULT_TA3_API_BASE).rstrip("/")
+            api_base = await endpoints.resolve(provider)
             if not api_base:
                 return False
 

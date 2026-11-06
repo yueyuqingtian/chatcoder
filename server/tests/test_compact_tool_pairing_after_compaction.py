@@ -19,8 +19,11 @@
 """
 import pytest
 
-from app.models.schemas import ChatMessage
+from app.models.schemas import ChatMessage, ChatRequest
 from app.models.providers.ta3 import Ta3Provider
+from app.orchestration.history_sequence import (
+    prepare_history, validate_tool_sequence, validate_anthropic_wire,
+)
 from app.orchestration.compaction import (
     emergency_compact,
     ensure_conversation_lead,
@@ -214,3 +217,98 @@ def test_incident_sequence_is_legal_after_finalize():
             continue
         assert m.get("role") != "tool"
         i += 1
+
+
+# plan-20261105-tool-pairing：严格验证请求副本及供应商适配后的真实配对。
+def _call(*ids):
+    return ChatMessage(role="assistant", tool_calls=[
+        {"id": key, "name": "fs_read", "arguments": {}} for key in ids
+    ])
+
+
+def _result(key, text):
+    return ChatMessage(role="tool", tool_call_id=key, content=text)
+
+
+@pytest.mark.parametrize("key", ["same", "", None])
+def test_missing_previous_result_does_not_steal_next_batch(key):
+    rows = [_call(key), ChatMessage(role="user", content="继续"),
+            _call(key), _result(key, "第二批真实结果")]
+    before = [m.model_dump() for m in rows]
+    fixed = prepare_history(rows)
+    validate_tool_sequence(fixed)
+    calls = [m for m in fixed if m.tool_calls]
+    results = {m.tool_call_id: m.content for m in fixed if m.role == "tool"}
+    assert "已丢失" in results[calls[0].tool_calls[0]["id"]]
+    assert results[calls[1].tool_calls[0]["id"]] == "第二批真实结果"
+    assert [m.model_dump() for m in rows] == before
+    assert prepare_history(fixed) is fixed
+
+
+def test_interleaved_batches_keep_every_real_result():
+    rows = [_call("a", "b"), _result("b", "B"),
+            ChatMessage(role="developer", content="压缩摘要"),
+            _call("c"), _result("c", "C")]
+    fixed = finalize_compacted_messages(rows, "zh")
+    validate_tool_sequence(fixed)
+    assert {m.content for m in fixed if m.role == "tool"} >= {"B", "C"}
+    assert any("已丢失" in (m.content or "") for m in fixed)
+    assert [m.model_dump() for m in finalize_compacted_messages(fixed, "zh")] == [m.model_dump() for m in fixed]
+
+
+def test_duplicate_results_do_not_shift_later_reused_ids():
+    rows = [_call("x"), _result("x", "首批"), _result("x", "重复结果"),
+            _call("x"), _result("x", "次批")]
+    fixed = prepare_history(rows)
+    validate_tool_sequence(fixed)
+    assert [m.content for m in fixed if m.role == "tool"] == ["首批", "次批"]
+
+
+def test_empty_id_orphan_is_removed():
+    fixed = prepare_history([ChatMessage(role="user", content="继续"), _result(None, "孤儿")])
+    validate_tool_sequence(fixed)
+    assert all(m.role != "tool" for m in fixed)
+
+
+@pytest.mark.parametrize("key", ["same", None])
+def test_repeated_ids_inside_parallel_batch_preserve_both_results(key):
+    rows = [_call(key, key), _result(key, "一"), _result(key, "二")]
+    fixed = prepare_history(rows)
+    validate_tool_sequence(fixed)
+    assert [m.content for m in fixed if m.role == "tool"] == ["一", "二"]
+
+
+@pytest.mark.parametrize("anthropic", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_ta3_unknown_history_tool_preserves_results_as_text(anthropic, mixed):
+    provider = Ta3Provider(api_key="k", base_url="https://example.invalid", model="test",
+                           meta={"provider": "anthropic" if anthropic else "deepseek"})
+    calls = [{"id": "gone", "name": "removed_legacy_tool", "arguments": {}}]
+    if mixed:
+        calls.append({"id": "kept", "name": "fs_read", "arguments": {}})
+    rows = [ChatMessage(role="system", content="系统"),
+            ChatMessage(role="developer", content="压缩摘要"),
+            ChatMessage(role="assistant", tool_calls=calls), _result("gone", "历史原文")]
+    if mixed:
+        rows.append(_result("kept", "当前结果"))
+    before = [m.model_dump() for m in rows]
+    request = ChatRequest(model="test", messages=rows)
+    if anthropic:
+        wire = provider._build_anthropic_body(request, [])["messages"]
+        validate_anthropic_wire(wire)
+        ids = [b["id"] for m in wire for b in m["content"] if b.get("type") == "tool_use"]
+    else:
+        wire = provider._build_openai_body(request, [])["messages"]
+        validate_tool_sequence(wire)
+        ids = [tc["id"] for m in wire for tc in m.get("tool_calls", [])]
+    assert ids == (["kept"] if mixed else [])
+    assert "历史原文" in str(wire)
+    assert [m.model_dump() for m in rows] == before
+
+
+def test_ta3_sanitize_removes_empty_and_duplicate_call_ids():
+    rows = [{"role": "assistant", "tool_calls": [{"id": "a"}, {"id": ""}, {"id": "a"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "A"}]
+    wire = Ta3Provider._sanitize_openai_tool_pairing(rows)
+    validate_tool_sequence(wire)
+    assert wire[0]["tool_calls"] == [{"id": "a"}]

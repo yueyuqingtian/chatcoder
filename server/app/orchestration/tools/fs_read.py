@@ -16,7 +16,8 @@ from app.orchestration.tools.text_edit import TextFileError, read_text_file
 _DEFAULT_LINES = 600  # 默认行数：多数源文件一次读完，减少分段重读
 _MAX_LINES = 2000  # 单次行数上限（与 zcode / deepseek-harness 的 2000 行对齐）
 _MAX_LINE_CHARS = 2000  # 单行字符上限，防止超长行（压缩产物、单行 JSON）独占窗口
-_MAX_FILE_BYTES = 2 * 1024 * 1024  # 超过则拒绝读取：分段读取仍需整体加载，过大的文件应改用 fs_grep 定位
+# plan-20261105-file-tools：大源码仍按窗口输出，不能沿用 2MB 上限挡住后续范围。
+_MAX_FILE_BYTES = 32 * 1024 * 1024
 
 
 def _budget_bytes() -> int:

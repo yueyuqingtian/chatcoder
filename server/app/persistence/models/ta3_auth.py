@@ -21,3 +21,9 @@ class Ta3Auth(Base):
     account: Mapped[dict | None] = mapped_column(JSON)
     catalog: Mapped[dict | None] = mapped_column(JSON)
     updated_at: Mapped[str | None] = mapped_column(String(40))
+    # plan-20261106-ta3-080：保留退出后的代次，阻止旧请求重新写入凭据。
+    auth_version: Mapped[int | None] = mapped_column(Integer)
+    oauth_client_id: Mapped[str | None] = mapped_column(String(80))
+    issued_at: Mapped[str | None] = mapped_column(String(40))
+    access_expires_at: Mapped[str | None] = mapped_column(String(40))
+    session_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

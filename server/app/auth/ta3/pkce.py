@@ -1,6 +1,6 @@
 """PKCE(SM3) 工具 — 参考项目 ta3 登录契约（对齐 ta3-new-coder src/auth/pkce.ts）。
 
-服务端要求 code_challenge_method=SM3（非 SHA256），verifier 为 43 字符 base64url
+旧契约保留 SM3 工具供历史测试；新版登录使用 s256_challenge。verifier 为 43 字符 base64url
 随机串（32 字节），challenge = base64url(SM3(verifier)) 无填充。
 
 SM3 用 vendored 纯 Python 实现（约 130 行，国标 GB/T 32905-2016），
@@ -105,6 +105,12 @@ def sm3_challenge(verifier: str) -> str:
     sm-crypto sm3(字节数组)→hex，转字节再 base64url。
     """
     return base64.urlsafe_b64encode(sm3_hash(verifier.encode("utf-8"))).decode("ascii").rstrip("=")
+
+
+def s256_challenge(verifier: str) -> str:
+    """plan-20261106-ta3-080：标准 S256 与服务端 ta3-desktop 注册项一致。"""
+    import hashlib
+    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
 
 
 # 兼容 hashlib 风格（便于测试/审计）

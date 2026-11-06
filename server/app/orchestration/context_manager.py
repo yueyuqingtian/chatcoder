@@ -111,6 +111,7 @@ class ContextBundle:
     instruction: str = ""
     # v15: 多模态指令内容块（图片附件直接以 image_url 注入当前用户消息）
     instruction_blocks: list[dict] | None = None
+    instruction_skill_snapshots: list[dict] | None = None
     # plan-248-1258 M7: 任务边界提示（历史与新指令之间的 system 分隔，防旧任务复述）
     task_boundary: str = ""
     # plan-19-82: 本轮回复语言（zh/en/auto），由 build_*_context 按用户消息检测后填充；
@@ -163,6 +164,7 @@ class ContextBundle:
             messages.append(ChatMessage(
                 role="user", content=self.instruction,
                 content_blocks=self.instruction_blocks,
+                skill_load_snapshots=self.instruction_skill_snapshots,
             ))
         return messages
 
@@ -185,6 +187,7 @@ class ContextBundle:
             messages.append(ChatMessage(
                 role="user", content=self.instruction,
                 content_blocks=self.instruction_blocks,
+                skill_load_snapshots=self.instruction_skill_snapshots,
             ))
         return messages
 
@@ -430,7 +433,7 @@ def _split_refs(refs: list[dict]) -> tuple[list[str], list[str], list[str]]:
     return skills, connectors, plugins
 
 
-async def _load_refs_context(db: AsyncSession, turn) -> str:
+async def _load_refs_context(db: AsyncSession, turn, *, include_skills=True) -> str:
     """把本轮引用兑现为上下文：技能正文、连接器启用校验、插件说明。
 
     plan-59-286 的三条兑现规则：
@@ -446,7 +449,7 @@ async def _load_refs_context(db: AsyncSession, turn) -> str:
     skills, connectors, plugins = _split_refs(refs)
     parts: list[str] = []
 
-    if skills:
+    if skills and include_skills:
         from app.services import skill_service
 
         blocks: list[str] = []
@@ -603,7 +606,8 @@ def _ta3_memory_system_prompt(global_dir: str, project_dir: str) -> str:
         "\n"
         "## 存储架构\n"
         f"- 全局目录 `{global_dir}`：存放用户偏好、行为纠正，跨项目通用\n"
-        f"- 项目目录 `{project_dir}`：存放项目上下文、外部引用，按项目隔离\n"
+        + (f"- 项目目录 `{project_dir}`：存放项目上下文、外部引用，按项目隔离\n" if project_dir else "- 当前会话未绑定项目，只能读写全局用户偏好和反馈。\n")
+        +
         "\n"
         "## 记忆类型\n"
         "- user：用户角色、偏好、技术背景，存全局目录\n"
@@ -761,7 +765,7 @@ def _ta3_memory_dirs(workspace: str) -> tuple[str, str]:
     root = Path(_ta3_data_root())
     return (
         str(root / "memories"),
-        str(root / "projects" / _ta3_sanitize_path(workspace) / "memory"),
+        str(root / "projects" / _ta3_sanitize_path(workspace) / "memory") if workspace else "",
     )
 
 
@@ -825,7 +829,7 @@ async def _build_ta3_memory_injection(db: AsyncSession, session_id: int | None,
         entries = []
 
     global_entries = [e for e in entries if (getattr(e, "scope", "") or "") == "global"]
-    project_entries = [e for e in entries if (getattr(e, "scope", "") or "") != "global"]
+    project_entries = [e for e in entries if (getattr(e, "scope", "") or "") != "global"] if workspace and project_id is not None else []
     global_entries = [e for e in global_entries if str(getattr(e, "text", "") or "").strip()]
     project_entries = [e for e in project_entries if str(getattr(e, "text", "") or "").strip()]
 
@@ -2258,6 +2262,9 @@ async def build_main_context(
                     text = f"{text}\n{att_note}" if att_note else text
                     _flush_agent_text()
                     _cm = _CM(role="user", content=text)
+                    if ta3_meta is not None:
+                        from app.orchestration.ta3_skill_snapshots import normalize
+                        _cm.skill_load_snapshots = normalize(m.content.get("skill_load_snapshots"))
                     if _img_blocks:
                         _cm.content_blocks = _img_blocks
                     bundle.history.append(_cm)
@@ -2380,7 +2387,12 @@ async def build_main_context(
     # plan-59-286：本轮显式引用（技能正文 / 连接器校验 / 插件说明）。
     # 用户点了 chip 就是最高优先级的意图表达，必须真的改变本轮上下文，
     # 否则"引用了却没生效"就是装完拓展后最大的认知落差来源。
-    refs_text = await _load_refs_context(db, turn)
+    if ta3_meta is not None:
+        from app.orchestration.ta3_skill_snapshots import capture
+        _snapshot_refs = await _load_turn_refs(db, turn)
+        _skill_names, _, _ = _split_refs(_snapshot_refs)
+        bundle.instruction_skill_snapshots = await capture(db, session.id, turn, user_message, _skill_names, attachments)
+    refs_text = await _load_refs_context(db, turn, include_skills=ta3_meta is None)
     if refs_text:
         _refs_part = f"## 本轮引用（用户显式点名，优先满足）\n{refs_text}"
         if ta3_meta is None:
@@ -2488,7 +2500,12 @@ _TA3_SUBAGENT_ROLE_PROMPTS = {
 _TA3_SUBAGENT_DEFAULT_ROLE = "你是主会话派生出的独立子代理。你的输出不会直接展示给用户，主代理会读取你的结果后继续工作。"
 # 官方默认工具面说明是「只使用已授权的只读工具」；chatcoder 子代理可以是可写的（agent 模式），
 # 照搬会让可写子代理误以为不能改文件，因此改为不区分读写的同义表述。
-_TA3_SUBAGENT_TOOL_SCOPE = "当前子代理只使用本次请求中已授权的工具。"
+_TA3_SUBAGENT_TOOL_SCOPE = (
+    "当前子代理只使用本次请求中已授权的工具。"
+    # plan-20261105-subagent-tools：拓展能力须在 Ta3 独立子代理提示词中可发现。
+    "已提供的内置浏览器、电脑操控及 MCP 拓展工具均可用于当前子任务；只读模式仅查看，不点击或输入。"
+    "浏览器和桌面可能由其他代理共用，操作前确认目标，不关闭无关标签或窗口，冲突时向主代理协调。"
+)
 _TA3_SUBAGENT_TAIL = (
     "不要臆测文件内容；需要分析代码时，先列目录、搜索或读取文件。",
     "最终回复必须是可供主代理使用的中文结论，包含关键文件、发现、证据和下一步建议；不要只回复 completed、done、success 这类状态词。",

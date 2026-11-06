@@ -117,8 +117,8 @@ def test_disguise_tools_drops_unmapped():
     names = [s["function"]["name"] for s in out]
     # plan-601：内置按名字字典序、MCP 按 serverId+toolName 排在其后（官方 toolOrder.js）
     assert names == ["Read", "Write", "ask_user", _ext("collect_results"), _ext("web_fetch")]
-    # 内置通道走官方快照：描述为快照原文，不沿用真实 schema
-    assert out[0]["function"]["description"].startswith("读取工作区内指定文件内容")
+    # plan-20261105-file-tools：读取描述必须说明实际执行的分页行为。
+    assert "offset" in out[0]["function"]["description"]
     # 拓展通道按官方 MCP 模板挂服务显示名，描述沿用真实工具原文
     assert out[4]["function"]["description"].startswith(f"[MCP: {EXTENSION_SERVER_NAME}] 抓取 URL。")
 
@@ -248,7 +248,7 @@ def test_subagent_args_roundtrip():
     disguised = disguise_args("spawn_subagent", real_args)
     assert disguised == {"description": "调研", "prompt": "读 A 文件\n\n验收标准：ok"}
     readonly = disguise_args("spawn_subagent", {"task_title": "t", "task_description": "p", "mode": "readonly"})
-    assert readonly == {"description": "t", "prompt": "p", "subagent_type": "Explore"}
+    assert readonly == {"description": "t", "prompt": "p", "subagent_type": "Explore", "mode": "readonly"}
     # 入站：ta3 SubAgent → 真实参数（subagent_type=Explore 还原只读，不补调度参数）
     restored = restore_args("SubAgent", {"prompt": "读 A 文件", "description": "调研", "subagent_type": "Explore"})
     assert restored["task_description"] == "读 A 文件"
@@ -292,15 +292,15 @@ def test_message_disguise_tool_calls_json():
     assert out["reasoning_content"] == "思考中"
 
 
-def test_message_disguise_plain_turn_strips_reasoning():
-    """普通回复轮剥离 reasoning_content（对齐 applyPlainTurnReasoningPolicy）。"""
+def test_message_disguise_preserves_existing_reasoning_080():
+    """新版消息回放保留已有 reasoning_content，工具区段后续统一补齐缺失字段。"""
     from app.models.providers.ta3 import Ta3Provider
     from app.models.schemas import ChatMessage
 
     provider = Ta3Provider(api_key="llm-x", base_url="https://x", model="m")
     m = ChatMessage(role="assistant", content="好的", reasoning_content="老思考")
     out = provider._disguise_message(m)
-    assert "reasoning_content" not in out
+    assert out["reasoning_content"] == "老思考"
 
 
 def test_common_tools_args_roundtrip():
@@ -324,8 +324,9 @@ def test_common_tools_args_roundtrip():
     for real_name, real_args, ta3_name, ta3_args in cases:
         assert disguise_args(real_name, real_args) == ta3_args
         assert restore_args(ta3_name, ta3_args) == real_args
-    # 官方 schema 外的真实参数在历史回放时被收敛掉（与当轮 schema 一致）
-    assert disguise_args("fs_grep", {"pattern": "x", "case_sensitive": True}) == {"query": "x"}
+    # plan-20261105-file-tools：搜索过滤参数必须随历史保留，避免续页口径改变。
+    assert disguise_args("fs_grep", {"pattern": "x", "case_sensitive": True}) == {
+        "query": "x", "case_sensitive": True}
 
 
 def test_unmapped_history_call_becomes_text():

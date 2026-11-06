@@ -176,6 +176,11 @@ export function firstIdOf(item: TurnItem): number | null {
   return "msg" in item && item.msg ? Number(item.msg.id) : null;
 }
 
+/** plan-20261105-queued-message-order：唤醒轮的第一条用户消息可能是中途注入，只有开头的用户消息才能提到顶部。 */
+export function leadingUserIndex(items: readonly TurnItem[]): number {
+  return items[0]?.kind === "user" ? 0 : -1;
+}
+
 /** 工作流节点子代理的落位（plan-20261013-wf-order）。
  *
  *  节点子代理不经 spawn_subagent 工具调用，消息流里没有它的消息。它的创建时刻记为派发时刻
@@ -189,7 +194,7 @@ export function placeWorkflowNodeCards<T extends WorkflowNodeCard>(
   items: readonly TurnItem[],
   cards: readonly T[],
 ): { attached: Map<number, T[]>; unplaced: T[] } {
-  const firstUser = items.findIndex((it) => it.kind === "user");
+  const firstUser = leadingUserIndex(items);
   const cardItemsByProgram = new Map<number, Array<{ index: number; turnId: number | null }>>();
   items.forEach((item, index) => {
     if (item.kind !== "workflow") return;

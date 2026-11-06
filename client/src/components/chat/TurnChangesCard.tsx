@@ -110,10 +110,7 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
   const projects = useChatStore((s) => s.projects);
   const setFlowError = useChatStore((s) => s.setFlowError);
 
-  const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
-  const openDiffPreview = usePanelStore((s) => s.openDiffPreview);
-  const openPanel = usePanelStore((s) => s.openPanel);
-  const openTab = usePanelStore((s) => s.openTab);
+  const openTurnFile = usePanelStore((s) => s.openTurnFile);
 
   // 卡片内的图标与徽标随「设置 → 外观 → 对话字号」缩放：
   // 字号调小时只缩文字会让图标显得突兀，这里统一按同一比例派生。
@@ -184,23 +181,9 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
       : "正在读取本会话的可撤销状态…";
   const hasDesktop = typeof window !== "undefined" && !!window.chatcoderAPI;
 
-  /** 审查：先取该轮 diff，再一次性写入「预览路径 + diff」。
-   *  分成 setPreviewPath / setDiffPreview 两步会让 DiffEditor 先卸载再挂载，
-   *  Monaco 在切换 model 的瞬间抛 "TextModel got disposed"（见 panel.openDiffPreview）。 */
-  async function openDiff(path: string) {
-    openPanel();
-    openTab("files");
-    try {
-      // 不传 callKey = 整轮累积口径，正是「该轮该文件」；续跑轮按整组传入得累积 diff
-      const d = await api.getFileDiff(turnId, path, undefined, roundIds.slice(1));
-      openDiffPreview(d.path || path, {
-        path: d.path, before: d.before, after: d.after, truncated: d.truncated,
-        deleted: d.action === "deleted",
-      });
-    } catch {
-      // 取 diff 失败时仍打开文件本身，让用户至少能看到当前内容
-      setPreviewPath(path);
-    }
+  function openFile(path: string, mode: "content" | "diff") {
+    const list = files ?? [];
+    void openTurnFile({ turnId, extraTurnIds: roundIds.slice(1), files: list, index: 0, mode }, list.findIndex(f => f.path === path), mode);
   }
 
   /** 用外部应用打开：桌面版走 IPC，网页调试环境由本机后端代开 */
@@ -293,22 +276,25 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
     const { dir, name } = splitFilePath(c.path);
     const deleted = c.action === "deleted";
     return (
-      <div className={`tcc-row${deleted ? " is-deleted" : ""}`} key={c.path}>
+      <div className={`tcc-row${deleted ? " is-deleted" : ""}`} key={c.path}
+        onClick={() => openFile(c.path, "content")}>
+
         <FileBadge path={c.path} size={badgeSize} />
         {/* 文件名 / 目录被截断时，悬停显示完整相对路径（plan-20261019-toolcard-v2） */}
         <Tooltip content={rel} side="top">
-          <span className="tcc-path">
+          <Button variant="ghost" size="xs" className="tcc-path" aria-label={`查看文件：${name}`}
+            onClick={e => { e.stopPropagation(); openFile(c.path, "content"); }}>
             <span className="tcc-name">{name}</span>
             {dir && <span className="tcc-dir">{dir}</span>}
-          </span>
+          </Button>
         </Tooltip>
         {deleted && <span className="tcc-tag">已删除</span>}
         <span className="tcc-stat">
           <span className="tcc-add">+{c.additions}</span>
           {c.deletions > 0 && <span className="tcc-del">-{c.deletions}</span>}
         </span>
-        <div className="tcc-row-ops">
-          <Button variant="outline" size="sm" onClick={() => void openDiff(c.path)}>
+        <div className="tcc-row-ops" onClick={e => e.stopPropagation()}>
+          <Button variant="outline" size="sm" onClick={() => openFile(c.path, "diff")}>
             审查
           </Button>
           {/* 「打开 ⌄」是分体按钮：左侧直接打开，右侧角标选应用。已删除的文件无从打开，整组隐藏 */}

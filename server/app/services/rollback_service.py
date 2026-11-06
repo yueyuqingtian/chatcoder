@@ -1831,7 +1831,7 @@ async def visible_change_turns(db: AsyncSession, session_id: int) -> list[int]:
 
 async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
                         workspace: str, path: str, call_key: str | None = None,
-                        extra_turn_ids: Sequence[int] | None = None) -> dict | None:
+                        extra_turn_ids: Sequence[int] | None = None, full_file: bool = False) -> dict | None:
     """单文件 diff。
 
     plan-89-387: 传 call_key 时按「这一次写盘」返回——before/after 取该条记录自身的
@@ -1925,7 +1925,7 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         if _fb is not None and _after_now is not None:
             return _build_diff_payload(
                 path, _fb.old_content, _after_now, single_edit=False, action=net.action,
-                reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff",
+                reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff", full_file=full_file,
             )
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
         return _binary_diff_payload(path, single_edit=False, action=net.action)
@@ -1933,7 +1933,7 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
     # plan-20261018-turn-changes: 无 call_key 时按「该轮最后一次写盘」的边界取 after
     # （由 _net_state 折算）。旧实现 after 直接读当前磁盘，会把该轮之后其它轮次对同一文件的编辑
     # 并入本轮 diff（表现为点上一轮的审查，内容里出现更新轮次的改动，且与卡片 +N -M 不一致）。
-    return _build_diff_payload(path, net.before, net.after, single_edit=False, action=net.action)
+    return _build_diff_payload(path, net.before, net.after, single_edit=False, action=net.action, full_file=full_file)
 
 
 def _binary_diff_payload(path: str, *, single_edit: bool, action: str | None = None) -> dict:
@@ -1957,7 +1957,7 @@ def _binary_diff_payload(path: str, *, single_edit: bool, action: str | None = N
 
 def _build_diff_payload(path: str, before: str | None, after: str | None, *,
                         single_edit: bool, reason: str | None = None,
-                        action: str | None = None) -> dict:
+                        action: str | None = None, full_file: bool = False) -> dict:
     """统一生成 diff 响应：统计 / 行级 diff / 展示窗口同源，保证摘要与展开一致。
 
     action（added / modified / deleted）供前端区分「文件已被删除」——删除后没有「当前内容」可看。
@@ -1968,7 +1968,15 @@ def _build_diff_payload(path: str, before: str | None, after: str | None, *,
     if len(lines) > _MAX_DIFF_LINES_RENDER:
         lines = lines[:_MAX_DIFF_LINES_RENDER]
         truncated = True
-    b_disp, a_disp = _truncate_window(before, after)
+    # plan-20261105-file-review：审查编辑器需要完整上下文；保留旧工具卡窗口口径并限制全文响应。
+    if full_file and max(len(before or ""), len(after or "")) <= _MAX_DIFF_WINDOW_CHARS:
+        b_disp, a_disp = before, after
+        truncated = False
+    else:
+        b_disp, a_disp = _truncate_window(before, after)
+        if full_file:
+            b_disp, a_disp = _cap_window_text(b_disp), _cap_window_text(a_disp)
+            truncated = True
     if action is None:
         action = _action_of(before is not None, after is not None)
     return {

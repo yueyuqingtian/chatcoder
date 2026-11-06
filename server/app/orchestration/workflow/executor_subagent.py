@@ -328,8 +328,7 @@ class SubagentNodeExecutor:
     async def _spawn(self, manager: Any, req: NodeRequest) -> NodeResult:
         from app.core.enums import MsgType, SenderType
         from app.orchestration.context_manager import build_subagent_context
-        from app.orchestration.subagent_tools import EXPLORE_TOOLS
-        from app.orchestration.tools.registry import tool_registry
+        from app.orchestration.subagent_tools import available_subagent_tools
         from app.persistence.database import async_session_factory, run_write_locked
         from app.persistence.models.agent import Agent as AgentRow
         from app.persistence.models.message import Session as SessionRow
@@ -374,9 +373,9 @@ class SubagentNodeExecutor:
             return agent.id, task.id
 
         agent_id, task_id = await run_write_locked(_create, label="workflow.node.spawn")
-        schemas = (
-            tool_registry.all_schemas(EXPLORE_TOOLS) if readonly else tool_registry.all_schemas()
-        )
+        # plan-20261105-subagent-tools：工作流派发也不能依赖主代理提前注册拓展。
+        async with async_session_factory() as db:
+            schemas = await available_subagent_tools(db, readonly=readonly)
         if not readonly:
             # 可写节点可在执行中申请扩展写入范围（设计 §5A.1 第 4 点）
             from app.orchestration.workflow.guard import REQUEST_SCOPE_SCHEMA

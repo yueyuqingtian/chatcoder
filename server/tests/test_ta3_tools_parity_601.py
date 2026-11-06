@@ -479,7 +479,8 @@ def test_disguise_memory_write_history_to_official_shape():
 
 
 def test_disguise_history_args_stay_within_official_schema():
-    """内置通道的历史参数只含官方 schema 声明的键（Read 的 offset/limit 例外）。"""
+    """plan-20261105-file-tools：历史参数必须与实际下发的执行定义一致。"""
+    from app.models.providers.ta3_tool_schemas import execution_schema
     samples = {
         "fs_read": {"path": "a", "offset": 3, "limit": 10},
         "fs_list": {"path": "d", "recursive": True, "max_depth": 3},
@@ -493,11 +494,10 @@ def test_disguise_history_args_stay_within_official_schema():
     }
     for real, args in samples.items():
         alias = TO_TA3[real]
-        allowed = set(TA3_OFFICIAL_DEFINITIONS[alias]["parameters"]["properties"]) | (
-            {"offset", "limit"} if alias == "Read" else set())
+        allowed = set(execution_schema(alias)["function"]["parameters"]["properties"])
         out = disguise_args(real, args)
         assert set(out) <= allowed, f"{real} 历史参数越出官方 schema: {set(out) - allowed}"
-    assert disguise_args("git_diff", {"stat_only": True}) == {}
+    assert disguise_args("git_diff", {"stat_only": True}) == {"stat_only": True}
     assert disguise_args("ask_user_question", samples["ask_user_question"]) == {
         "questions": [{"question": "q", "options": [{"label": "A"}], "allowCustom": False}]}
     assert disguise_args("spawn_subagent", samples["spawn_subagent"]) == {

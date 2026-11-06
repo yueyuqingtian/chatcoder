@@ -38,7 +38,7 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 # 存根文案：告诉模型去看上文那条工具结果，而不是让它以为文件内容丢了
 UNCHANGED_STUB = (
     "（文件自上次读取后未变化，同一路径与行范围的内容仍在上文的工具结果中，请直接参考它。"
-    "如需重新查看，请换一个行范围，或先修改文件。）"
+    "继续阅读请使用上次结果页脚给出的 offset；查看其他范围请指定 offset / limit。）"
 )
 
 # 微压缩折叠占位符的开头（见 compaction.py 的 _micro_compact）

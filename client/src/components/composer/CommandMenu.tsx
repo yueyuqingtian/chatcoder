@@ -22,7 +22,7 @@ export const CommandMenu = forwardRef<HTMLDivElement, {
   onManageExtensions: () => void;
   onClose: () => void;
 }>(function CommandMenu({ items, index, listId, disabledMcpCount, onIndex, onPick, onManageExtensions, onClose }, ref) {
-  return <div className="mention-menu" role="dialog" aria-label="命令与拓展"
+  return <div className="mention-menu command-menu" role="dialog" aria-label="命令与拓展"
     onMouseDown={(e) => e.preventDefault()}
     onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } }}>
     <div className="mention-heading"><strong>命令与拓展</strong><span>输入名称，快速查找</span></div>

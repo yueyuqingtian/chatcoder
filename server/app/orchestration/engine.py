@@ -3048,8 +3048,9 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     from app.orchestration.subagent_tools import (
         strip_for_subagent as _strip_for_subagent,
         SUBAGENT_OWN_TOOLS as _SUBAGENT_OWN_TOOLS,
+        available_subagent_tools,
     )
-    tool_schemas = _strip_for_subagent(tool_registry.all_schemas())
+    tool_schemas = _strip_for_subagent(await available_subagent_tools(db))
     _have_names = {s.get("function", {}).get("name") for s in tool_schemas}
     for _own in _SUBAGENT_OWN_TOOLS:
         if _own["function"]["name"] not in _have_names:

@@ -14,12 +14,13 @@
 内置工具按 function.name 字典序、MCP 工具按 `serverId\\0toolName` 排序且整体排在内置之后；
 每个工具的 parameters 递归按键排序（只排 parameters，name/description 不动，数组元素顺序不动）。
 
-为什么快照必须逐字对齐：上行 schema 就是模型看到的能力面，与官方偏差既是可识别的体系
-特征，又会让模型按错误的参数面调用。官方没有、但真实工具需要的能力（分页、cwd、超时……）
-不在 schema 里暴露，由入站还原层补合理默认值（见 `ta3_tool_aliases.restore_args`）。
+plan-20261105-file-tools：官方快照保留为基线；Read/Search/Diff 的实际下发定义
+由 execution_schema 补齐真实执行需要的分页、过滤及仓库参数。仅补默认值不能让模型
+指定后续范围，工具描述与模型可见参数必须与执行能力一致。
 """
 from __future__ import annotations
 
+import copy
 import sys
 
 
@@ -562,7 +563,16 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
         real_name = function.get("name") or ""
         alias = TO_TA3.get(real_name)
         if alias is not None:
-            native = native_schema(alias)
+            native = execution_schema(alias)
+            if alias == "SubAgent" and "mode" not in (function.get("parameters", {}).get("properties") or {}):
+                # plan-20261105-subagent-tools：只读派发入口不能被供应商适配重新扩权。
+                native = copy.deepcopy(native)
+                fn = native["function"]
+                fn["parameters"]["properties"].pop("mode", None)
+                fn["parameters"]["properties"].pop("purpose", None)
+                fn["parameters"]["properties"]["subagent_type"]["enum"] = ["Explore", "Plan"]
+                fn["parameters"]["properties"]["subagent_type"]["description"] = "只读研究角色，运行时强制只读。"
+                fn["description"] = "派发只读探索子代理，只能研究与查看，不能写入或操作界面；运行时强制只读。"
             if native is not None and alias not in seen:
                 seen.add(alias)
                 builtins.append(native)
@@ -580,3 +590,51 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
     builtins.sort(key=lambda s: s["function"]["name"])
     mcp.sort(key=lambda t: f"{t[0]}\u0000{t[1]}")
     return [*builtins, *(t[2] for t in mcp)]
+
+
+def execution_schema(alias: str) -> dict | None:
+    """plan-20261105-file-tools：分页和仓库定位必须在模型可见参数面中可用。"""
+    native = native_schema(alias)
+    if alias == "SubAgent" and native is not None:
+        # plan-20261105-subagent-tools：保留官方快照，执行定义补足操控派发与明确的读写边界。
+        from app.orchestration.subagent_tools import SPAWN_SUBAGENT_SCHEMA
+
+        out = copy.deepcopy(native)
+        fn = out["function"]
+        props = fn["parameters"]["properties"]
+        real_props = SPAWN_SUBAGENT_SCHEMA["function"]["parameters"]["properties"]
+        props["purpose"] = copy.deepcopy(real_props["purpose"])
+        props["mode"] = copy.deepcopy(real_props["mode"])
+        fn["description"] = (
+            "派发独立子代理，立即返回，完成结果自动推送。mode=readonly 仅只读调研，"
+            "mode=agent 可写文件、执行命令，并可使用已启用的内置浏览器、电脑操控与拓展工具。"
+            "Explore/Plan 在未指定 mode 时表示只读，其余类型默认可写。"
+            "界面操作可设 purpose=operator 使用操控子代理档位；审批继承主会话。"
+            "子代理不能再次派发子代理、直接问用户或使用工作流。"
+        )
+        props["subagent_type"]["description"] = "角色提示：Explore/Plan 默认只读，GeneralPurpose/Verification 默认可写；mode 优先。"
+        return canonicalize_tool(out)
+    if alias not in {"Read", "Search", "Diff"} or native is None:
+        return native
+    from app.models.providers.ta3_tool_aliases import ARGS_TO_TA3
+    from app.orchestration.tools.fs_read import FsReadTool
+    from app.orchestration.tools.git_diff import GitDiffTool
+    from app.orchestration.tools.grep import GrepTool
+
+    tool = {"Read": FsReadTool, "Search": GrepTool, "Diff": GitDiffTool}[alias]()
+    real = tool.function_schema()["function"]
+    out = copy.deepcopy(native)
+    fn = out["function"]
+    names = ARGS_TO_TA3.get(tool.name, {})
+    for key, value in real["parameters"]["properties"].items():
+        fn["parameters"]["properties"][names.get(key, key)] = copy.deepcopy(value)
+    if alias == "Read":
+        fn["description"] = (
+            "读取文件文本，默认前 600 行，按输出页脚的 offset 续读，limit 控制窗口行数。"
+            "同一路径的不同 offset 是独立范围；重复读取相同范围可能复用上文结果。"
+        )
+    elif alias == "Search":
+        fn["description"] = real["description"] + "结果超过上限时用 offset 翻页，保留 query 和其它过滤参数。"
+    else:
+        fn["description"] += "多仓库工作区用 repo 指定仓库；stat_only=true 仅看统计。"
+    return canonicalize_tool(out)

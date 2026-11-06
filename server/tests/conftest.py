@@ -53,7 +53,14 @@ async def _reset_shared_test_db():
         # plan-20261103-fork：复用临时测试库时同样补齐兼容列。
         for table, column, ddl in (("sessions", "fork_info", "JSON"), ("sessions", "fork_snapshot", "JSON"),
                                    ("sessions", "fork_request_id", "VARCHAR(80)"),
-                                   ("turns", "inherited", "BOOLEAN DEFAULT 0 NOT NULL")):
+                                   ("turns", "inherited", "BOOLEAN DEFAULT 0 NOT NULL"),
+                                   # plan-20261106-ta3-080：临时测试库跨进程复用，同步补齐新鉴权列。
+                                   ("providers", "ta3_alt_base_urls", "JSON"),
+                                   ("ta3_auth", "auth_version", "INTEGER"),
+                                   ("ta3_auth", "oauth_client_id", "VARCHAR(80)"),
+                                   ("ta3_auth", "issued_at", "VARCHAR(40)"),
+                                   ("ta3_auth", "access_expires_at", "VARCHAR(40)"),
+                                   ("ta3_auth", "session_generation", "INTEGER DEFAULT 0 NOT NULL")):
             existing = (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).all()
             if not any(row[1] == column for row in existing):
                 await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")

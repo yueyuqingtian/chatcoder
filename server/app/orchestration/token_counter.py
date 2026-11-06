@@ -149,6 +149,10 @@ def estimate_message_tokens(msg: ChatMessage) -> int:
 
 def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
     """估算消息列表的总 token 数。"""
+    # plan-20261106-ta3-080：裁剪后首次可见快照重新展开，预算必须按实际发送文本计算。
+    if any(m.skill_load_snapshots for m in messages):
+        from app.orchestration.ta3_skill_snapshots import replay
+        messages = replay(messages)
     return sum(estimate_message_tokens(m) for m in messages)
 
 
@@ -267,6 +271,9 @@ def estimate_message_tokens_from_model(msg) -> int:
 
     content = msg.content
     if isinstance(content, dict):
+        if content.get("skill_load_snapshots"):
+            from app.orchestration.ta3_skill_snapshots import normalize, section
+            total += sum(rough_token_estimate(section(x)) for x in normalize(content["skill_load_snapshots"]))
         if msg.msg_type == MsgType.TOOL_CALL:
             tool = content.get("tool", "")
             args = content.get("args", {})

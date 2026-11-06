@@ -568,6 +568,7 @@ async def list_turn_changes(turn_id: int, turn_ids: str | None = Query(None),
 
 @router.get("/{turn_id}/changes/diff", response_model=FileDiffOut)
 async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
+                          full_file: bool = False,
                           turn_ids: str | None = Query(None),
                           db: AsyncSession = Depends(get_db)):
     """单文件变更 diff：按需拉取 before/after（大文件截断），供右侧面板 DiffEditor。
@@ -590,7 +591,7 @@ async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
             before = writes[0].get("diff_before")
             after = writes[-1].get("diff_after")
         return rollback_service._build_diff_payload(path, before, after, single_edit=bool(call_key),
-            reason="继承的历史变更，仅供查看", action={"create": "added", "delete": "deleted"}.get(writes[-1].get("op"), "modified"))
+            full_file=full_file, reason="继承的历史变更，仅供查看", action={"create": "added", "delete": "deleted"}.get(writes[-1].get("op"), "modified"))
     try:
         session_id, workspace = await rollback_service.resolve_turn_workspace(db, turn_id)
         if session_id is None or not workspace:
@@ -598,7 +599,7 @@ async def get_change_diff(turn_id: int, path: str, call_key: str | None = None,
         extra = await _round_extra_turn_ids(db, turn_id, session_id, turn_ids)
         diff = await rollback_service.get_file_diff(
             db, session_id=session_id, turn_id=turn_id, workspace=workspace, path=path,
-            call_key=call_key, extra_turn_ids=extra,
+            call_key=call_key, extra_turn_ids=extra, full_file=full_file,
         )
         if diff is None:
             # v36: 区分三种成因——该 turn 完全无写盘记录 / 有记录但路径不匹配。

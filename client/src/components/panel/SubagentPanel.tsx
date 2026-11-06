@@ -16,7 +16,6 @@ import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
 import { parseUtc } from "../../utils/time";
 import { IconCheck, IconChevronDown, IconPause, IconSpinner, IconStop, IconX } from "../icons";
-import { IxBot } from "../iconkit/StackIcons";
 import { useVisibleChat } from "../../store/visibleChat";
 import { Button, Collapse, Dialog, Empty, Tooltip, usePresence } from "../ui";
 import { IconSendStop } from "../iconkit/MorphIcons";
@@ -304,15 +303,6 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
   if (!meta || noOutput) {
     return (
       <div className="subagent-panel">
-        <div className="subagent-panel-top">
-          <div className="subagent-panel-head">
-            <div className="subagent-panel-title">
-              <span className="subagent-panel-icon"><IxBot size={14} /></span>
-              <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
-              <span className="subagent-panel-count">无记录</span>
-            </div>
-          </div>
-        </div>
         <div className="subagent-panel-body">
           <Empty
             size="sm"
@@ -332,18 +322,13 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
     <div className="subagent-panel">
       <div className="subagent-panel-top">
         <div className="subagent-panel-head">
-          <div className="subagent-panel-title">
-            <span className="subagent-panel-icon"><IxBot size={14} /></span>
-            <span className="subagent-panel-name">{agentName || meta?.name || `子代理 #${threadId}`}</span>
-            <span className="subagent-panel-count">{liveCount} 条消息</span>
-          </div>
-          {/* 第二行：状态与元信息。图标与状态文字同包一组、不换行；窄面板下按项省略，不把图标拆到另一行 */}
+          {/* plan-20261105-minimal-panels：标题已在标签页展示，此处只保留状态与操作，减少消息流上方重复信息。 */}
           <div className="subagent-panel-facts">
             <span className="subagent-panel-status" data-state={running ? "wait" : done ? "ok" : failed ? "fail" : stopped ? "stop" : "idle"}>
-              {running && <IconSpinner size={11} />}
+              <span className="subagent-panel-status-icon">{running && <IconSpinner size={11} />}
               {done && <IconCheck size={11} />}
               {failed && <IconX size={11} />}
-              {stopped && <IconPause size={11} />}
+              {stopped && <IconPause size={11} />}</span>
               {/* 失败原因已写在状态文案里，不再用原生 title 重复提示 */}
               <span className="subagent-panel-status-text">
                 {running ? "执行中…" : done ? "已完成"
@@ -362,7 +347,7 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
                 visible={visible}
               />
             )}
-            <Button size="xs" variant="ghost" onClick={() => setFactsOpen((value) => !value)} aria-expanded={factsOpen}>详情</Button>
+            <Button size="xs" variant="ghost" className="subagent-panel-detail-toggle" onClick={() => setFactsOpen((value) => !value)} aria-expanded={factsOpen}>详情</Button>
             {/* plan-565-2323 G8：运行中才给终止入口；与状态/元信息同组右对齐，不挤占标题行 */}
             {running && (
               <Tooltip content="终止这个子代理（不影响主会话）">

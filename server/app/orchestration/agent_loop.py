@@ -214,7 +214,7 @@ async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schem
         reasoning_effort=effort or reasoning_effort or (
             settings.agent_reasoning_effort if tool_schemas else None),
         max_tokens=settings.agent_max_output_tokens or None,
-        session_id=str(session_id),
+        session_id=(f"{session_id}:subagent:{thread_id}" if thread_id and getattr(provider, "api_format", "") == "ta3" else str(session_id)),
         message_id=f"{session_id}-{turn_id}-{step}-retry",
         thinking=_retry_thinking,
         workspace_dir=workspace or None,  # plan-270-1358: ta3 x-ws-id
@@ -1427,7 +1427,7 @@ async def run_agent_loop(
                 # 只保留单条超长工具结果的落盘保护；压缩仅由超设置阈值的
                 # 落库式压缩（可见压缩卡片）完成。
                 # plan-20261020-pts：超长结果落盘到本会话工作区，模型按占位提示 fs_read 才读得回
-                api_messages = build_api_copy(messages, workspace)
+                api_messages = build_api_copy(messages, workspace, preserve_reasoning=getattr(provider, "name", "") == "ta3")
                 # plan-282-1441：把本轮"上下文回收"如实告知用户（此前静默折叠，
                 # 用户只看到占用突然降几十 k，误以为丢历史——即"隐藏压缩"的观感来源）。
                 try:
@@ -1491,7 +1491,7 @@ async def run_agent_loop(
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
-                    api_messages = build_api_copy(messages, workspace)
+                    api_messages = build_api_copy(messages, workspace, preserve_reasoning=getattr(provider, "name", "") == "ta3")
                     _est_after = int((_est_tokens(api_messages) + _tools_tokens) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _used_tokens, _est_after, bool(_cc_pre))
                     # 上下文已被重写，真实基数与估算增量都失效：下一次退回全量估算口径
@@ -1632,7 +1632,7 @@ async def run_agent_loop(
                 reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
                 max_tokens=settings.agent_max_output_tokens or None,
                 # TRAE create_agent_task 要求稳定的云端会话/消息标识；其它 Provider 忽略。
-                session_id=str(session_id),
+                session_id=(f"{session_id}:subagent:{thread_id}" if thread_id and getattr(provider, "api_format", "") == "ta3" else str(session_id)),
                 message_id=f"{session_id}-{turn_id}-{step}",
                 # v21: thinking 模式（provider 会据此发 thinking 参数并移除 temperature）
                 thinking=_thinking_flag,
@@ -5009,13 +5009,12 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # plan-568-2333：子代理工具面必须在**写库之前**定稿并校验。排在 Agent/Task 创建之后
         # 就只能在事后告警——agent 行、task 行、并发名额都已占用，用户看到的是「跑着但永远没结果」。
         # 两道校验都是 fail-closed：解析不出只读工具集、或类型白名单与可用工具无交集，直接拒绝派发。
-        from app.orchestration.tools.registry import tool_registry
-        sub_tools = tool_registry.all_schemas()
+        from app.orchestration.subagent_tools import available_subagent_tools
+        sub_tools = await available_subagent_tools(db, readonly=explore)
 
         # v20: 探索子代理只读工具（探索 = 调研/阅读/分析，不产生写盘副作用）
         if explore:
-            from app.orchestration.subagent_tools import EXPLORE_TOOLS
-            explore_schemas = tool_registry.all_schemas(EXPLORE_TOOLS)
+            explore_schemas = sub_tools
             if not explore_schemas:
                 # 注册表部分模块加载失败 / 工具名漂移时**不能**回落到全量工具：那会把 fs_write、
                 # terminal_exec 一并交给只读子代理，写权限只剩 executor 一层兜底（fail-open）。

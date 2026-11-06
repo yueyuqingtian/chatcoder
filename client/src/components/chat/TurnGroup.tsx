@@ -28,6 +28,7 @@ import {
   isOutsideProcess,
   placeWorkflowNodeCards,
   splitFlowSegments,
+  leadingUserIndex,
 } from "./timeline";
 import { useChatStore } from "../../store/chat";
 import { dropFlowExpand, subagentCollapseKey, turnCollapseKey, useTurnCollapse } from "../../store/flowExpand";
@@ -339,9 +340,8 @@ export const TurnGroup = memo(function TurnGroup({
     flow === "main" && turnId != null
     && roundIds.some((id) => flowErrorTurnId === id || hiddenTurnErrors.includes(id));
 
-  // v41: 首条用户消息（turn 触发消息）固定渲染在 turn 顶部用户消息区；
-  // 其余 user item 为运行中注入，就地渲染在时间序位置（见 flowItems）
-  const firstUserIdx = useMemo(() => items.findIndex((it) => it.kind === "user"), [items]);
+  // plan-20261105-queued-message-order：仅开头的用户消息是发起消息，系统唤醒后的中途输入必须原位显示。
+  const firstUserIdx = useMemo(() => leadingUserIndex(items), [items]);
   // plan-20261015-browser-agent：本轮全部截图卡（大图查看器在本轮截图之间左右切换）
   const shotLeaves = useMemo(
     () => items.flatMap((it) => (it.kind === "shot" ? [it.leaf] : [])),

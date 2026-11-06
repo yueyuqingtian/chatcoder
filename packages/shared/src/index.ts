@@ -606,6 +606,8 @@ export interface ModelOut {
 }
 
 export interface ProviderOut {
+  ta3_alt_base_urls?: string[];
+  ta3_resolved_base_url?: string | null;
   id: number;
   name: string;
   base_url: string | null;

@@ -77,9 +77,10 @@ async def test_catalog_sync_persists_model_key_and_base_url(db, monkeypatch):
     async def _fake_ensure_token(_db, _pid, _base):
         return "ide-session-fake"
 
-    async def _fake_catalog(_base, _token, _client_kwargs=None):
+    async def _fake_catalog(_base, _token, _client_kwargs=None, _provider=None):
         return _assistant_payload()
 
+    await ta3_session.save_auth(db, provider.id, access_token="ide-session-fake")
     monkeypatch.setattr(ta3_session, "ensure_token", _fake_ensure_token)
     monkeypatch.setattr(catalog, "fetch_catalog_raw", _fake_catalog)
 

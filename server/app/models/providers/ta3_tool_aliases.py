@@ -131,7 +131,7 @@ ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
         "acceptance_criteria": None,
         "explore": None,
         "mode": None,
-        "purpose": None,
+        "purpose": "purpose",
     },
     "skill_view": {"name": "skillName"},
 }
@@ -249,9 +249,7 @@ _READONLY_SUBAGENT_TYPES = ("explore", "plan")
 
 
 def _restore_read(args: dict) -> dict:
-    # 官方 Read 无分页参数（整文件读入，上限 220KB）；本项目 fs_read 按窗口分页，
-    # 默认窗口由工具决定，长文件按结果页脚给出的 offset 续读（offset/limit 原样透传）。
-    # 不在这里注入 limit：注入值会随历史回放成为 schema 里不存在的参数。
+    # plan-20261105-file-tools：执行定义已暴露 offset/limit，入站与历史均保留分页范围。
     # document / docx 已在键名表里丢弃——ta3.py 只换参数不换工具名，无法改派 read_attachment。
     return args
 
@@ -369,7 +367,8 @@ def _restore_subagent(raw: dict, args: dict) -> dict:
     if "inherit_context" in args:
         args["inherit_context"] = _as_bool(args["inherit_context"], False)
     # 官方 Explore（只读研究）/ Plan（只读出计划）→ 本项目只读子代理；其余缺省为可写
-    if str(raw.get("subagent_type") or "").strip().lower() in _READONLY_SUBAGENT_TYPES:
+    if (str(raw.get("mode") or "").strip().lower() not in {"readonly", "agent"}
+            and str(raw.get("subagent_type") or "").strip().lower() in _READONLY_SUBAGENT_TYPES):
         args["explore"] = True
         args["mode"] = "readonly"
     return args
@@ -400,17 +399,11 @@ def restore_args(ta3_name: str, args: dict) -> dict:
 
 # ─────────────────── 出站值级换算（真实参数 → 官方参数，用于历史回放） ───────────────────
 
-# 历史回放时允许保留的非官方键：fs_read 结果页脚明确指引「用 offset 续读」，
-# 去掉它们会让同一 Read(filepath) 在历史里返回不同内容，模型无从理解分页
-_HISTORY_EXTRA_KEYS: dict[str, frozenset[str]] = {
-    "Read": frozenset({"offset", "limit"}),
-}
+def _execution_props(alias: str) -> set[str] | None:
+    from app.models.providers.ta3_tool_schemas import execution_schema
 
-
-def _official_props(alias: str) -> set[str] | None:
-    from app.models.providers.ta3_tool_schemas import TA3_OFFICIAL_DEFINITIONS
-
-    d = TA3_OFFICIAL_DEFINITIONS.get(alias)
+    schema = execution_schema(alias)
+    d = schema["function"] if schema else None
     if d is None:
         return None
     return set((d.get("parameters") or {}).get("properties") or {})
@@ -485,6 +478,9 @@ def _disguise_bash(args: dict) -> dict:
 
 def _disguise_subagent(real: dict, args: dict) -> dict:
     mode = str(real.get("mode") or "").strip().lower()
+    # plan-20261105-subagent-tools：历史回放保留显式模式，避免角色提示覆盖真实执行方式。
+    if mode in {"readonly", "agent"}:
+        args["mode"] = mode
     if mode == "readonly" or (not mode and _as_bool(real.get("explore"), False)):
         args["subagent_type"] = "Explore"
     acceptance = str(real.get("acceptance_criteria") or "").strip()
@@ -499,7 +495,7 @@ def _disguise_subagent(real: dict, args: dict) -> dict:
 def disguise_args(real_name: str, args: dict) -> dict:
     """出站：真实参数 → ta3 参数（键名改写 + 值级换算 + 官方参数面收敛）。
 
-    内置通道的结果只保留官方 schema 里声明的键（例外见 `_HISTORY_EXTRA_KEYS`），
+    plan-20261105-file-tools：内置通道只保留实际下发的执行定义声明的键，
     保证历史回放的调用参数与当轮下发的 schema 一致；拓展/MCP 通道原样透传。
     """
     src = copy.deepcopy(args) if isinstance(args, dict) else {}
@@ -518,11 +514,10 @@ def disguise_args(real_name: str, args: dict) -> dict:
             out = _disguise_subagent(src, out)
     if alias is None:
         return out
-    props = _official_props(alias)
+    props = _execution_props(alias)
     if props is None:
         return out
-    keep = props | _HISTORY_EXTRA_KEYS.get(alias, frozenset())
-    return {k: v for k, v in out.items() if k in keep}
+    return {k: v for k, v in out.items() if k in props}
 
 
 # 自检：内置映射的每个目标名都必须落在官方白名单里（漏配/多配在此暴露）

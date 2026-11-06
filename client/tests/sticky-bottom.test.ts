@@ -81,6 +81,7 @@ const resize = () => { for (const cb of roCallbacks) cb(); };
 const dist = (el: FakeScroller) => el.scrollHeight - el.clientHeight - el.scrollTop;
 
 function setup() {
+  doc.visibilityState = "visible";
   roCallbacks.length = 0;
   selectionText = "";
   const el = new FakeScroller();
@@ -200,6 +201,74 @@ function setup() {
   assert(dist(el) === 100, "requestPin() 不同步执行");
   await Promise.resolve();
   assert(dist(el) === 0, "微任务里完成贴底");
+  s.detach();
+}
+
+// plan-20261105-scroll-wake：恢复重测可先把内容缩至一屏，再恢复真实高度。
+{
+  const { el, s } = setup();
+  el.dispatch("wheel", { deltaY: -120, deltaX: 0, target: el });
+  el.scrollBy(-500);
+  const readingTop = el.scrollTop;
+  doc.visibilityState = "hidden";
+  doc.dispatch("visibilitychange");
+  el.scrollHeight = 600;
+  el.scrollTop = 0;
+  el.dispatch("scroll");
+  resize();
+  assert(!s.isFollowing(), "隐藏期间临时到底不恢复跟随");
+  doc.visibilityState = "visible";
+  resize();
+  el.dispatch("scroll");
+  assert(!s.isFollowing(), "恢复重测暂时只有一屏仍保留阅读模式");
+  el.scrollHeight = 2600;
+  el.scrollTop = readingTop;
+  resize();
+  win.dispatch("focus");
+  doc.dispatch("visibilitychange");
+  await sleep(20);
+  assert(!s.isFollowing() && el.scrollTop === readingTop, "阅读锚点恢复后焦点与可见事件不拉到底部");
+  s.detach();
+}
+
+{
+  const { el, s } = setup();
+  doc.visibilityState = "hidden";
+  doc.dispatch("visibilitychange");
+  el.scrollHeight += 700;
+  resize();
+  assert(s.isFollowing() && dist(el) === 700, "原本贴底时隐藏期间保留跟随且不写滚动位置");
+  doc.visibilityState = "visible";
+  doc.dispatch("visibilitychange");
+  await sleep(20);
+  assert(s.isFollowing() && dist(el) === 0, "尺寸不变的窗口恢复后继续贴底");
+  s.detach();
+}
+
+{
+  const { el, s } = setup();
+  s.release();
+  el.scrollBy(-500);
+  el.scrollBy(500);
+  assert(!s.isFollowing(), "程序滚到底部不擅自恢复跟随");
+  el.scrollHeight += 300;
+  resize();
+  assert(!s.isFollowing() && dist(el) === 300, "随后内容增长仍保留阅读位置");
+  el.dispatch("wheel", { deltaY: 300, deltaX: 0, target: el });
+  el.scrollBy(270);
+  assert(s.isFollowing() && dist(el) === 0, "用户主动向下滚入近底区恢复跟随");
+  s.detach();
+}
+
+{
+  const { el, s } = setup();
+  s.release();
+  el.scrollBy(-400);
+  el.dispatch("pointerdown", { target: innerNode, clientX: 100 });
+  el.dispatch("wheel", { deltaY: 120, deltaX: 0, target: el });
+  win.dispatch("blur");
+  el.scrollBy(400);
+  assert(!s.isFollowing(), "失焦前未结束的手势不让恢复时的程序滚动开启跟随");
   s.detach();
 }
 

@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 # 团队相关表 (team_agents/teams/agent_templates/session_members/task_edges/decisions)
 # 已被 v2 废弃，不再维护迁移。
 _MIGRATIONS: list[tuple[str, str, str]] = [
+    # plan-20261106-ta3-080：旧会话必须重新授权，不能与新客户端凭据混用。
+    ("providers", "ta3_alt_base_urls", "JSON"),
+    ("ta3_auth", "auth_version", "INTEGER"),
+    ("ta3_auth", "oauth_client_id", "VARCHAR(80)"),
+    ("ta3_auth", "issued_at", "VARCHAR(40)"),
+    ("ta3_auth", "access_expires_at", "VARCHAR(40)"),
+    ("ta3_auth", "session_generation", "INTEGER DEFAULT 0 NOT NULL"),
     # plan-20261103-fork：旧会话保持空值，不回填历史分支。
     ("sessions", "fork_info", "JSON"),
     ("sessions", "fork_snapshot", "JSON"),
@@ -857,9 +864,48 @@ async def run_migrations(db: AsyncSession) -> dict:
         except Exception:
             pass
 
+    await _migrate_ta3_080(db)
+
     if migrated:
         logger.info("数据库迁移完成: 新增 %d 列, 跳过 %d, 失败 %d", migrated, skipped, errors)
     return {"migrated": migrated, "skipped": skipped, "errors": errors}
+
+
+async def _migrate_ta3_080(db: AsyncSession) -> None:
+    """plan-20261106-ta3-080：仅失效旧鉴权，保留模型主键和历史会话绑定。"""
+    from sqlalchemy import update
+    from app.auth.ta3.endpoints import AUTH_VERSION, DEFAULT_TA3_API_BASE, DEFAULT_ALT_BASES, LEGACY_API_BASE
+    from app.persistence.models.model_reg import Provider, Model, ProviderCredential
+    from app.persistence.models.ta3_auth import Ta3Auth
+
+    providers = (await db.execute(select(Provider).where(Provider.api_format == "ta3"))).scalars().all()
+    for provider in providers:
+        if not provider.base_url or provider.base_url.rstrip("/") == LEGACY_API_BASE:
+            provider.base_url = DEFAULT_TA3_API_BASE
+            if provider.ta3_alt_base_urls is None:
+                provider.ta3_alt_base_urls = list(DEFAULT_ALT_BASES)
+        elif provider.ta3_alt_base_urls is None:
+            provider.ta3_alt_base_urls = list(DEFAULT_ALT_BASES) if provider.base_url.rstrip("/") == DEFAULT_TA3_API_BASE else []
+        rows = (await db.execute(select(Ta3Auth).where(Ta3Auth.provider_id == provider.id))).scalars().all()
+        legacy = [r for r in rows if (r.auth_version or 0) < AUTH_VERSION]
+        if not legacy:
+            continue
+        for row in legacy:
+            row.access_token = row.refresh_token = None
+            row.catalog = None
+            row.auth_version = AUTH_VERSION
+            row.oauth_client_id = "ta3-desktop"
+            row.session_generation = (row.session_generation or 0) + 1
+            row.issued_at = row.access_expires_at = None
+        provider.auth_status = "login_required"
+        await db.execute(update(Model).where(Model.provider_id == provider.id).values(api_key=None))
+        credentials = (await db.execute(select(ProviderCredential).where(ProviderCredential.provider_id == provider.id))).scalars().all()
+        for cred in credentials:
+            if (cred.extra or {}).get("kind") == "ta3_account" or cred.id in {r.credential_id for r in legacy}:
+                cred.status = "error"
+                cred.last_error = "TA3 登录方式已升级，请重新网页登录"
+                cred.cooldown_until = None
+    await db.commit()
 
 
 # 侧边对话创建时的固定占位标题（sessions.create_side_session），回填据此识别存量侧边对话

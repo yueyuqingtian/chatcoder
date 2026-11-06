@@ -908,7 +908,10 @@ def _build_run_spec(*, agent, task_id, turn_id, task_title, workspace, tool_sche
 
 def _dump_message(m) -> dict | None:
     if isinstance(m, ChatMessage):
-        return m.model_dump(exclude_none=True)
+        payload = m.model_dump(exclude_none=True)
+        if m.skill_load_snapshots:
+            payload["skill_load_snapshots"] = m.skill_load_snapshots
+        return payload
     if isinstance(m, dict):
         return {k: v for k, v in m.items() if v is not None}
     return None
@@ -958,6 +961,18 @@ def _build_tool_schemas(names: list[str] | None) -> list[dict]:
     # plan-474-2105：续跑沿用旧检查点里的工具名，可能含已禁用的「问用户 / 派下级」工具——
     # 与 spawn 路径同口径剥离，否则续跑等于绕过能力边界。
     return strip_for_subagent(out)
+
+
+async def _restore_tool_schemas(spec: dict) -> list[dict]:
+    """plan-20261105-subagent-tools：重启后先重建已启用拓展，再与检查点的授权工具求交集。"""
+    from app.orchestration.subagent_tools import available_subagent_tools, SUBAGENT_OWN_TOOLS
+
+    async with async_session_factory() as db:
+        schemas = await available_subagent_tools(db, readonly=spec.get("subagent_mode") == "readonly")
+    names = spec.get("tool_names")
+    wanted = set(names) if names else None
+    return [s for s in [*schemas, *SUBAGENT_OWN_TOOLS]
+            if wanted is None or s["function"]["name"] in wanted]
 
 
 async def _persist_agent_state(agent_id: int, status: str, checkpoint: dict | None) -> None:
@@ -1065,7 +1080,7 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     handle.last_activity_at = handle.started_at
     handle.stall_detected = False
     handle.run_spec = spec
-    handle.tool_schemas = _build_tool_schemas(spec.get("tool_names"))
+    handle.tool_schemas = await _restore_tool_schemas(spec)
     handle.live_messages = messages
     manager._handles[agent_id] = handle
     # 续跑是新一轮交付：清除该子代理的旧“已读/旧完成通知”，保证续跑结果会正常送达主代理
@@ -1124,6 +1139,7 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     if live is not None and live.live_messages:
         messages = _sanitize_messages(list(live.live_messages))
         spec = dict(live.run_spec or {})
+        live.tool_schemas = await _restore_tool_schemas(spec)
     elif ck.get("messages"):
         try:
             messages = _sanitize_messages([ChatMessage(**m) for m in ck["messages"]])
@@ -1134,7 +1150,7 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
         live = live or SubagentHandle(agent_id=agent_id)
         live.task_title = live.task_title or spec.get("task_title", "") or row_name or ""
         live.run_spec = spec
-        live.tool_schemas = _build_tool_schemas(spec.get("tool_names"))
+        live.tool_schemas = await _restore_tool_schemas(spec)
         manager._handles[agent_id] = live
     else:
         return "not_resumable", "没有该子代理的上下文"
