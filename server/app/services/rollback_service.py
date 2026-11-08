@@ -389,10 +389,9 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         return {"ok": False, "reason": "该 turn 已回滚，不可重复操作"}
 
     workspace = await _workspace_for_session(db, snap.session_id)
-    has_writes = bool(await list_turn_writes(db, snap.session_id, turn_id))
 
     # 1. 预检：有冲突且不允许部分回滚时，什么都不做
-    if workspace and has_writes:
+    if workspace:
         plan = await _plan_for_turn(db, snap.session_id, turn_id, workspace)
         if plan.conflicts and not allow_partial:
             return _conflict_result(turn_id, plan)
@@ -402,12 +401,51 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     #    （延迟 import 避免与 engine 模块循环依赖）
     from app.orchestration import engine
     logger.warning("[cancel] 回滚流程先停止运行中任务 turn=%s", turn_id)
-    await engine.cancel_turn(turn_id, source="rollback")
-    if turn_id in engine._running_turns:
-        for _ in range(30):
-            if turn_id not in engine._running_turns:
-                break
-            await asyncio.sleep(0.1)
+    # plan-20261107-rollback-audit：撤销旧轮时，真正持有上下文和写盘任务的可能是后续轮次。
+    from app.persistence.models.turn import Turn
+    affected_turn_ids = set((await db.execute(select(Turn.id).where(
+        Turn.session_id == snap.session_id, Turn.id >= turn_id,
+    ))).scalars().all())
+    await engine.cancel_workflow_wakeup(snap.session_id)
+    await engine.cancel_subagent_wakeup(snap.session_id)
+    pending_tasks: set[asyncio.Task] = set()
+    # plan-20261107-rollback-audit：主轮可能已收尾，后台子代理仍由会话级 manager 托管。
+    manager = engine.peek_subagent_manager(snap.session_id)
+    if manager is not None:
+        for handle in list(manager._handles.values()):
+            if handle.turn_id in affected_turn_ids:
+                handle.cancel_requested = True
+                if handle.task is not None and not handle.task.done():
+                    pending_tasks.add(handle.task)
+                    handle.task.cancel()
+    from app.persistence.models.workflow import WorkflowRun
+    from app.orchestration.workflow import service as workflow_service
+    programs = (await db.execute(select(WorkflowRun.id).where(
+        WorkflowRun.session_id == snap.session_id, WorkflowRun.parent_run_id.is_(None),
+        ((WorkflowRun.origin_turn_id >= turn_id) | (WorkflowRun.last_turn_id >= turn_id)),
+        WorkflowRun.status.notin_(["succeeded", "failed", "cancelled"]),
+    ))).scalars().all()
+    if programs:
+        runtime = workflow_service.get_runtime()
+        for program_id in programs:
+            pending_tasks.update(task for node_id, task in list(runtime._tasks.items())
+                                 if runtime._meta.get(node_id, {}).get("program") == program_id and not task.done())
+            await runtime.cancel(program_id)
+    for tid in affected_turn_ids:
+        task = engine._turn_tasks.get(tid)
+        if task is not None and not task.done():
+            pending_tasks.add(task)
+        await engine.cancel_turn(tid, source="rollback")
+    if pending_tasks:
+        _, pending = await asyncio.wait(pending_tasks, timeout=3)
+        if pending:
+            return {"ok": False, "reason": "后台任务尚未停止，请稍后重试撤销"}
+    for _ in range(30):
+        if not affected_turn_ids.intersection(engine._running_turns):
+            break
+        await asyncio.sleep(0.1)
+    if affected_turn_ids.intersection(engine._running_turns):
+        return {"ok": False, "reason": "后续任务尚未停止，请稍后重试撤销"}
 
     # 2.1 DB 层兜底：将该 turn 之后 pending/running 的任务置 cancelled
     from app.services import task_service
@@ -420,9 +458,14 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
     try:
         from app.orchestration.tools.bg_process import bg_process_registry
         await bg_process_registry.kill_since(snap.session_id, turn_id)
-    except Exception:  # noqa: BLE001 — 终止失败不能阻断回滚主流程
+        if any(e.session_id == snap.session_id and e.turn_id is not None and e.turn_id >= turn_id
+               and e.returncode is None and e.proc.returncode is None
+               for e in bg_process_registry._entries.values()):
+            return {"ok": False, "reason": "后台命令尚未退出，未修改文件和消息，请稍后重试"}
+    except Exception:  # noqa: BLE001
         logger.warning("[rollback] 终止该轮后台命令失败 session=%s turn=%s",
                        snap.session_id, turn_id, exc_info=True)
+        return {"ok": False, "reason": "未能停止后台命令，未修改文件和消息"}
 
     # 2.3 plan-20261025-bgturn / plan-20261026-notice-turn：丢掉邮箱队列里归属于该轮及之后的通知。
     #     这些通知（后台命令完成 / 被停止、子代理提问 / 进度上报 / 完成行）一旦被下一轮
@@ -448,13 +491,13 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         if t.artifact_ids:
             rollback_task_ids.append(t.id)
     review_res = await db.execute(
-        select(FileReview).where(FileReview.turn_id >= turn_id)
+        select(FileReview).where(FileReview.turn_id.in_(affected_turn_ids))
     )
     review_ids = [rv.id for rv in review_res.scalars().all()]
 
     # 3. 文件回滚：停止之后按最终盘面重新规划，再原子应用（不再依赖 git，非 git 仓库可用）
     later_snaps = await _snapshots_from(db, snap.session_id, turn_id)
-    if workspace and has_writes:
+    if workspace:
         plan = await _plan_for_turn(db, snap.session_id, turn_id, workspace)
         if plan.conflicts and not allow_partial:
             return _conflict_result(turn_id, plan)
@@ -464,7 +507,7 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         conflicts = _conflict_list(plan)
         file_result = {
             "ok": True,
-            "skipped": False,
+            "skipped": not plan.finals,
             "restored": applied.get("restored", 0),
             "deleted": applied.get("deleted", 0),
             "failed": len(conflicts),
@@ -476,21 +519,8 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
             ),
         }
     else:
-        # 无写盘记录：优先从快照显式登记的 checkpoint 恢复（不依赖 git，非 git 仓库可用）。
-        ckpt_result = await _restore_checkpoints_for_turn(workspace, snap)
-        if ckpt_result.get("restored") or ckpt_result.get("deleted"):
-            file_result = ckpt_result
-        else:
-            # 安全准则（v38）：无写盘记录且无 checkpoint 时严格跳过文件操作，
-            # 绝对严禁隐式执行 `git checkout HEAD`（Git HEAD 往往落后多轮，会导致近期修改意外被抹杀）。
-            file_result = {
-                "ok": True,
-                "skipped": True,
-                "restored": 0,
-                "deleted": 0,
-                "failed": 0,
-                "reason": "该 turn 无文件写入记录，无需恢复",
-            }
+        file_result = {"ok": True, "skipped": True, "restored": 0, "deleted": 0,
+                       "failed": 0, "reason": "未找到工作区，已跳过文件操作"}
 
     # v2.2 (plan-88): 回滚完成后清理本次回滚涉及快照的 checkpoint 文件（配置开启时）。
     # 备份已完成使命（精确回滚用写盘记录，checkpoint 仅兜底），删除磁盘文件并
@@ -536,11 +566,9 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         )
     )
     sub_agents = list(sub_res.scalars().all())
-    sub_ids_set = {a.id for a in sub_agents}
     msgs = [
         m for m in res.scalars().all()
         if m.turn_id is not None and m.turn_id >= turn_id
-        and (m.thread_id is None or m.thread_id in sub_ids_set)
     ]
     user_text = None
     user_attachments = None
@@ -586,6 +614,22 @@ async def rollback_turn(db: AsyncSession, *, turn_id: int,
         ))
         if soft_msg_ids:
             s.execute(_update(Message).where(Message.id.in_(soft_msg_ids)).values(deleted=True))
+        # plan-20261107-rollback-audit：摘要可能跨越撤销边界；丢弃派生缓存并让保留原文重新进入上下文。
+        from app.persistence.models.message import Session as _Session
+        from app.persistence.models.memory import MemoryEntry
+        session_row = s.get(_Session, snap.session_id)
+        if session_row is not None:
+            ctx = dict(session_row.shared_context or {})
+            for key in ("summary", "summaries", "summarized_ids", "compactions", "compacted_ids",
+                        "compacted_floor", "compacted_exceptions", "injected_compactions"):
+                ctx.pop(key, None)
+            session_row.shared_context = ctx
+        s.execute(_update(Message).where(
+            Message.session_id == snap.session_id, Message.msg_type == "summary",
+        ).values(deleted=True))
+        s.execute(delete(MemoryEntry).where(
+            MemoryEntry.session_id == snap.session_id, MemoryEntry.turn_id >= turn_id,
+        ))
         if sub_agent_ids:
             s.execute(_update(Agent).where(Agent.id.in_(sub_agent_ids)).values(status="terminated"))
         s.execute(_update(_Turn).where(
@@ -657,9 +701,8 @@ async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: in
     """统计本次回滚将连带撤销的任务与消息数（与 rollback_turn 执行口径一致）。
 
     任务：该 turn 及其之后 pending/running 的任务（将被置 cancelled）。
-    消息：主线程该 turn 及其之后未删消息 + 该 turn 及其之后子代理线程消息（将被软删）。
+    消息：该 turn 及其之后的全部未删消息（含子代理线程，与执行口径一致）。
     """
-    from app.persistence.models.agent import Agent
     from app.persistence.models.task import Task
 
     res = await db.execute(
@@ -673,14 +716,6 @@ async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: in
         if (t.turn_id or 0) >= turn_id:
             tasks += 1
 
-    sub_res = await db.execute(
-        select(Agent).where(
-            Agent.session_id == session_id,
-            Agent.kind == "sub",
-            Agent.turn_id >= turn_id,
-        )
-    )
-    sub_ids = {a.id for a in sub_res.scalars().all()}
     msg_res = await db.execute(
         select(Message).where(
             Message.session_id == session_id,
@@ -689,10 +724,7 @@ async def count_rollback_affected(db: AsyncSession, session_id: int, turn_id: in
             Message.turn_id >= turn_id,
         )
     )
-    messages = sum(
-        1 for m in msg_res.scalars().all()
-        if m.thread_id is None or m.thread_id in sub_ids
-    )
+    messages = len(msg_res.scalars().all())
     return {"tasks": tasks, "messages": messages}
 
 
@@ -2366,15 +2398,16 @@ def _read_disk_text(workspace: str, rel: str) -> tuple[str | None, Any]:
 _REASON_MODIFIED = "文件在本轮之后被修改过（手动改动或其他程序所致），撤销会覆盖这些改动"
 _REASON_DELETED = "文件在本轮之后已被删除，无法恢复到本轮之前的状态"
 _REASON_RECREATED = "本轮删除了该文件，之后它又被重新创建（或恢复）了，撤销会覆盖现有文件"
-_REASON_CHAIN = "文件在相邻两轮之间被改动过，无法安全衔接撤销"
+_REASON_CHAIN = "文件在两次 AI 修改之间被改动过，无法安全衔接撤销"
 _REASON_NO_BACKUP = "缺少写盘前备份，无法恢复该文件"
+_REASON_UNVERIFIED = "缺少完整修改记录，无法确认文件是否被手动修改，已跳过"
 
 
 def _state_mismatch_reason(workspace: str, rec: RollbackWrite) -> str | None:
     """磁盘上的文件是否仍是这条记录写完之后的样子；不是就返回原因（有人在这之后动过它）。
 
     优先比对写后字节指纹（不受 GBK / BOM / 换行归一化影响）；旧记录没有指纹时，
-    文本记录退回文本比较（与记录时同一读取口径），二进制旧记录无从校验，放行。
+    文本记录退回文本比较（与记录时同一读取口径）；无法核验的二进制旧记录保守跳过。
     """
     rel = rec.path
     exists = path_exists(workspace, rel)
@@ -2385,11 +2418,15 @@ def _state_mismatch_reason(workspace: str, rec: RollbackWrite) -> str | None:
     digest = getattr(rec, "after_hash", None)
     if digest:
         cur = file_digest(workspace, rel)
-        return _REASON_MODIFIED if (cur is not None and cur != digest) else None
+        return _REASON_UNVERIFIED if cur is None else (_REASON_MODIFIED if cur != digest else None)
     if not getattr(rec, "binary", False) and rec.new_content is not None:
         cur_text = _read_file_text(workspace, rel)
         if cur_text is not None and cur_text != rec.new_content:
             return _REASON_MODIFIED
+        if cur_text is None:
+            return _REASON_UNVERIFIED
+    elif getattr(rec, "binary", False):
+        return _REASON_UNVERIFIED
     return None
 
 
@@ -2398,7 +2435,7 @@ def _chain_gap_reason(workspace: str, prev_last: RollbackWrite, next_first: Roll
     """相邻两轮的衔接校验：后一轮写之前的状态，必须等于前一轮写完之后的状态。
     只在回滚多轮（同一文件被连续几轮改写）时才会用到。"""
     prev_absent = rec_exists_after(prev_last) is False
-    next_absent = getattr(next_first, "op", None) == OP_CREATE
+    next_absent = not rec_existed_before(next_first)
     if prev_absent != next_absent:
         return _REASON_CHAIN
     if prev_absent:
@@ -2406,9 +2443,13 @@ def _chain_gap_reason(workspace: str, prev_last: RollbackWrite, next_first: Roll
     digest = getattr(prev_last, "after_hash", None)
     if digest and next_ckpt:
         ck_digest = file_digest(workspace, next_ckpt)
-        if ck_digest is not None and ck_digest != digest:
-            return _REASON_CHAIN
-    return None
+        if ck_digest is not None:
+            return _REASON_CHAIN if ck_digest != digest else None
+    # plan-20261107-rollback-audit：旧文本记录未登记 checkpoint 时也必须校验衔接，不能跨过用户手改。
+    if not prev_last.binary and not next_first.binary:
+        if prev_last.new_content is not None and next_first.old_content is not None:
+            return _REASON_CHAIN if prev_last.new_content != next_first.old_content else None
+    return _REASON_UNVERIFIED
 
 
 def _plan_path_grouped(plan: RollbackPlan, workspace: str, rel: str, recs: list[RollbackWrite],
@@ -2445,6 +2486,12 @@ def _plan_path_grouped(plan: RollbackPlan, workspace: str, rel: str, recs: list[
             if reason:
                 plan.steps.append(_Step(rel, groups[i][0].turn_id, "noop", True, reason))
                 return
+        for group in groups:
+            for prev, following in zip(group, group[1:]):
+                reason = _chain_gap_reason(workspace, prev, following, None)
+                if reason:
+                    plan.steps.append(_Step(rel, following.turn_id, "noop", True, reason))
+                    return
     if first.op == OP_CREATE:
         if path_exists(workspace, rel):
             plan.finals[rel] = _FinalOp(kind="delete")
@@ -2474,6 +2521,14 @@ def _plan_path_legacy(plan: RollbackPlan, workspace: str, rel: str, recs: list[R
     """
     virt: dict[str, object] = {}
     tfs: dict[str, Any] = {}
+    # plan-20261107-rollback-audit：混合格式与旧二进制记录同样不能绕过修改链校验。
+    if strict:
+        for prev, following in zip(recs, recs[1:]):
+            ckpt = ckpt_for(following) if prev.turn_id != following.turn_id else None
+            reason = _chain_gap_reason(workspace, prev, following, ckpt)
+            if reason:
+                plan.steps.append(_Step(rel, following.turn_id, "noop", True, reason))
+                return
 
     def current(r: str) -> object:
         if r not in virt:
@@ -2517,6 +2572,12 @@ def _plan_path_legacy(plan: RollbackPlan, workspace: str, rel: str, recs: list[R
             plan.steps.append(_Step(rel, rec.turn_id, "noop", True, "同一文件存在二进制改动，无法安全合并，已跳过"))
             continue
         before, after = rec.old_content, rec.new_content
+        if strict and cur != after:
+            # plan-20261107-rollback-audit：反推中遇到断链，撤回之前已规划的步骤，整文件保持现状。
+            plan.finals.pop(rel, None)
+            plan.steps.append(_Step(rel, rec.turn_id, "noop", True, _REASON_CHAIN))
+            blocked = True
+            continue
         if before is None:
             # 该次写盘新建了文件：回滚 = 删除；盘面已被手动修改则保留
             if cur is not None and cur == after:
@@ -2576,6 +2637,9 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
         else:
             _plan_path_legacy(plan, workspace, rel, recs, ckpt_for, strict=strict)
 
+    # plan-20261107-rollback-audit：任何一步断链都整文件跳过，不能留下该文件更晚步骤的部分恢复。
+    for step in plan.conflicts:
+        plan.finals.pop(step.path, None)
     # 只保留真正改变磁盘的终态：内容与盘面一致的写回、盘面已不存在的删除、备份与盘面字节相同的恢复都不做
     for rel in list(plan.finals):
         op = plan.finals[rel]
@@ -2723,7 +2787,23 @@ async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, worksp
             drop.add((tid, p))
     if drop:
         writes = [w for w in writes if (int(w.turn_id), write_path_key(w.path)) not in drop]
-    return build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
+    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
+    recorded = {(w.turn_id, write_path_key(w.path)) for w in writes}
+    reported: set[str] = set()
+    # plan-20261107-rollback-audit：只有写前备份不足以识别手改，预览与执行均保守跳过。
+    for snap in snaps.values():
+        paths = [item.get("path") for item in (snap.file_list or []) if isinstance(item, dict)]
+        paths += list(snap.new_files or [])
+        for path in paths:
+            if path and (snap.turn_id, write_path_key(path)) not in recorded:
+                rel = write_path_key(path)
+                if rel in reported:
+                    continue
+                reported.add(rel)
+                plan.finals.pop(rel, None)
+                plan.disk[rel] = _read_file_text(workspace, rel) if _is_safe_rel_path(rel) else None
+                plan.steps.append(_Step(rel, snap.turn_id, "noop", True, _REASON_UNVERIFIED))
+    return plan
 
 
 async def build_turn_preview(db: AsyncSession, turn_id: int) -> dict:
@@ -2736,7 +2816,7 @@ async def build_turn_preview(db: AsyncSession, turn_id: int) -> dict:
     workspace = await _workspace_for_session(db, snap.session_id)
     files: list[dict] = []
     conflicts: list[dict] = []
-    if workspace and await list_turn_writes(db, snap.session_id, turn_id):
+    if workspace:
         plan = await _plan_for_turn(db, snap.session_id, turn_id, workspace)
         files = plan_preview_rows(plan)
         conflicts = _conflict_list(plan)

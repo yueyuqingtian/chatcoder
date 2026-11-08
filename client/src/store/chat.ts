@@ -2705,11 +2705,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { currentSessionId } = get();
     if (!currentSessionId) return false;
     try {
-      // 若该 turn 正在运行，先取消
-      if (get().runningTurnId === turnId) {
-        await api.cancelTurn(turnId);
-        set({ runningTurnId: null, isRunning: false });
-      }
+      // plan-20261107-rollback-audit：服务端在确认后统一停止目标及后续轮次，避免取消与撤销之间竞态。
       const result = await api.rollbackTurn(turnId, { restore_to_composer: restoreToComposer, allow_partial: allowPartial });
       // v2.2: 后端原样返回 content.attachments，结构即 AttachmentInfo；校验 file_id 后回填
       const restoredAttachments: AttachmentInfo[] = Array.isArray(result.user_attachments)
@@ -2777,11 +2773,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { currentSessionId } = get();
     if (!currentSessionId) return false;
     try {
-      // 若该 turn 正在运行，先取消
-      if (get().runningTurnId === turnId) {
-        await api.cancelTurn(turnId);
-        set({ runningTurnId: null, isRunning: false });
-      }
+      // plan-20261107-rollback-audit：预览只读，关闭弹窗不应悄悄停止执行。
       const preview = await api.rollbackPreview(turnId);
       set({ rollbackPending: { turnId, files: preview.files, conflicts: preview.conflicts ?? [], affected: preview.affected } });
       return true;

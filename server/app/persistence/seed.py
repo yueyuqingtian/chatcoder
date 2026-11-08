@@ -138,86 +138,25 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
     """v2.2 (对齐 zcode 3.13): 内置子代理类型 Explore / general（幂等）。"""
     from app.persistence.models.subagent_profile import SubagentProfile
 
-    # S10（plan-41-197）：两个系统子代理的默认工具集重规划——
-    #   · explore：只读探索（读/搜/网/图），不含任何写盘与执行类工具；
-    #   · general：常用工作集（读+写+执行+搜索），不再是“全量”（含高风险与冷门工具）。
-    # plan-20261016-ux（问题 7）：默认工具集补齐——两类子代理都缺符号检索 / 文件骨架 / 技能查阅
-    # （已开索引的项目里只能逐个文件 grep）；general 还缺 git 与后台命令的查询 / 终止
-    # （能以后台方式启动命令却无法查看状态或停止）以及预设检查 ci_run。
+    # plan-20261107-subagent-mode-tools：设置已取消工具白名单，初始化不能重新植入隐藏限制。
     presets = [
         {
             "name": "explore",
-            "description": "只读探索代理：搜索/阅读代码，不可写盘",
-            "tools_whitelist": [
-                "fs_read", "fs_list", "fs_grep", "git_diff",
-                "codebase_search", "symbol_search", "outline", "memory_search",
-                "web_fetch", "web_search", "view_image", "read_attachment",
-                "skill_view",
-            ],
-            "system_prompt": (
-                "你是代码探索代理，只能读取与搜索。请全面定位相关代码并给出结论，"
-                "不要修改任何文件。"
-            ),
+            "description": "只读探索代理：查看与调研，不执行写入操作",
+            "system_prompt": "你是只读探索代理，请使用提供的工具进行调研并给出结论，不要修改文件或操作界面。",
         },
         {
             "name": "general",
-            "description": "通用代理：常用读/写/执行工具集",
-            "tools_whitelist": [
-                "fs_read", "fs_list", "fs_grep", "fs_write",
-                "editor_apply_diff", "multi_file_edit", "terminal_exec",
-                "terminal_bg_status", "terminal_bg_kill", "ci_run",
-                "git", "git_diff", "codebase_search", "symbol_search", "outline", "memory_search",
-                "web_fetch", "web_search",
-                "todo_write", "ask_user_question", "skill_view",
-                "view_image", "read_attachment",
-            ],
+            "description": "通用代理：按智能体模式使用已启用工具",
             "system_prompt": None,
         },
     ]
-    # 历代默认值：用户白名单与其中任一**完全一致**才视为「未自定义」，升级到新默认（幂等，不覆盖自定义）
-    _PAST_DEFAULTS: dict[str, list[list[str]]] = {
-        "explore": [
-            # S10 之前
-            ["fs_read", "fs_list", "fs_grep", "git_diff",
-             "web_fetch", "web_search", "codebase_search", "memory_search"],
-            # S10（plan-41-197）
-            ["fs_read", "fs_list", "fs_grep", "git_diff",
-             "codebase_search", "memory_search",
-             "web_fetch", "web_search", "view_image", "read_attachment"],
-        ],
-        "general": [
-            # S10（plan-41-197）
-            ["fs_read", "fs_list", "fs_grep", "fs_write",
-             "editor_apply_diff", "multi_file_edit", "terminal_exec",
-             "git_diff", "codebase_search", "memory_search",
-             "web_fetch", "web_search",
-             "todo_write", "ask_user_question",
-             "view_image", "read_attachment"],
-        ],
-    }
-    # plan-20261104-session-mentions：只升级未自定义的内置白名单，派生代理沿用同会话引用边界。
-    for preset in presets:
-        previous = list(preset["tools_whitelist"])
-        _PAST_DEFAULTS[preset["name"]].append(previous)
-        preset["tools_whitelist"].append("read_session_context")
     for preset in presets:
         res = await db.execute(
             select(SubagentProfile).where(SubagentProfile.name == preset["name"])
         )
-        existing = res.scalars().first()
-        if existing is None:
+        if res.scalars().first() is None:
             db.add(SubagentProfile(**preset))
-            continue
-        current = existing.tools_whitelist
-        # general 旧默认 = None（全量）：S10 起改为常用工作集
-        if preset["name"] == "general" and current is None:
-            existing.tools_whitelist = preset["tools_whitelist"]
-            existing.description = preset["description"]
-            continue
-        if current is not None and any(
-            list(current) == past for past in _PAST_DEFAULTS.get(preset["name"], [])
-        ):
-            existing.tools_whitelist = preset["tools_whitelist"]
     await db.flush()
 
 

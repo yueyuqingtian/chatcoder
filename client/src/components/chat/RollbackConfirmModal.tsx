@@ -158,8 +158,8 @@ export function RollbackConfirmModal() {
           <p className="rc-conflict-note">
             <IconAlertTriangle size={13} />
             <span>
-              有 <b>{conflictCount}</b> 个文件与你的手动改动重叠。默认整体拒绝回滚；
-              选择下方按钮可跳过它们、回滚其余文件，被跳过的文件保持现状。
+              有 <b>{conflictCount}</b> 个文件被手动修改，或缺少可核验的完整修改记录。
+              确认后将保留这些文件，只回滚其余文件；该轮及之后的对话仍会撤回。
             </span>
           </p>
         )}

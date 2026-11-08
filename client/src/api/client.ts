@@ -1574,8 +1574,13 @@ export const api = {
     formData.append("file", file);
     const res = await fetch(`${await baseForFetch()}/upload`, { method: "POST", body: formData });
     if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`Upload ${res.status}: ${detail}`);
+      const body = await res.text();
+      let detail = body;
+      try {
+        const parsed = JSON.parse(body);
+        if (typeof parsed.detail === "string") detail = parsed.detail;
+      } catch { /* 非 JSON 错误保留原文 */ }
+      throw new Error(detail || `上传失败（${res.status}）`);
     }
     return res.json();
   },
@@ -1719,13 +1724,13 @@ export const api = {
   // ── 子代理类型（v2.2: 对齐 zcode 3.13）──
   listSubagents: () => get<SubagentProfileOut[]>("/subagents"),
   createSubagent: (data: {
-    name: string; description?: string | null; tools_whitelist?: string[] | null;
+    name: string; description?: string | null;
     model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
     /** plan-330-1648 M2: 思考深度档位（null = 跟随会话本轮档位） */
     reasoning_effort?: string | null;
   }) => post<SubagentProfileOut>("/subagents", data),
   updateSubagent: (id: number, data: {
-    name?: string; description?: string | null; tools_whitelist?: string[] | null;
+    name?: string; description?: string | null;
     model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
     reasoning_effort?: string | null;
   }) => patch<SubagentProfileOut>(`/subagents/${id}`, data),
@@ -2017,7 +2022,6 @@ export interface SubagentProfileOut {
   id: number;
   name: string;
   description: string | null;
-  tools_whitelist: string[] | null;
   model_id: number | null;
   system_prompt: string | null;
   /** plan-330-1648 M2: 思考深度档位覆盖（null = 跟随会话） */
@@ -2128,7 +2132,7 @@ export interface UploadOut {
   url: string;
   size: number;
   mime_type: string;
-  /** image / text / spreadsheet / document */
+  /** image / text / spreadsheet / document / file（任意其他格式） */
   type: string;
 }
 

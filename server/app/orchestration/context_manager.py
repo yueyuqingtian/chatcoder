@@ -1966,7 +1966,7 @@ async def build_main_context(
                 if not _msg_id:
                     continue
                 _m = await db.get(_Msg, _msg_id)
-                if _m is None or not isinstance(_m.content, dict):
+                if _m is None or _m.deleted or not isinstance(_m.content, dict):
                     continue
                 _text = (_m.content.get("text") or "").strip()
                 if not _text:

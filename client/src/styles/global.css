@@ -778,8 +778,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 /* v10 → plan-282-1416：消息操作行（归属与显隐协议重写）
    - 归属：用户消息 → 该条消息项内部；AI 回复 → 紧随 AI 内容块末尾（不再挂 turn 整体）；
    - 行高固定 24px，仅 opacity 切换 → 显隐零布局位移；
-   - 终态（completed/failed/interrupted/rolled_back）一律可见，运行中由宿主不渲染；
-   - .is-latest（最近一条用户消息）常显，保证异常终止/手动停止后无需 hover。
+   - AI 操作由宿主在整轮结束后渲染；用户消息运行时仍能悬停复制；
+   - plan-20261107-message-meta-implementation：用户时间与按钮统一悬停显示，AI 操作与时间常显。
 */
 .turn-item-user { position: relative; }
 .turn-item-text { position: relative; }
@@ -787,8 +787,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .turn-item-user .msg-actions {
   display: flex;
   align-items: center;
-  gap: 1px;
-  height: 24px;
+  gap: 10px;
+  min-height: var(--btn-h-xs);
   margin-top: 1px;
   opacity: 0;
   pointer-events: none;
@@ -796,14 +796,14 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   z-index: 6;
 }
 .turn-item-user:hover .msg-actions,
-.turn-item-user:focus-within .msg-actions,
-.turn-item-user .msg-actions.is-latest { opacity: 1; pointer-events: auto; }
+.turn-item-user:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
 /* AI 操作行：紧随 AI 内容块末尾（折叠容器内/外均同规则） */
 .turn-flow .msg-actions.scope-ai {
   display: flex;
   align-items: center;
-  gap: 1px;
-  height: 24px;
+  gap: 10px;
+  min-height: var(--btn-h-xs);
+  flex-wrap: wrap;
   margin: 2px 0 0;
   opacity: 1;
   pointer-events: auto;
@@ -813,28 +813,22 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .turn-item-text .msg-actions {
   display: flex;
   align-items: center;
-  gap: 1px;
-  height: 24px;
+  gap: 10px;
+  min-height: var(--btn-h-xs);
+  flex-wrap: wrap;
   margin: 2px 0;
 }
-.turn-item-text .msg-actions .msg-action-hover {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-2) var(--ease-standard);
-}
-.turn-item-text:hover .msg-actions .msg-action-hover,
-.turn-item-text:focus-within .msg-actions .msg-action-hover { opacity: 1; pointer-events: auto; }
-.msg-action {
+.msg-action-buttons { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.msg-timestamp { color: var(--text-3); font-size: 12px; line-height: 20px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.msg-action.btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
   border: none;
   background: transparent;
   color: var(--text-3);
   cursor: pointer;
-  border-radius: var(--r-ctl);
+  border-radius: var(--r-md);
   transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
 .msg-action:hover { background: var(--bg-hover); color: var(--text-1); }

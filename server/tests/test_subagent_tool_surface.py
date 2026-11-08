@@ -61,12 +61,6 @@ async def test_readonly_has_observation_and_low_risk_extensions(tool_setup):
                  "desktop_type", "terminal_exec", "fs_write", "mcp_test_addon_update"} & available)
 
 
-async def test_profile_whitelist_can_select_gui_and_extensions(tool_setup):
-    schemas = await subagent_tools.available_subagent_tools(None)
-    selected = subagent_tools.filter_tool_schemas(schemas, ["browser_click", "mcp_test_addon_query"])
-    assert names(selected) == {"browser_click", "mcp_test_addon_query"}
-
-
 async def test_extension_load_failure_keeps_builtins_without_stale_mcp(tool_setup):
     await subagent_tools.available_subagent_tools(None)
     tool_setup.side_effect = RuntimeError("测试连接失败")
@@ -84,7 +78,7 @@ async def test_disabled_extensions_do_not_leak_from_registry(tool_setup, monkeyp
     assert not any(n.startswith(("mcp_", "desktop_", "browser_")) for n in available)
 
 
-async def test_restore_registers_cold_extensions_and_keeps_original_scope(tool_setup, monkeypatch):
+async def test_restore_rebuilds_mode_tools_despite_legacy_snapshot(tool_setup, monkeypatch):
     from app.orchestration import subagent
 
     class Database:
@@ -99,12 +93,15 @@ async def test_restore_registers_cold_extensions_and_keeps_original_scope(tool_s
         "tool_names": ["mcp_test_addon_query", "report_to_leader", "browser_click", "spawn_subagent"],
         "subagent_mode": "readonly",
     })
-    assert names(schemas) == {"mcp_test_addon_query", "report_to_leader"}
+    assert {"mcp_test_addon_query", "report_to_leader", "desktop_screenshot", "browser_snapshot"} <= names(schemas)
+    assert not {"browser_click", "spawn_subagent", "mcp_test_addon_update"} & names(schemas)
     assert resolve_mcp_alias(mcp_alias("mcp_test_addon_query")) == "mcp_test_addon_query"
     tool_setup.return_value = []
-    assert names(await subagent._restore_tool_schemas({
-        "tool_names": ["mcp_test_addon_query", "report_to_leader"], "subagent_mode": "agent",
-    })) == {"report_to_leader"}
+    restored = names(await subagent._restore_tool_schemas({
+        "tool_names": ["fs_read"], "subagent_mode": "agent",
+    }))
+    assert {"desktop_recipe", "browser_click", "terminal_exec", "report_to_leader"} <= restored
+    assert not any(name.startswith("mcp_") for name in restored)
 
 
 def test_ta3_operator_roundtrip_and_readonly_entry():
@@ -120,3 +117,59 @@ def test_ta3_operator_roundtrip_and_readonly_entry():
     assert "purpose" not in restricted["parameters"]["properties"]
     assert "mode" not in restricted["parameters"]["properties"]
     assert restricted["parameters"]["properties"]["subagent_type"]["enum"] == ["Explore", "Plan"]
+
+
+@pytest.mark.parametrize("mode,ta3", [("agent", False), ("readonly", False), ("agent", True), ("readonly", True)])
+async def test_real_dispatch_ignores_legacy_profile_whitelist(tool_setup, monkeypatch, tmp_path, mode, ta3):
+    """plan-20261107-subagent-mode-tools：真实旧档案经过派发入口后仍按模式提供 GUI/MCP。"""
+    from unittest.mock import Mock
+    from app.orchestration import agent_loop, context_manager, agent_events
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.message import Session
+    from app.persistence.models.project import Project
+    from app.persistence.models.subagent_profile import SubagentProfile
+
+    monkeypatch.setattr(settings, "subagent_model_id", 0)
+    monkeypatch.setattr(settings, "operator_subagent_enabled", True)
+    monkeypatch.setattr(context_manager, "build_subagent_context", AsyncMock(return_value=SimpleNamespace(messages=[])))
+    monkeypatch.setattr(agent_events, "broadcast", AsyncMock())
+    manager = Mock()
+    manager.duplicate_of.return_value = None
+    manager.pending_count.return_value = 0
+    manager.spawn.return_value = 900
+    async with async_session_factory() as db:
+        project = Project(name="测试项目", path=str(tmp_path))
+        db.add(project)
+        await db.flush()
+        session = Session(project_id=project.id, permission_mode="agent", approval_mode="full")
+        db.add(session)
+        db.add(SubagentProfile(name="general" if mode == "agent" else "explore",
+                               tools_whitelist=["no_such_legacy_tool"], is_active=True))
+        await db.commit()
+        args = {"task_title": "核实工具", "task_description": "核实桌面浏览器与拓展", "mode": mode}
+        if mode == "agent":
+            args["purpose"] = "operator"
+        if ta3:
+            args = restore_args("SubAgent", disguise_args("spawn_subagent", args))
+        result = await agent_loop._run_subagent_tool(
+            db, tool_name="spawn_subagent", args=args, session_id=session.id, turn_id=1,
+            agent=None, workspace=str(tmp_path), subagent_context={
+                "manager": manager, "project": project, "session": session,
+                "permission_mode": "agent", "approval_mode": "full",
+            },
+        )
+    assert "dispatched" in result
+    call = manager.spawn.call_args.kwargs
+    assert call["subagent_mode"] == mode
+    assert call["context_snapshot"]["approval_mode"] == "full"
+    available = names(call["tool_schemas"])
+    assert {"desktop_screenshot", "browser_snapshot", "mcp_test_addon_query", "skill_view", "report_to_leader"} <= available
+    assert not available & subagent_tools.SUBAGENT_FORBIDDEN
+    interactive = {"desktop_recipe", "desktop_click", "browser_click", "terminal_exec", "mcp_test_addon_update"}
+    if mode == "agent":
+        assert interactive <= available
+    else:
+        assert not interactive & available
+    wire = disguise_tools(call["tool_schemas"])
+    restored = {FROM_TA3.get(s["function"]["name"]) or resolve_mcp_alias(s["function"]["name"]) for s in wire}
+    assert restored == available

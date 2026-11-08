@@ -21,7 +21,6 @@ from app.orchestration.agent_loop import (
     _wait_retry_interval,
     run_agent_loop,
 )
-from app.orchestration.tools.registry import tool_registry
 from app.persistence.database import async_session_factory, commit_with_retry, run_write_locked
 
 logger = logging.getLogger(__name__)
@@ -944,35 +943,13 @@ def _checkpoint_payload(handle: "SubagentHandle", spec: dict, reason: str) -> di
     }
 
 
-def _build_tool_schemas(names: list[str] | None) -> list[dict]:
-    """按工具名重建子代理工具 schema（与 spawn 时口径一致：注册表工具 + 子代理自身通信工具）。"""
-    from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS, strip_for_subagent
-
-    wanted = set(names) if names else None
-    out = [
-        s for s in tool_registry.all_schemas()
-        if wanted is None or s.get("function", {}).get("name") in wanted
-    ]
-    have = {s.get("function", {}).get("name") for s in out}
-    for own in SUBAGENT_OWN_TOOLS:
-        name = own["function"]["name"]
-        if (wanted is None or name in wanted) and name not in have:
-            out.append(own)
-    # plan-474-2105：续跑沿用旧检查点里的工具名，可能含已禁用的「问用户 / 派下级」工具——
-    # 与 spawn 路径同口径剥离，否则续跑等于绕过能力边界。
-    return strip_for_subagent(out)
-
-
 async def _restore_tool_schemas(spec: dict) -> list[dict]:
-    """plan-20261105-subagent-tools：重启后先重建已启用拓展，再与检查点的授权工具求交集。"""
+    """plan-20261107-subagent-mode-tools：按执行模式重建，旧工具快照不再充当隐藏白名单。"""
     from app.orchestration.subagent_tools import available_subagent_tools, SUBAGENT_OWN_TOOLS
 
     async with async_session_factory() as db:
         schemas = await available_subagent_tools(db, readonly=spec.get("subagent_mode") == "readonly")
-    names = spec.get("tool_names")
-    wanted = set(names) if names else None
-    return [s for s in [*schemas, *SUBAGENT_OWN_TOOLS]
-            if wanted is None or s["function"]["name"] in wanted]
+    return [*schemas, *SUBAGENT_OWN_TOOLS]
 
 
 async def _persist_agent_state(agent_id: int, status: str, checkpoint: dict | None) -> None:

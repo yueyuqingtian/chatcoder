@@ -100,7 +100,8 @@ async def test_binary_rollback_restores_checkpoint(workspace):
     snap = TurnSnapshot(session_id=1, turn_id=1,
                         file_list=[{"ckpt": ckpt, "path": "assets/logo.bin"}], new_files=[])
     rec = RollbackWrite(session_id=1, turn_id=1, tool="fs_write",
-                        path="assets/logo.bin", old_content=None, new_content=None, binary=True)
+                        path="assets/logo.bin", old_content=None, new_content=None, binary=True,
+                        after_hash=rollback_service.file_digest(str(workspace), "assets/logo.bin"))
     result = await rollback_service._rollback_turn_files_precise(str(workspace), [rec], snap)
     assert result["restored"] == 1 and result["failed"] == 0
     assert target.read_bytes() == b"ORIGINAL-BINARY"

@@ -129,13 +129,15 @@ export function Floating({
 
   // 打开期间：跟随锚点移动；浮层自身尺寸变化（列表筛选）也重新落位
   useEffect(() => {
-    if (!open) return;
+    // plan-20261107-model-input：presence 尚未挂载时没有浮层 ref，不能把它误判成锚点卸载而关闭。
+    if (!open || !presence.mounted) return;
     let raf = 0;
     const schedule = () => {
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
-        if (!reposition()) closeRef.current?.();
+        if (!anchorRef.current?.isConnected) closeRef.current?.();
+        else reposition();
       });
     };
     window.addEventListener("scroll", schedule, true);
@@ -148,7 +150,7 @@ export function Floating({
       window.removeEventListener("resize", schedule);
       ro?.disconnect();
     };
-  }, [open, presence.mounted, reposition]);
+  }, [open, presence.mounted, reposition, anchorRef]);
 
   // 点外部 + Esc（Esc 只关栈顶）
   useEffect(() => {
@@ -178,12 +180,6 @@ export function Floating({
       removeLayer(id);
     };
   }, [open, closeOnOutside, closeOnEscape, anchorRef]);
-
-  // 重新打开时先清掉旧落点，避免短暂停在上一次的位置
-  useEffect(() => {
-    if (!open) return;
-    setPlace(null);
-  }, [open]);
 
   if (!presence.mounted) return null;
   return createPortal(

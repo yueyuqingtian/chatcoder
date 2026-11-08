@@ -310,6 +310,12 @@ async def save_memories(db: AsyncSession, *, session_id: int, turn_id: int | Non
     from app.persistence.database import run_write_locked
 
     def _persist(s) -> int:
+        # plan-20261107-rollback-audit：异步提取可能晚于撤销收尾，写入闸门防止已撤销事实重新出现。
+        if turn_id is not None:
+            from app.persistence.models.turn import Turn
+            source = s.get(Turn, turn_id)
+            if source is not None and source.status == "rolled_back":
+                return 0
         # 会话层：本会话的 scope=session（历史空值兼容为 session）
         scopes = {p["scope"] for p in pending}
         existing: dict[str, list[dict]] = {}

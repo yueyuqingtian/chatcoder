@@ -18,6 +18,8 @@ import {
 import { isBusy } from "../../perf/bus";
 import { scrollActiveMenuOption } from "../../utils/menuScroll";
 import { questionEnterIndex } from "./questionKeyboard";
+import { getPastedFiles } from "./composerPaste";
+import { notify } from "../../store/toast";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
   IconPaperclip,
@@ -406,6 +408,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const [browserRefPreview, setBrowserRefPreview] = useState<any | null>(null);
 
   const [uploading, setUploading] = useState(false);
+  const pendingUploads = useRef(0);
   const [dragOver, setDragOver] = useState(false);
   /** plan-20261025-composer：模型与思考深度合并为同一个浮层，一个开关 */
   const [showModels, setShowModels] = useState(false);
@@ -821,15 +824,14 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     // RFL-6（S6）：注册进唯一收敛序列——order 70 输入框 remeasure。
     const offReconcile = registerReconcileTask("composer-remeasure", RECONCILE_ORDER.composerRemeasure,
       "输入框重测", remeasure);
-    const onPointerUp = () => { if (!inMotion()) remeasure(); };
+    // plan-20261107-model-input：普通点击不应重测高度；多行输入临时收缩会在菜单挂载期间触发滚动。
+    // 宽度变化由 ResizeObserver 覆盖，拖拽结束由 motion / reconcile 补测。
     window.addEventListener("chatcoder:window-motion", onMotionEnd);
-    window.addEventListener("pointerup", onPointerUp, true);
     return () => {
       offReconcile();
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("chatcoder:window-motion", onMotionEnd);
-      window.removeEventListener("pointerup", onPointerUp, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -908,40 +910,42 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     async (fileList: FileList | File[]) => {
       const arr = Array.from(fileList);
       if (arr.length === 0) return;
+      // plan-20261107-long-paste：连续粘贴时，所有批次完成前都必须等待附件，防止发送时遗漏。
+      pendingUploads.current++;
       setUploading(true);
       try {
         const uploaded: AttachmentInfo[] = [];
+        const failures: string[] = [];
         for (const f of arr) {
           try {
             const res = await api.uploadFile(f);
             uploaded.push(res);
-          } catch {
-            /* ignore upload err */
+          } catch (error) {
+            failures.push(`${f.name}：${error instanceof Error ? error.message : "上传失败，请重试"}`);
           }
         }
         if (uploaded.length > 0) {
-          setAttachments([...attachments, ...uploaded]);
+          // plan-20261106-file-drop：连续拖入或选择文件时，已完成的上传不能覆盖其他批次附件。
+          setAttachments((prev) => [...prev, ...uploaded]);
+        }
+        if (failures.length > 0) {
+          useChatStore.setState({ error: `附件上传失败：\n${failures.join("\n")}` });
         }
       } finally {
-        setUploading(false);
+        if (--pendingUploads.current === 0) setUploading(false);
       }
     },
-    [attachments, setAttachments]
+    [setAttachments]
   );
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      const files: File[] = [];
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].kind === "file") {
-          const file = items[i].getAsFile();
-          if (file) files.push(file);
-        }
-      }
+      const files = getPastedFiles(e.clipboardData);
       if (files.length > 0) {
         e.preventDefault();
+        if (!Array.from(e.clipboardData.items).some((item) => item.kind === "file" && item.getAsFile())) {
+          notify.info("长文本已转为 TXT 附件，正在上传；上传失败可重新粘贴。");
+        }
         void addFiles(files);
       }
     },
@@ -953,15 +957,15 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
    *  这里只取它的路径作为引用随消息发给模型——模型侧用已有的 fs_list 工具自己翻目录内容。 */
   const addDirs = useCallback(async (dirs: DroppedEntry[]) => {
     const resolved: ComposerRef[] = [];
-    let failed = false;
+    const failures: string[] = [];
     for (const d of dirs) {
       const entry = d.entry as FileSystemDirectoryEntry | null;
       if (!entry) continue;
       try {
         const path = await resolveDroppedDir(entry, d.file);
         if (path) resolved.push({ kind: "dir", value: path, label: baseName(path) || entry.name });
-      } catch {
-        failed = true;
+      } catch (error) {
+        failures.push(`${entry.name}：${error instanceof Error ? error.message : "无法定位文件夹"}`);
       }
     }
     if (resolved.length > 0) {
@@ -975,8 +979,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       });
     }
     // 定位失败必须给用户一句话（此前是静默丢弃，用户以为拖成功了）
-    if (failed) {
-      useChatStore.setState({ error: "未定位到该文件夹，请用 @ 手动引用或在桌面版使用" });
+    if (failures.length > 0) {
+      useChatStore.setState({ error: `文件夹添加失败：\n${failures.join("\n")}。请用 @ 手动引用或在桌面版使用` });
     }
   }, []);
 
@@ -1209,7 +1213,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   // 发送时引用会被拼成「可查看目录：…」引用行，模型据此去看目录，正文可以是空的。
   const historyLoadFailed = useChatStore((s) => s.sessionLoadError);
   const historyUnavailable = useChatStore((s) => s.sessionLoading || s.sessionLoadError);
-  const canSend = !historyUnavailable && Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
+  const hasSendContent = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
+  const canSend = !historyUnavailable && !uploading && hasSendContent;
 
   const handleCancel = () => {
     // 停止 = 中断本会话的一切执行：运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）
@@ -1219,7 +1224,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   const [sending, setSending] = useState(false);
   const handleSend = async () => {
-    if (!canSend || sending) return;
+    if (!canSend || sending || pendingUploads.current > 0) return;
     setSending(true);
     // 浏览器标注/截图引用 → 转换为消息附件 + 结构化文本，随消息一并发送
     // （此前仅 clearComposerBrowserRefs() 丢弃引用，导致标注既不在消息里、AI 也收不到）
@@ -1535,7 +1540,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             <div className="composer-drop-hint">
               <IconPaperclip size={16} />
               {/* plan-633-2604（R3）：明确支持拖文件夹（此前只写"添加附件"，用户不会想到可以拖目录） */}
-              <span>松开以添加文件或文件夹</span>
+              <span>松开以添加任意格式文件或文件夹</span>
             </div>
           )}
           {/* 紧凑内嵌浏览器标注胶囊块：小巧精致不占空间，点击弹出详情预览 Modal（对齐图 2）
@@ -1595,7 +1600,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             </div>
           )}
 
-          {attachments.length > 0 && (
+          {(attachments.length > 0 || uploading) && (
             <div className="composer-attachments">
               {attachments.map((att, idx) => (
                 <Tooltip key={att.file_id ?? idx} content={att.filename}>
@@ -1633,7 +1638,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   </div>
                 </Tooltip>
               ))}
-              {uploading && <span className="composer-attach-uploading">上传中…</span>}
+              {uploading && <span className="composer-attach-uploading" role="status">附件上传中…</span>}
             </div>
           )}
           {/* plan-671: 目标胶囊——输入框内顶部（排队胶囊上方），复用胶囊语言（对齐 zcode 低打扰）。
@@ -1951,14 +1956,14 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   空闲：发送；执行中（含后台工作流 / 子代理）且输入为空：停止；主代理轮次运行中有输入：加入排队；仅后台执行时有输入：直接发送。 */}
               {(() => {
                 // 执行中：输入为空 → 停止（中断主代理、子代理与工作流）；主代理轮次运行中有输入 → 排队；仅后台执行时有输入 → 直接发送
-                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (canSend ? (isRunning ? "queue" : "send") : "stop") : "send";
-                const tip = sendState === "stop" ? "停止：中断主代理、子代理与工作流" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
+                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (hasSendContent || uploading ? (isRunning ? "queue" : "send") : "stop") : "send";
+                const tip = uploading ? "附件上传中，请稍候…" : sendState === "stop" ? "停止：中断主代理、子代理与工作流" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
                 return (
                   <Tooltip content={tip} side="top">
                     <button
                       type="button"
                       className={"cc-send is-" + sendState}
-                      disabled={sendState === "send" && !canSend}
+                      disabled={sendState !== "stop" && !canSend}
                       aria-label={tip}
                       onClick={() => (sendState === "stop" ? handleCancel() : void handleSend())}
                     >

@@ -38,8 +38,9 @@
 .turn-changes-actions .msg-actions.scope-ai {
   display: flex;
   align-items: center;
-  gap: 1px;
-  height: 24px;
+  gap: 10px;
+  min-height: var(--btn-h-xs);
+  flex-wrap: wrap;
   margin: 0;
   opacity: 1;
   pointer-events: auto;

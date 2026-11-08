@@ -5008,7 +5008,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
 
         # plan-568-2333：子代理工具面必须在**写库之前**定稿并校验。排在 Agent/Task 创建之后
         # 就只能在事后告警——agent 行、task 行、并发名额都已占用，用户看到的是「跑着但永远没结果」。
-        # 两道校验都是 fail-closed：解析不出只读工具集、或类型白名单与可用工具无交集，直接拒绝派发。
+        # plan-20261107-subagent-mode-tools：解析不出只读工具集时直接拒绝派发。
         from app.orchestration.subagent_tools import available_subagent_tools
         sub_tools = await available_subagent_tools(db, readonly=explore)
 
@@ -5028,24 +5028,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 )
             sub_tools = explore_schemas
 
-        # v3.0 (plan-88): 子代理类型工具白名单——profile.tools_whitelist 非空时
-        # 在既有范围（探索只读 / 全量）上按名单收窄；勾选=允许，留空=全量（旧语义）。
-        from app.orchestration.subagent_tools import filter_tool_schemas
-        try:
-            _whitelist = list(_profile.tools_whitelist) if (_profile is not None and _profile.tools_whitelist) else None
-        except Exception:
-            _whitelist = None
-        if _whitelist:
-            sub_tools = filter_tool_schemas(sub_tools, _whitelist)
-            if not sub_tools:
-                # plan-568-2333：与可用工具集无交集时不再继续派发。此前只写一条 warning，
-                # 子代理最终只剩 report_to_leader，读不了文件也执行不了命令，却照样占用并发名额。
-                return (
-                    f"Error: 子代理类型「{_profile_name}」勾选的工具与子代理可用工具无交集，无法派发。"
-                    "请在设置 → 子代理里检查该类型的工具白名单，或取消勾选（留空表示使用全部可用工具）。"
-                )
-        # plan-330-1648 M4: 子代理的“与主代理通信”通道始终可用（不受类型工具白名单影响）
-        # ——否则用户勾选工具时会无意中切断子代理向主代理上报/求助的能力。
+        # plan-20261107-subagent-mode-tools：类型仅覆盖模型与提示词，工具由执行模式决定。
         try:
             from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
             _have = {s.get("function", {}).get("name") for s in sub_tools}
@@ -5056,7 +5039,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             logger.debug("[agent] 子代理通信工具追加失败(非阻塞)", exc_info=True)
 
         # plan-474-2105：子代理不得直接问用户，也不得再派生下级执行体（套娃 / 绕过并发上限）。
-        # 放在白名单与自有工具追加**之后**统一剥离：白名单是老配置，可能仍含这些工具名。
+        # plan-20261107-subagent-mode-tools：追加通信工具后仍统一维持子代理身份边界。
         # plan-549-2281：剥离范围已含工作流工具（子代理不进计划模式、不使用工作流）。
         try:
             from app.orchestration.subagent_tools import strip_for_subagent
@@ -5146,7 +5129,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         )
         # plan-568-2333：工具面已在派发前（写库之前）定稿并校验，此处不再重复计算。
         # plan-549-2281 双保险：工作流工具不在 tool_registry 里，子代理原本就拿不到；
-        # 但「类型工具白名单」「自定义权限模式」都可能把名字塞回来，这里再按名字硬剥一遍。
+        # 自定义权限模式可能包含工作流工具，这里再按名字维持子代理边界。
         _wf_names = set(WORKFLOW_TOOL_NAMES)
         sub_tools = [
             s for s in sub_tools

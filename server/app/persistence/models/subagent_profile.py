@@ -15,7 +15,7 @@ class SubagentProfile(Base):
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(60), nullable=False)  # 唯一名，如 explore / general
     description: Mapped[str | None] = mapped_column(String(300))
-    # 工具白名单（JSON 数组）；空/None = 全量工具
+    # plan-20261107-subagent-mode-tools：仅保留旧列兼容数据库，执行与配置接口均不再使用。
     tools_whitelist: Mapped[list | None] = mapped_column(JSON)
     # 模型覆盖（None = 跟随会话/主代理模型）
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))

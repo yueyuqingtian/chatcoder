@@ -277,7 +277,6 @@ export const TurnGroup = memo(function TurnGroup({
   flow = "main",
   agentId,
   globalRunning,
-  latestUserId,
   flowErrorTurnId,
   hiddenTurnErrors,
   turnStatus,
@@ -451,6 +450,14 @@ export const TurnGroup = memo(function TurnGroup({
    *  工作流后台运行期间计时停住、箭头出现、过程已折叠，唤醒轮结束时用时又一下跳到含工作流的总时长。
    *  思考块的「进行中」仍只认主代理真实在跑（isRunning）。 */
   const roundActive = isRunning || awaitingBackground;
+  // plan-20261107-message-meta-implementation：完成时间与整轮计时同源，不能用最后一段文本的产生时刻。
+  const completedAtMs = useChatStore((s) => {
+    if (!turnFinished || roundActive) return 0;
+    if (flow === "subagent") return parseUtc(agentId != null ? s.subagentMeta[agentId]?.endedAt : null);
+    let end = 0;
+    for (const id of roundIds) end = Math.max(end, parseUtc(getTurnById(s.turns, id)?.completed_at));
+    return Math.max(end, backgroundEndedAt);
+  });
   /** 默认折叠态（用户未手动切换过时生效）：有过程且非异常、非等待确认、无注入用户消息时折叠。
    *  v0.3.1 (plan-190-898)：方案等待确认阶段必须保持展开，确保计划卡预览始终在最底部。 */
   const defaultProcessCollapsed = hasProcess && !isAwaitingConfirmation && !hasInjectedUser;
@@ -527,10 +534,6 @@ export const TurnGroup = memo(function TurnGroup({
   /** 安全取项的消息 id（tools / plan 分组项无 msg，回落到 -1 仅供 key 使用） */
   const itemMsgId = (item: TurnItem): number =>
     "msg" in item && item.msg ? Number(item.msg.id) : -1;
-
-  /** plan-282-1416（问题2）：全局最近一条用户消息 id——该条操作行常显，
-   *  保证任务异常终止 / 手动停止后无需 hover 就能看到复制与回滚。
-   *  plan-75-334 阶段1：改由父层一次性扫描消息尾部后经 props 传入（不再每实例重复扫描）。 */
 
   const rollbackFn = useCallback(() => {
     if (turnId != null) requestRollbackPreview(turnId);
@@ -666,6 +669,7 @@ export const TurnGroup = memo(function TurnGroup({
           onRollback={onRollback}
           scope="ai"
           actions={actions}
+          timestampMs={completedAtMs}
           ownerId={itemMsgId(items[i])}
         />
       )}
@@ -707,19 +711,15 @@ export const TurnGroup = memo(function TurnGroup({
             {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
             <MessageImageGrid atts={attachmentsOf(item.msg.content)} />
             <UserBubble msg={item.msg} />
-            {/* plan-282-1416（问题2 根因 A）：turn 内的非首条用户消息（运行中注入 / 立即发送）
-                此前完全没有操作行，导致「最近一条用户消息」永远没有复制/回滚。
-                现补齐：归属该条消息自身，且与 turn 是否运行无关（终态即可见）。 */}
-            {!turnRunning && (
-              <MessageActions
-                entry={entry}
-                onRollback={onRollback}
-                scope="user"
-                actions={actions}
-                alwaysVisible={item.msg.id === latestUserId}
-                ownerId={item.msg.id}
-              />
-            )}
+            {/* plan-20261107-message-meta-implementation：中途追加消息与首条消息遵循相同显隐和归属规则。 */}
+            <MessageActions
+              entry={entry}
+              onRollback={turnRunning || rolledBack || item.msg.turn_id == null ? undefined : () => { void requestRollbackPreview(item.msg.turn_id!); }}
+              scope="user"
+              actions={actions}
+              timestampMs={parseUtc(item.msg.created_at)}
+              ownerId={item.msg.id}
+            />
           </div>
         );
       case "thinking":
@@ -925,17 +925,15 @@ export const TurnGroup = memo(function TurnGroup({
             {/* 会话 228-1142: 图片网格在气泡外部、靠右（对齐参考图 1）；文件卡与文本留在气泡内 */}
             <MessageImageGrid atts={attachmentsOf(firstUser.msg.content)} />
             <UserBubble msg={firstUser.msg} />
-            {/* plan-282-1416（问题2）：门控改本 turn 行状态；最近一条用户消息常显 */}
-            {!turnRunning && (
-              <MessageActions
-                entry={entry}
-                onRollback={onRollback}
-                scope="user"
-                actions={actions}
-                alwaysVisible={firstUser.msg.id === latestUserId}
-                ownerId={firstUser.msg.id}
-              />
-            )}
+            {/* plan-20261107-message-meta-implementation：发送后即可悬停查看时间和复制，运行中不提供回滚。 */}
+            <MessageActions
+              entry={entry}
+              onRollback={turnRunning || rolledBack || firstUser.msg.turn_id == null ? undefined : () => { void requestRollbackPreview(firstUser.msg.turn_id!); }}
+              scope="user"
+              actions={actions}
+              timestampMs={parseUtc(firstUser.msg.created_at)}
+              ownerId={firstUser.msg.id}
+            />
           </div>
         );
       })()}
@@ -1009,6 +1007,7 @@ export const TurnGroup = memo(function TurnGroup({
             onRollback={onRollback}
             scope="ai"
             actions={actions}
+            timestampMs={completedAtMs}
             ownerId={itemMsgId(items[actionAnchorIdx])}
           />
         </div>

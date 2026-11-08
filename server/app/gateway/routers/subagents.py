@@ -16,7 +16,6 @@ router = APIRouter(prefix="/subagents", tags=["subagents"])
 class SubagentProfileIn(BaseModel):
     name: str
     description: str | None = None
-    tools_whitelist: list[str] | None = None
     model_id: int | None = None
     system_prompt: str | None = None
     # plan-330-1648 M2: 思考深度档位（None = 跟随会话本轮档位）
@@ -33,7 +32,6 @@ class SubagentProfilePatch(BaseModel):
     """
     name: str | None = None
     description: str | None = None
-    tools_whitelist: list[str] | None = None
     model_id: int | None = None
     system_prompt: str | None = None
     reasoning_effort: str | None = None
@@ -43,7 +41,7 @@ class SubagentProfilePatch(BaseModel):
 def _to_out(p: SubagentProfile) -> dict:
     return {
         "id": p.id, "name": p.name, "description": p.description,
-        "tools_whitelist": p.tools_whitelist, "model_id": p.model_id,
+        "model_id": p.model_id,
         "system_prompt": p.system_prompt,
         "reasoning_effort": getattr(p, "reasoning_effort", None),
         "is_active": p.is_active,
@@ -71,7 +69,7 @@ async def create_profile(body: SubagentProfileIn, db: AsyncSession = Depends(get
     def _p(s):
         obj = SubagentProfile(
             name=name, description=body.description,
-            tools_whitelist=body.tools_whitelist, model_id=body.model_id,
+            model_id=body.model_id,
             system_prompt=body.system_prompt, reasoning_effort=body.reasoning_effort,
             is_active=body.is_active,
         )

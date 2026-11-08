@@ -39,6 +39,17 @@ export function parseUtc(s?: string | null): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
+/** plan-20261107-message-meta-implementation：消息日期始终保留，跨年补年份以免历史时刻混淆。 */
+export function formatMessageTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  const year = d.getFullYear() === new Date().getFullYear() ? "" : `${d.getFullYear()}年`;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${year}${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
+}
+
 /** 相对时间（中英自适应：19分 / 19m，2小时 / 2h，3天 / 3d） */
 export function formatRelativeTime(s?: string | null, lang: Language = "zh"): string {
   if (!s) return "";

@@ -19,7 +19,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
-from app.services.doc_parser import MAX_FILE_SIZE, parse_file
+from app.services.doc_parser import MAX_FILE_SIZE, is_document, is_image, is_spreadsheet, is_text
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +63,13 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
     if not filename or filename in {".", ".."} or any(c in filename for c in ("/", "\\", ":", "\x00")):
         raise HTTPException(400, "非法文件名")
 
-    parsed = parse_file(filename, data)
-    if parsed["type"] == "unsupported":
-        raise HTTPException(415, parsed.get("content") or f"不支持的文件类型: {Path(filename).suffix}")
+    # plan-20261106-file-drop：上传准入不依赖内容解析能力，压缩包等原样保存，按需再读取。
+    file_type = "file"
+    for kind, matches in (("image", is_image), ("spreadsheet", is_spreadsheet),
+                          ("document", is_document), ("text", is_text)):
+        if matches(filename):
+            file_type = kind
+            break
 
     file_id = uuid.uuid4().hex[:16]
     root = uploads_root()
@@ -81,9 +85,9 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
         "url": f"/api/uploads/{file_id}/{quote(filename)}",
         "size": len(data),
         "mime_type": mime_type,
-        "type": parsed["type"],  # image / text / spreadsheet / document
+        "type": file_type,
     }
-    logger.info("[upload] %s (%d bytes, type=%s) → %s", filename, len(data), parsed["type"], result["path"])
+    logger.info("[upload] %s (%d bytes, type=%s) → %s", filename, len(data), file_type, result["path"])
     return result
 
 

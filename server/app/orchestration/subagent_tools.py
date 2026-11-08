@@ -436,18 +436,6 @@ def _spawn_schema(explore_only: bool) -> dict:
     return schema
 
 
-def filter_tool_schemas(schemas: list[dict], whitelist: list[str] | None) -> list[dict]:
-    """v3.0 (plan-88): 按工具名白名单过滤 schema 列表。
-
-    whitelist 为空/None = 原样返回（全量语义）。用于子代理类型工具权限：
-    勾选=允许（模型只见这些 schema），不勾=禁止。
-    """
-    if not whitelist:
-        return schemas
-    allowed = set(whitelist)
-    return [s for s in schemas if s.get("function", {}).get("name") in allowed]
-
-
 async def load_subagent_type_states(db) -> dict[str, bool]:
     """查询 SubagentProfile 启停状态，返回 {类型名: is_active}。
 
