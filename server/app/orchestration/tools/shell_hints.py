@@ -79,3 +79,57 @@ def failure_hint(command: str, output: str, kind: str) -> str:
     if not hints:
         return ""
     return "\n" + "\n".join(f"提示：{h}" for h in hints[:2])
+
+
+# ── plan-flow-redesign: 常见搜索 / 对比命令退出码 1 的良性语义识别 ──
+_SEARCH_EXIT_ONE_CMDS = frozenset({"rg", "grep", "egrep", "fgrep", "findstr", "ag", "ack"})
+_DIFF_EXIT_ONE_CMDS = frozenset({"diff", "fc", "cmp"})
+_FATAL_STDERR_RE = re.compile(
+    r"unrecognized|unknown option|invalid option|invalid argument|regex parse error|"
+    r"no such file or directory|cannot open|permission denied|access is denied|"
+    r"not a git repository|不是 git 仓库|command not found|不是内部或外部命令|"
+    r"is not recognized|找不到|拒绝访问|cannot find the file|fatal:|usage:",
+    re.I,
+)
+
+
+def _last_command_tokens(command: str) -> list[str]:
+    """提取命令串末尾生效子句的词元列表（跳过前导环境变量赋值）。"""
+    parts = [p.strip() for p in re.split(r"(?:&&|\|\||;|\||\r?\n)+", command or "") if p.strip()]
+    if not parts:
+        return []
+    tokens = parts[-1].split()
+    while tokens and re.match(r"^[A-Za-z_]\w*=\S*$", tokens[0]):
+        tokens.pop(0)
+    return tokens
+
+
+def benign_exit_one_note(command: str, rc: int | None, err: str = "", combined: str = "") -> str:
+    """当退出码为 1 且属于「无匹配 / 存在差异」的正常结果时，返回中性状态说明；否则返回空串。"""
+    if rc != 1:
+        return ""
+    if _NOT_FOUND.search(combined or "") or _FATAL_STDERR_RE.search(err or ""):
+        return ""
+    # 仅在没有标准输出且合并输出触发致命模式时也拒绝放行
+    if not err and _FATAL_STDERR_RE.search(combined or ""):
+        return ""
+
+    tokens = _last_command_tokens(command)
+    if not tokens:
+        return ""
+    exe = tokens[0].strip("\"'").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    if exe.endswith(".exe"):
+        exe = exe[:-4]
+
+    if exe in _SEARCH_EXIT_ONE_CMDS:
+        return "无匹配（退出码 1）"
+    if exe in _DIFF_EXIT_ONE_CMDS:
+        return "存在差异（退出码 1）"
+    if exe == "git" and len(tokens) >= 2:
+        sub = tokens[1].lower()
+        if sub == "grep":
+            return "无匹配（退出码 1）"
+        if sub == "diff" and any(t in ("--exit-code", "--quiet") for t in tokens[2:]):
+            return "存在差异（退出码 1）"
+    return ""
+

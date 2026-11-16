@@ -188,6 +188,14 @@ async def restore_compaction(
         {**c, "restored": True} if c.get("compaction_id") == compaction_id else c
         for c in compactions
     ]
+    # plan-20261109-compact-structure：最新摘要继承了旧摘要，恢复它时须重新启用其父检查点，
+    # 否则只有本次原文被还原，更早仍被遮蔽的历史会失去唯一摘要载体。
+    if not target.get("merged"):
+        new_ctx["compactions"] = [
+            {**c, "merged": False, "merged_into": None}
+            if c.get("merged_into") == compaction_id and not c.get("restored") else c
+            for c in new_ctx["compactions"]
+        ]
     injected = set(ctx.get("injected_compactions") or [])
     injected.discard(compaction_id)
     new_ctx["injected_compactions"] = list(injected)

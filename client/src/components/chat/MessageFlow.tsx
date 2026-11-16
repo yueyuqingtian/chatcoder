@@ -33,6 +33,7 @@ import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from
 import { api } from "../../api/client";
 import { Button, Empty, Tooltip } from "../ui";
 import { StickyBottom } from "./stickyBottom";
+import { parseUtc } from "../../utils/time";
 import { FlowVisibilityContext } from "./useRunningTicker";
 import { advanceUserSendSignal, type UserSendSignal } from "../../utils/userSendSignal";
 import { FlowViewportVisibility } from "../ui/ViewportBlock";
@@ -60,6 +61,19 @@ const JUMP_HOLD_MS = 700;
  *  宁可先揭示再由贴底内核纠正，也不允许内容被永久隐藏。 */
 const FIRST_FRAME_SETTLE_MAX_FRAMES = 12;
 const FIRST_FRAME_SETTLE_MAX_MS = 500;
+
+/** plan-20261115-flow-subagent-ready：消息流「首帧就绪」的静默窗口（毫秒）。
+ *
+ *  为什么还要一个静默窗口：切会话的缓存命中路径只把 sessionLoading 置假就返回
+ *  （store/chat.ts 的 `set({ sessionLoading: false })`），但随后的 REST 合并
+ *  （refreshAndMergeMessages / loadSessionSubagents 补回切走期间落库的 spawn 条目与
+ *  工作流卡）还在路上。首帧测量落定后先留一小段时间不画「未落位子代理卡」，
+ *  这些条目就能在兜底槽位揭示前到齐——卡片一次性出现在正确位置，不会先沉底再归位。 */
+const FLOW_READY_QUIET_MS = 140;
+/** plan-20261115-flow-subagent-ready：就绪判定的最大等待（毫秒）。
+ *  内容异常（末项一直测不到尺寸 / 列表持续增长）时宁可先揭示、由既有兜底路径纠正，
+ *  也不允许子代理卡被永久隐藏（与 FIRST_FRAME_SETTLE_MAX_MS 同一取舍）。 */
+const FLOW_READY_MAX_MS = 800;
 
 /* plan-549-2281（第13项）：定位的丝滑缓动参数。
  *
@@ -161,14 +175,15 @@ const FlowErrorCard = memo(function FlowErrorCard({
   );
 });
 
-/** plan-20261112-loading-home-sidebar：后台等待复用流式状态行，避免主轮次交接时三点动画消失。 */
-const SubagentWaitingLine = memo(function SubagentWaitingLine({ count }: { count: number }) {
+/** plan-20261112-loading-home-sidebar：后台等待复用流式状态行，避免主轮次交接时动画消失。 */
+const SubagentWaitingLine = memo(function SubagentWaitingLine({ count, workStartMs }: { count: number; workStartMs?: number }) {
   return (
     <StreamingText
       active
       thinking=""
       text=""
       waitingLabel={count > 1 ? `等待子代理结束…（${count} 个运行中）` : "等待子代理结束…"}
+      workStartMs={workStartMs}
     />
   );
 });
@@ -184,6 +199,15 @@ function nodeToolText(n: ToolNode): string {
 function itemText(it: TurnItem): string {
   if (it.kind === "tools" || it.kind === "workflow" || it.kind === "shot") return "";
   return msgText(it.msg.content);
+}
+
+/** 条目在时间线里的稳定身份：前插更早历史会让下标整体后移，
+ *  用它把「当前正在看的那一处命中」重新对回同一条消息，而不是重置到第一处。 */
+function entryAnchorKey(entry: TimelineEntry | undefined): string {
+  if (!entry) return "";
+  if (entry.kind !== "turn") return `m:${entry.msg.id}`;
+  const head = entry.items[0];
+  return `t:${entry.turnId ?? ""}:${head && "msg" in head ? head.msg.id : ""}`;
 }
 
 /** v20: message-flow 插件数据契约——宿主（中间面板/右面板）经 PluginSlot props 注入。 */
@@ -264,6 +288,7 @@ interface MessageFlowCoreProps {
   historySessionId?: number | null;
   historyThreadId?: number;
   entries: TimelineEntry[];
+  loadedMessageIds: ReadonlySet<number>;
   /** 是否运行中（决定流式占位与贴底策略） */
   running: boolean;
   /** 渲染单条 entry（外层闭包提供 TurnGroup/StandaloneEntry 与各模式差异） */
@@ -291,8 +316,18 @@ interface MessageFlowCoreProps {
   /** 滚动目标（主界面任务卡点击穿透 / turn 导航） */
   scrollTarget?: { threadId?: number; turnId?: number } | null;
   clearScrollTarget?: () => void;
+  /** plan-723-3029：宿主自带的「历史装载失败」提示（自带重试入口）。
+   *
+   *  为什么内核要开这个口子：失败时 messageHistory 的窗口状态是 EMPTY（hasBefore=false），
+   *  上方「加载更早消息」按钮根本不渲染，而内核又不持有装载逻辑（由宿主各自发起），
+   *  于是只能由宿主把「失败 + 重试」作为一个节点交给内核，摆在同一个位置。
+   *  主消息流不传这个 prop，行为不变。 */
+  historyNotice?: ReactNode;
   className?: string;
   emptyText?: string;
+  /** plan-20261115-flow-subagent-ready：消息流首帧就绪信号上报（true = 已渲染并测量落定）。
+   *  宿主据此决定「未落位子代理卡」能不能画——见 MainMessageFlow 的 suppressUnplacedSubagents。 */
+  onFlowReady?: (ready: boolean) => void;
 }
 
 /** plan-282-1421（第11项）：单个虚拟项的高亮包装。
@@ -312,6 +347,7 @@ function MessageFlowCore({
   historySessionId,
   historyThreadId,
   entries,
+  loadedMessageIds,
   running,
   renderEntry,
   streamingNode,
@@ -322,8 +358,10 @@ function MessageFlowCore({
   search = true,
   scrollTarget,
   clearScrollTarget,
+  historyNotice,
   className,
   emptyText = "暂无消息",
+  onFlowReady,
 }: MessageFlowCoreProps) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   recordComponentRender("messageFlowCore");
@@ -346,6 +384,13 @@ function MessageFlowCore({
    * 同一个 scroll 事件链就会立刻再次触发加载，形成「加载→变高→再加载」的自持回路，
    * 表现为用户没有滚动、消息流却自己上下抖。每次真正发起请求时打点，冷却期内不再触发。 */
   const lastOlderAtRef = useRef(0);
+  /** plan-20261115-topload：冷却期内命中「接近顶部」时挂的补检定时器。
+   *  为什么需要：用户常常在冷却期里就停在了顶部，之后不再产生 scroll 事件——
+   *  只在 onScroll 里判一次，这次命中就被丢掉了，表现是「停在顶部不加载、来回滚几下才出来」。 */
+  const olderCheckTimerRef = useRef(0);
+  /** 解除「贴底跟随」的那一刻补一次判定。回调在 StickyBottom 构造时就装上了（早于下方 useCallback），
+   *  因此经 ref 转发，保证拿到的是最新闭包。 */
+  const olderCheckRef = useRef<() => void>(() => {});
   /** plan-547: 虚拟内容容器（RO 监听测高变化保持贴底） */
   // plan-282-1444：显式含 null 联合类型，保证 ref 可变（需在回调里同时交给虚拟列表）
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -354,7 +399,13 @@ function MessageFlowCore({
   /** plan-20261020-pts：贴底跟随内核。每个实例一份（切会话时宿主按会话 key 重建本组件，
    *  新会话天然从「跟随」开始）；跟随状态只由用户意图改变，详见 stickyBottom.ts。 */
   const [sticky] = useState(() => {
-    const instance = new StickyBottom({ onJumpChange: setShowScrollBottom });
+    const instance = new StickyBottom({
+      onJumpChange: setShowScrollBottom,
+      /* plan-20261115-topload：解除跟随的瞬间补一次「接近顶部」判定。
+         解除可能发生在与 onScroll 不同的事件链上（惯性滚动、拖滚动条松手），
+         那一刻 onScroll 已经跑过，只靠它就会漏掉这次加载。条件不满足时该补检什么也不做。 */
+      onFollowChange: (following) => { if (!following) olderCheckRef.current(); },
+    });
     if (savedPosition && !savedPosition.following) instance.release();
     return instance;
   });
@@ -392,7 +443,10 @@ function MessageFlowCore({
   const [remoteMore, setRemoteMore] = useState(false);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const searchController = useRef<AbortController | null>(null);
-  const [pendingMatch, setPendingMatch] = useState<{ id: number; turn_id: number | null; loaded?: boolean } | null>(null);
+  const [pendingMatch, setPendingMatch] = useState<{ id: number; turn_id: number | null; loaded?: boolean; nonce?: number } | null>(null);
+  /** 同一命中被重复选中时的序号：命中只有一条时 next 恒为 0，
+   *  直接传同一个对象引用会被 React 判为无变化，定位 effect 不重跑（点了没反应）。 */
+  const matchNonceRef = useRef(0);
   /** 问题12: scrollspy——当前视口焦点 entry 下标，用于 JumpDots 自动聚焦对应小横条 */
   const [activeEntryIndex, setActiveEntryIndex] = useState(0);
 
@@ -800,6 +854,34 @@ function MessageFlowCore({
     finally { loadingOlder.current = false; }
   }, [historySessionId, historyThreadId, history.hasBefore, sticky, virtualizer]);
 
+  /** plan-20261115-topload：接近顶部就自动加载更早的消息——自动加载的唯一入口。
+   *
+   * 为什么从 onScroll 里抽出来：原来只在 scroll 事件里判一次，以下情况会漏判，
+   * 而判丢之后用户已经停在顶部、不再有 scroll 事件可等（必须来回滚几下才碰上第二次机会）：
+   *   ① 命中时正处在 400ms 冷却期内（上一次加载刚发生）；
+   *   ② 解除「贴底跟随」发生在另一条事件链上（惯性滚动、拖滚动条松手），当时 onScroll 已跑过；
+   *   ③ 判定条件成立的那一刻根本没有 scroll 事件（滚动已到头）。
+   * 现在：滚动事件、解除跟随、以及冷却到期三条路径都汇到这里；判定条件本身不变
+   * （近顶 + 非跟随 + 400ms 冷却），因此不会退回 plan-630-2590 修掉的「自持加载回路」。 */
+  const maybeLoadOlder = useCallback(() => {
+    const el = parentRef.current;
+    if (!el || !positioned || sticky.isFollowing()) return;
+    const nearTopPx = Math.min(200, el.clientHeight * 0.3);
+    if (el.scrollTop >= nearTopPx) return;
+    const wait = lastOlderAtRef.current + 400 - performance.now();
+    if (wait > 0) {
+      // 冷却期内命中：到点再判一次（用户可能已经停在这里，不会再产生 scroll 事件）
+      window.clearTimeout(olderCheckTimerRef.current);
+      olderCheckTimerRef.current = window.setTimeout(() => {
+        olderCheckTimerRef.current = 0;
+        olderCheckRef.current();
+      }, wait + 16);
+      return;
+    }
+    void loadOlder();
+  }, [positioned, sticky, loadOlder]);
+  olderCheckRef.current = maybeLoadOlder;
+
   useLayoutEffect(() => {
     const anchor = prependAnchor.current;
     if (!anchor) return;
@@ -842,19 +924,16 @@ function MessageFlowCore({
      *
      * 原实现用绝对阈值 `scrollTop < 400`：子代理面板视口本身不高（容器窄、头部还会周期性变高），
      * 400px 几乎覆盖整个视口，于是任何 scroll 事件都会触发加载；配合 prepend 后 scrollTop 仍可能落在
-     * 阈值内，就形成自持回路（没滚轮却上下抖）。这里三处收紧：
-     *  1. 阈值取视口高度的 30% 且不超过 200px——小视口不再恒真；
-     *  2. 400ms 冷却——一次加载的几何收敛期内不再触发下一次；
-     *  3. 只在用户不在底部时加载（跟随态说明他在看最新内容）。 */
-    if (positioned && !sticky.isFollowing()) {
-      const nearTopPx = Math.min(200, el.clientHeight * 0.3);
-      if (el.scrollTop < nearTopPx && performance.now() - lastOlderAtRef.current > 400) void loadOlder();
-    }
-  }, [scheduleSpy, scheduleVisibleRefresh, positioned, sticky, loadOlder]);
+     * 阈值内，就形成自持回路（没滚轮却上下抖）。收紧为阈值取视口高度的 30% 且不超过 200px、
+     * 400ms 冷却、只在用户不在底部时加载；plan-20261115-topload 只把这三条判定收进 maybeLoadOlder，
+     * 让它在滚动之外（解除跟随 / 冷却到期）也能被复核。 */
+    maybeLoadOlder();
+  }, [scheduleSpy, scheduleVisibleRefresh, maybeLoadOlder]);
 
   // 滚动条自动隐藏的延时器不能在组件卸载后继续回写 DOM。
   useEffect(() => () => {
     window.clearTimeout(scrollIdleTimerRef.current);
+    window.clearTimeout(olderCheckTimerRef.current);
     parentRef.current?.classList.remove("is-scrolling", "is-scrollbar-hover");
     // plan-20261024-jumpfix：卸载时收尾跳转校正（取消帧、定时器与用户接管监听）
     jumpCleanupRef.current?.();
@@ -1041,6 +1120,78 @@ function MessageFlowCore({
     return () => { cancelAnimationFrame(settleRafRef.current); settleRafRef.current = 0; };
   }, [sessionKey, totalCount, visible, layoutEpoch, virtualizer, sticky]);
 
+  /* plan-20261115-flow-subagent-ready：消息流「首帧就绪」信号（flowReady）。
+   *
+   * 为什么需要：未落位子代理卡的抑制条件原先只看 sessionLoading，而它只表示「请求未返回」——
+   * 切会话的缓存命中路径（store/chat.ts: `set({ sessionLoading: false })`）直接把它置假，
+   * 此时消息虽已恢复进 store，虚拟化首帧却还没渲染测量完，兜底槽位就先画到轮末
+   * （视觉上是消息流最底部），等 spawn 条目 / 工作流卡到齐再跳回原位。
+   *
+   * 判定（全部复用既有首屏几何路径，不新建第二套监测）：
+   *  ① positioned——上面那条首帧效应的结论（尾项已挂载并贴底，或已达其兜底上限）；
+   *  ② 可见窗口内每个虚拟项都已有实测尺寸（虚拟器自己的 itemSizeCache 命中；
+   *     只剩估高说明这一帧还没测完）；
+   *  ③ 再过 FLOW_READY_QUIET_MS 静默窗口，期间 entries 未变化——切会话后的 REST 合并
+   *     （refreshAndMergeMessages / loadSessionSubagents 补回的 spawn 条目、工作流卡）
+   *     在这个窗口内到齐，兜底槽位才不会先占位再搬家。
+   * 超过 FLOW_READY_MAX_MS 一律放行（见常量注释：宁可先揭示，不允许卡片被永久隐藏）。
+   * 就绪后本会话保持真值（流式增长不再回退），仅在会话重建与列表清空时清零。 */
+  const [flowReady, setFlowReady] = useState(false);
+  const flowReadyRef = useRef(false);
+  /** 就绪判定的计时基准：随实例固定，不因 entries 变化重置（否则运行中流式会无限推后） */
+  const [flowReadyBaseMs] = useState(() => performance.now());
+
+  const visibleItemsMeasured = useCallback(() => {
+    const range = virtualizer.range;
+    if (!range) return false;
+    const last = Math.min(range.endIndex, virtualizer.options.count - 1);
+    if (last < 0) return false;
+    for (let index = Math.max(0, range.startIndex); index <= last; index++) {
+      if (!virtualizer.itemSizeCache.has(virtualizer.options.getItemKey(index))) return false;
+    }
+    return true;
+  }, [virtualizer]);
+
+  useEffect(() => {
+    if (flowReadyRef.current || !positioned || totalCount === 0) return;
+    let cancelled = false;
+    let raf = 0;
+    let timer = 0;
+    const promote = () => {
+      if (cancelled) return;
+      flowReadyRef.current = true;
+      setFlowReady(true);
+    };
+    const settle = () => {
+      raf = 0;
+      if (cancelled) return;
+      const measured = visibleItemsMeasured();
+      if (!measured && performance.now() - flowReadyBaseMs < FLOW_READY_MAX_MS) {
+        raf = requestAnimationFrame(settle);
+        return;
+      }
+      // 测量落定：留一个静默窗口（entries 变化会 cleanup 掉本计时并把窗口推后）
+      timer = window.setTimeout(promote, measured ? FLOW_READY_QUIET_MS : 0);
+    };
+    raf = requestAnimationFrame(settle);
+    return () => { cancelled = true; cancelAnimationFrame(raf); window.clearTimeout(timer); };
+  }, [positioned, totalCount, entries, layoutEpoch, visibleItemsMeasured, flowReadyBaseMs]);
+
+  /* plan-20261115-flow-subagent-ready：列表清空（切会话后内容未到 / 会话被清空）必须清零，
+     并让上面那条首帧效应重新走一遍——否则复用同一实例的下一次内容到达会在「未就绪的首帧」
+     就放行兜底槽位，正是这次要修的场景。 */
+  useEffect(() => {
+    if (totalCount > 0) return;
+    flowReadyRef.current = false;
+    setFlowReady(false);
+    initSessionKeyRef.current = null;
+  }, [totalCount]);
+
+  /* plan-20261115-flow-subagent-ready：只在上报值真正变化时通知宿主，避免父层无谓重渲染。 */
+  const onFlowReadyRef = useRef(onFlowReady);
+  onFlowReadyRef.current = onFlowReady;
+  useEffect(() => { onFlowReadyRef.current?.(flowReady); }, [flowReady]);
+
   const recoveryCycle = useRef({ id: 0, outer: false, inner: false });
   const previousVisible = useRef(false);
   useLayoutEffect(() => {
@@ -1200,19 +1351,35 @@ function MessageFlowCore({
     refreshVisibleIndexes();
   }, [positioned, sampleHeights, refreshVisibleIndexes]);
 
-  const matchedIndices = useMemo(() => {
+  /* 本地命中：按**消息条数**计数，与远端 searchMessages 的口径一致。
+   *
+   *  旧实现按 turn/entry 计数：一个 turn 里出现 5 次关键词只算 1 处，而高亮是整条虚拟项内的
+   *  全部出现都会亮——于是「计数说 1/3、屏幕上却有十几处黄色」，这是计数与高亮不一致的主因。
+   *  每条命中同时记下所属条目下标与消息 id：下标用于虚拟列表定位，消息 id 让落点能对齐到
+   *  **命中的那条消息**而不是整轮（一轮可能横跨几个视口）。工具行命中没有独立消息标记，
+   *  messageId 记 null，退回对齐整条条目。 */
+  const localMatches = useMemo(() => {
     const kw = searchKeyword.trim().toLowerCase();
-    if (!kw) return [];
-    const result: number[] = [];
-    entries.forEach((e, idx) => {
-      if (e.kind === "turn") {
-        const hit = e.items.some((it) => {
-          if (it.kind === "tools") return it.nodes.some((n) => nodeToolText(n).toLowerCase().includes(kw));
-          return itemText(it).toLowerCase().includes(kw);
-        });
-        if (hit) result.push(idx);
-      } else {
-        if (msgText(e.msg.content).toLowerCase().includes(kw)) result.push(idx);
+    if (!kw) return [] as Array<{ index: number; messageId: number | null }>;
+    const result: Array<{ index: number; messageId: number | null }> = [];
+    entries.forEach((entry, index) => {
+      if (entry.kind !== "turn") {
+        if (msgText(entry.msg.content).toLowerCase().includes(kw)) result.push({ index, messageId: entry.msg.id });
+        return;
+      }
+      let toolHit = false;
+      for (const item of entry.items) {
+        if (item.kind === "tools") {
+          // 同一 turn 的工具行合并算一条（工具名文本没有独立的消息 DOM 可对齐）
+          if (!toolHit && item.nodes.some((node) => nodeToolText(node).toLowerCase().includes(kw))) {
+            toolHit = true;
+            result.push({ index, messageId: null });
+          }
+          continue;
+        }
+        if (itemText(item).toLowerCase().includes(kw)) {
+          result.push({ index, messageId: "msg" in item ? item.msg.id : null });
+        }
       }
     });
     return result;
@@ -1259,7 +1426,10 @@ function MessageFlowCore({
    *  推过目标 turn（现象：点倒数第二个刻度，视图落到倒数第一条用户消息处）。
    *  因此平滑滚动停稳后直接量目标项真实 DOM 位置收敛（与宽度还原的 correctAnchor 同思路）；
    *  收敛期间把 scrollspy 焦点锁定到目标项，用户一滚动即交还。 */
-  const jumpToIndex = useCallback((index: number, align: "start" | "center") => {
+  /* messageId（可选）：命中消息 id。给了就按「命中的那条消息」而不是整条虚拟项对位——
+   * 一轮里用户消息 + 思考 + 多次工具 + 回答可能占满几个视口，把整条 turn 居中时
+   * 命中若在后半段，跳完仍在视口外（用户看到的就是「跳错位置」）。 */
+  const jumpToIndex = useCallback((index: number, align: "start" | "center", messageId?: number | null) => {
     if (index < 0) return;
     sticky.release();
 
@@ -1329,8 +1499,10 @@ function MessageFlowCore({
         jumpRafRef.current = requestAnimationFrame(correct);
         return;
       }
-      const cur = node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
-      const want = align === "start" ? 0 : Math.max(0, (el.clientHeight - node.offsetHeight) / 2);
+      // 测量节点优先取命中的那条消息；取不到（未渲染 / 在折叠区里）再退回整条虚拟项
+      const focus = (messageId != null ? node.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`) : null) ?? node;
+      const cur = focus.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+      const want = align === "start" ? 0 : Math.max(0, (el.clientHeight - focus.offsetHeight) / 2);
       const delta = cur - want;
       if (Math.abs(delta) <= 2) {
         // 已对齐：守护窗口内继续盯（不写，只观察），到期交还控制
@@ -1389,11 +1561,44 @@ function MessageFlowCore({
     jumpRafRef.current = requestAnimationFrame(animate);
   }, [sticky, virtualizer, scheduleSpy, totalCount]);
 
+  /** 远端命中 → 消息流条目下标；命中消息不在已加载窗口时返回 -1。 */
+  const indexOfRemoteMatch = useCallback((match: { id: number; turn_id: number | null } | null) => {
+    if (!match) return -1;
+    // plan-20261116-review-fixes：一个轮次可能只加载尾部，不能据此跳过命中消息的补拉。
+    if (!loadedMessageIds.has(match.id)) return -1;
+    return entries.findIndex((entry) => (entry.kind === "turn"
+      ? (match.turn_id != null && (entry.turnId === match.turn_id || entry.turnIds?.includes(match.turn_id)))
+        || entry.items.some((item) => "msg" in item && item.msg.id === match.id)
+      : entry.msg.id === match.id));
+  }, [entries, loadedMessageIds]);
+
+  /* 本轮修复：本地分支**只在关键词变化时**回到第一处并跳转。
+   * 旧实现依赖命中列表（entries 一变就重建），于是侧边对话「加载更早消息」前插历史、
+   * 或流式追加新消息，都会把正在看的那一处打回开头并强制滚动。
+   * entries 变化时改为按条目身份（anchor）把索引对回同一条命中，不打扰用户。 */
+  const lastSearchKeywordRef = useRef("");
+  const matchAnchorRef = useRef("");
+
   useEffect(() => {
     if (historySessionId != null) return;
-    setActiveMatchIndex(0);
-    if (matchedIndices.length > 0) jumpToIndex(matchedIndices[0], "center");
-  }, [matchedIndices, jumpToIndex, historySessionId]);
+    const kw = searchKeyword.trim().toLowerCase();
+    if (!kw) { lastSearchKeywordRef.current = ""; matchAnchorRef.current = ""; return; }
+    if (localMatches.length === 0) { matchAnchorRef.current = ""; return; }
+    if (lastSearchKeywordRef.current !== kw) {
+      lastSearchKeywordRef.current = kw;
+      setActiveMatchIndex(0);
+      matchAnchorRef.current = entryAnchorKey(entries[localMatches[0].index]);
+      jumpToIndex(localMatches[0].index, "center", localMatches[0].messageId);
+      return;
+    }
+    const anchor = matchAnchorRef.current;
+    const current = localMatches[Math.min(activeMatchIndex, localMatches.length - 1)];
+    if (!anchor || entryAnchorKey(entries[current.index]) === anchor) return;
+    const restored = localMatches.findIndex((hit) => entryAnchorKey(entries[hit.index]) === anchor);
+    if (restored >= 0) setActiveMatchIndex(restored);
+    // activeMatchIndex 故意不进依赖：它变化不该重跑本 effect，否则每次跳转都要重新比对锚点
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localMatches, entries, searchKeyword, jumpToIndex, historySessionId]);
 
   useEffect(() => {
     if (historySessionId == null || !searchOpen || !searchKeyword.trim()) {
@@ -1405,8 +1610,12 @@ function MessageFlowCore({
     const timer = window.setTimeout(() => {
       void api.searchMessages(historySessionId, searchKeyword.trim(), historyThreadId, controller.signal).then((result) => {
         if (controller.signal.aborted) return;
-        setRemoteMatches(result.items); setRemoteMore(result.has_more); setActiveMatchIndex(0);
-        setPendingMatch(result.items[0] ?? null);
+        // 服务端按 id 倒序（新→旧）返回，前端一律按**旧→新**入库：
+        // 这样「下一处＝向下＝更新」在远端与本地两个分支里的含义才一致
+        // （旧实现远端是倒序，输入关键词先跳到最底部最新一处，点「下一处」反而往上跳）。
+        const ascending = [...result.items].reverse();
+        setRemoteMatches(ascending); setRemoteMore(result.has_more); setActiveMatchIndex(0);
+        setPendingMatch(ascending[0] ?? null);
       }).catch(() => { if (!controller.signal.aborted) setRemoteMatches([]); })
         .finally(() => { if (!controller.signal.aborted) setRemoteLoading(false); });
     }, 200);
@@ -1415,11 +1624,11 @@ function MessageFlowCore({
 
   useEffect(() => {
     if (!pendingMatch || historySessionId == null) return;
-    const index = entries.findIndex((entry) => entry.kind === "turn"
-      ? (pendingMatch.turn_id != null && (entry.turnId === pendingMatch.turn_id || entry.turnIds?.includes(pendingMatch.turn_id)))
-        || entry.items.some((item) => "msg" in item && item.msg.id === pendingMatch.id)
-      : entry.msg.id === pendingMatch.id);
-    if (index >= 0 && pendingMatch.loaded) { jumpToIndex(index, "center"); setPendingMatch(null); return; }
+    const index = indexOfRemoteMatch(pendingMatch);
+    // 命中已在已加载窗口里就直接定位。旧实现还要求 loaded（只有拉过窗口才置位），
+    // 于是每点一次「上一处/下一处」都要先跑一次 around 窗口请求，跳转要等一个网络往返。
+    if (index >= 0) { jumpToIndex(index, "center", pendingMatch.id); setPendingMatch(null); return; }
+    // 拉过窗口仍找不到（消息已删除 / 不属于本会话）：清掉请求，计数处会显示「当前不在视图」
     if (pendingMatch.loaded) { setPendingMatch(null); return; }
     let cancelled = false;
     void aroundMessages(historySessionId, pendingMatch.id, historyThreadId).then((messages) => {
@@ -1429,18 +1638,25 @@ function MessageFlowCore({
       }
     }).catch(() => { if (!cancelled) setPendingMatch(null); });
     return () => { cancelled = true; };
-  }, [pendingMatch, entries, historySessionId, historyThreadId, jumpToIndex]);
+  }, [pendingMatch, entries, historySessionId, historyThreadId, jumpToIndex, indexOfRemoteMatch]);
 
   const jumpMatch = (dir: 1 | -1) => {
     if (historySessionId != null) {
       if (!remoteMatches.length) return;
-      const next = (activeMatchIndex + dir + remoteMatches.length) % remoteMatches.length;
-      setActiveMatchIndex(next); setPendingMatch(remoteMatches[next]); return;
+      /* 下一处 = dir +1 = 向下 = 更新的命中（remoteMatches 已按旧→新排序）。 */
+      const next = ((Math.min(activeMatchIndex, remoteMatches.length - 1)) + dir + remoteMatches.length) % remoteMatches.length;
+      setActiveMatchIndex(next);
+      // 带自增序号下发：命中只有一条（或连点同一处）时内容相同，
+      // 仅靠引用变化无法驱动定位 effect，这个序号保证每次点击都重新定位。
+      setPendingMatch({ ...remoteMatches[next], nonce: ++matchNonceRef.current });
+      return;
     }
-    if (matchedIndices.length === 0) return;
-    const next = (activeMatchIndex + dir + matchedIndices.length) % matchedIndices.length;
+    if (localMatches.length === 0) return;
+    const next = ((Math.min(activeMatchIndex, localMatches.length - 1)) + dir + localMatches.length) % localMatches.length;
     setActiveMatchIndex(next);
-    jumpToIndex(matchedIndices[next], "center");
+    const hit = localMatches[next];
+    matchAnchorRef.current = entryAnchorKey(entries[hit.index]);
+    jumpToIndex(hit.index, "center", hit.messageId);
   };
 
   useEffect(() => {
@@ -1468,12 +1684,22 @@ function MessageFlowCore({
     clearScrollTarget?.();
   }, [scrollTarget, entries, jumpToIndex, clearScrollTarget, historySessionId, historyThreadId]);
 
-  const activeHighlightIndex = historySessionId == null ? matchedIndices[activeMatchIndex] : entries.findIndex((entry) => {
-    const match = remoteMatches[activeMatchIndex];
-    if (!match) return false;
-    return entry.kind === "turn" ? (match.turn_id != null && (entry.turnId === match.turn_id || entry.turnIds?.includes(match.turn_id)))
-      || entry.items.some((item) => "msg" in item && item.msg.id === match.id) : entry.msg.id === match.id;
-  });
+  /* 当前高亮项：远端命中可能还没被拉进已加载窗口（返回 -1）。
+   * 旧实现 -1 会让「当前项」永远匹配不上——一个高亮都不亮，计数却照旧显示。
+   * 本地分支下 activeMatchIndex 越界时回退到最后一处命中，避免同样的「全不高亮」。 */
+  const activeHighlightIndex = historySessionId == null
+    ? (localMatches[activeMatchIndex]?.index ?? localMatches[localMatches.length - 1]?.index ?? -1)
+    : indexOfRemoteMatch(remoteMatches[activeMatchIndex] ?? null);
+  /** 计数口径：N 是**已找到的命中条数**（消息条数，不是文本出现次数）。 */
+  const matchTotal = historySessionId != null ? remoteMatches.length : localMatches.length;
+  /** 当前序号：命中集合缩短（换关键词、前插结果没跟上）时钳进范围内，
+   *  否则会显示「5/3」这种自相矛盾的数字。 */
+  const matchOrdinal = matchTotal === 0 ? 0 : Math.min(activeMatchIndex, matchTotal - 1) + 1;
+  /** 当前命中没落在已加载的消息里：序号失去意义，改显示总数并说明原因。 */
+  const matchUnlocated = isSearching && matchTotal > 0 && activeHighlightIndex < 0;
+  const matchCountTip = matchUnlocated
+    ? `共 ${matchTotal} 条命中消息${remoteMore ? "，还有更早的未加载（可点「更多结果」）" : ""}；当前这条不在已加载的消息里`
+    : `第 ${matchOrdinal} 条，共 ${matchTotal} 条命中消息${remoteMore ? "；还有更早的未加载（可点「更多结果」）" : ""}`;
   return (
     <FlowVisibilityContext.Provider value={visible}><FlowViewportVisibility.Provider value={visible}><div className={`message-flow-outer ${className || ""}`}>
       {historySessionId != null && history.hasBefore && <div className="flow-history-control">
@@ -1481,6 +1707,13 @@ function MessageFlowCore({
           {history.error ? "重试加载历史" : "加载更早消息"}
         </Button>
       </div>}
+      {/* plan-723-3029：宿主自带的历史装载失败提示（自带重试入口）。
+          位置与上面的「加载更早消息」同一处；两者同时存在时下移一行，避免叠在一起。 */}
+      {historyNotice != null && (
+        <div className="flow-history-control" style={historySessionId != null && history.hasBefore ? { top: 40 } : undefined}>
+          {historyNotice}
+        </div>
+      )}
       {/* plan-156-619 S2：入口按钮受「设置 → 常规 → 消息搜索按钮」控制；
           搜索条一旦打开则始终显示（否则 Ctrl+F 唤起后看不到输入框）。 */}
       {search && (searchOpen || searchEntryVisible) && (
@@ -1506,18 +1739,22 @@ function MessageFlowCore({
                 onChange={(e) => setSearchKeyword(e.target.value)}
                 placeholder="搜索消息内容…"
               />
-              {(historySessionId != null ? remoteMatches.length > 0 : matchedIndices.length > 0) && (
-                <span className="flow-search-count">
-                  {remoteLoading ? "查找中…" : `${activeMatchIndex + 1}/${historySessionId != null ? remoteMatches.length : matchedIndices.length}${remoteMore ? "+" : ""}`}
-                </span>
+              {matchTotal > 0 && (
+                <Tooltip content={matchCountTip}>
+                  <span className="flow-search-count">
+                    {remoteLoading ? "查找中…" : matchUnlocated
+                      ? `共 ${matchTotal} 条`
+                      : `${matchOrdinal}/${matchTotal}${remoteMore ? "+" : ""}`}
+                  </span>
+                </Tooltip>
               )}
               <Tooltip content="上一个">
-                <button type="button" onClick={() => jumpMatch(-1)} disabled={historySessionId != null ? !remoteMatches.length : !matchedIndices.length} aria-label="上一个">
+                <button type="button" onClick={() => jumpMatch(-1)} disabled={matchTotal === 0} aria-label="上一个">
                   <IconChevronUp size={12} />
                 </button>
               </Tooltip>
               <Tooltip content="下一个">
-                <button type="button" onClick={() => jumpMatch(1)} disabled={historySessionId != null ? !remoteMatches.length : !matchedIndices.length} aria-label="下一个">
+                <button type="button" onClick={() => jumpMatch(1)} disabled={matchTotal === 0} aria-label="下一个">
                   <IconChevronDown size={12} />
                 </button>
               </Tooltip>
@@ -1537,9 +1774,15 @@ function MessageFlowCore({
                 const sid = historySessionId, keyword = searchKeyword.trim();
                 const signal = searchController.current?.signal;
                 setRemoteLoading(true);
-                void api.searchMessages(sid, keyword, historyThreadId, signal, remoteMatches.at(-1)?.id).then((result) => {
+                // 升序列表的头一条是当前最旧的命中，用它当游标（服务端 before_id 语义仍是「更早的」）。
+                // 追加时同样反转成升序再**前插**，拼完整体仍是旧→新，方向不会错乱。
+                void api.searchMessages(sid, keyword, historyThreadId, signal, remoteMatches[0]?.id).then((result) => {
                   if (signal?.aborted) return;
-                  setRemoteMatches((values) => [...values, ...result.items]); setRemoteMore(result.has_more);
+                  const older = [...result.items].reverse();
+                  setRemoteMatches((values) => [...older, ...values]);
+                  // 前插后所有下标后移：索引跟着挪，保持仍指向同一条命中
+                  setActiveMatchIndex((index) => index + older.length);
+                  setRemoteMore(result.has_more);
                 }).catch(() => {}).finally(() => { if (!signal?.aborted) setRemoteLoading(false); });
               }}>更多结果</Button>}
             </div>
@@ -1655,18 +1898,27 @@ function MainMessageFlow({
 }) {
   const getScoped = useScopedGetter();
   const messages = useScoped("messages");
+  const loadedMessageIds = useMemo(() => new Set(messages.map((message) => message.id)), [messages]);
   const turns = useScoped("turns");
   const isRunning = useScoped("isRunning");
   const runningTurnId = useScoped("runningTurnId");
   // v39: 后台子代理运行数——主会话等待子代理时显示「等待子代理结束…」
   const pendingSubagents = useScoped("pendingSubagents");
   const currentSessionId = useScoped("currentSessionId");
+  const historyWindow = useMessageHistory(currentSessionId);
   const sideScope = useContext(ConvoScopeContext);
   /* plan-20261020-suggestion-gate：会话首次加载期间消息还没渲染出来。
    * 建议卡属于「已收口的一轮」，先于消息出现会让人以为任务只剩这一步，因此等消息落地后再展示。
    * 侧边对话（ConvoScopeProvider）不消费主仓库的加载态——它本身也关闭了建议卡。 */
   const sessionLoading = useChatStore((s) => s.sessionLoading);
   const messagesPending = useContext(ConvoScopeContext) == null && sessionLoading;
+  /* plan-20261115-flow-subagent-ready：消息流首帧是否已渲染并测量落定（由 MessageFlowCore 上报）。
+   * 为什么不能只看 sessionLoading：缓存命中路径（store/chat.ts 里 `set({ sessionLoading: false })`）
+   * 在切会话时立刻把它置假，而虚拟化首帧还没测量落定，兜底槽位会抢先把未落位子代理卡画在轮末，
+   * 等 spawn 条目到齐再跳回原位。就绪信号与加载态**并列**抑制兜底槽位，两条路径都覆盖。
+   * 本组件按会话 key 重建，切会话天然从 false 开始。 */
+  const [flowReady, setFlowReady] = useState(false);
+  const suppressUnplaced = messagesPending || !flowReady || historyWindow.hasBefore;
   // 主代理未在跑、但后台工作流在执行（含工作流结束后等待唤醒主代理的空档）：消息流下方显示「等待响应…」（工作流才是此刻的执行者）
   const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
   // 本会话已启动的工作流里最晚的结束时刻（完成 / 取消 / 暂停）：整轮「已工作」用时的终点下限，见 TurnGroup
@@ -1705,6 +1957,9 @@ function MainMessageFlow({
         turnId: number;
         programId: number | null;
         spawnMessageId: number | null;
+        startedAt: string | null;
+        endedAt: string | null;
+        workflowKind: string | null;
       }>
     >();
     for (const [aid, m] of Object.entries(subagentMeta)) {
@@ -1718,6 +1973,9 @@ function MainMessageFlow({
         turnId: m.turnId,
         programId: m.programId ?? m.workflow?.program_id ?? null,
         spawnMessageId: m.spawnMessageId ?? null,
+        startedAt: m.startedAt ?? null,
+        endedAt: m.endedAt ?? null,
+        workflowKind: m.workflow?.kind ?? null,
       });
       map.set(m.turnId, list);
     }
@@ -1802,6 +2060,24 @@ function MainMessageFlow({
   // 尾部一轮跳过 turn_id 回填前的唤醒孤儿条目（它马上并入前一轮），避免唤醒消息到达的瞬间上一轮不再是尾部。
   const backgroundBusy = workflowBusy || pendingSubagents > 0;
   const tailIndex = tailRoundIndex(entries);
+  const activeRoundStartMs = useMemo(() => {
+    const tail = tailIndex >= 0 ? entries[tailIndex] : undefined;
+    const ids = tail && tail.kind === "turn"
+      ? (tail.turnIds ?? (tail.turnId != null ? [tail.turnId] : []))
+      : (runningTurnId != null ? [runningTurnId] : []);
+    let best = 0;
+    for (const id of ids) {
+      const raw = getTurnById(turns, id)?.started_at;
+      const ms = raw ? parseUtc(raw) : 0;
+      if (ms > 0 && (best === 0 || ms < best)) best = ms;
+    }
+    if (best === 0 && runningTurnId != null) {
+      const raw = getTurnById(turns, runningTurnId)?.started_at;
+      const ms = raw ? parseUtc(raw) : 0;
+      if (ms > 0) best = ms;
+    }
+    return best > 0 ? best : undefined;
+  }, [entries, tailIndex, turns, runningTurnId]);
 
   const renderEntry = useCallback(
     (entry: TimelineEntry, index: number) => {
@@ -1814,9 +2090,11 @@ function MainMessageFlow({
       // 并入续跑轮时整轮的运行态与行状态取最后一个 turn：整轮结束才算结束
       const tailTurnId = entry.turnIds?.[entry.turnIds.length - 1] ?? entry.turnId;
       const turnRowStatus = getTurnById(turns, tailTurnId)?.status;
+      // plan-723-3029 R2：补 runningTurnId != null 守卫——entry.turnIds 缺省且两者同为 null 时
+      // `null === null` 会判成运行中（进会话首帧的缓存恢复、无 turn 的独立条目都会踩到）。
       const roundRunning = entry.turnIds
         ? runningTurnId != null && entry.turnIds.includes(runningTurnId)
-        : runningTurnId === entry.turnId;
+        : runningTurnId != null && runningTurnId === entry.turnId;
       // 计划卡内嵌到其归属 turn 内部规划说明之后、执行操作之前（彻底根治时序倒挂沉底 Bug）
       const hasTurnPlan = entry.turnId != null && (plansByTurn[entry.turnId] != null || entry.turnId === planTurnId);
       return (
@@ -1834,13 +2112,17 @@ function MainMessageFlow({
           turnStatus={turnRowStatus}
           awaitingBackground={backgroundBusy && index === tailIndex}
           backgroundEndedAt={index === tailIndex ? backgroundEndedAt : 0}
-          // 会话首屏历史还没落地时先不画「未落位子代理卡」：那时 WS 补发的尾部消息
-          // 已进 store，但派发子代理的 spawn_subagent 条目还没到，卡片会先沉到轮末再跳回原位。
-          suppressUnplacedSubagents={messagesPending}
+          // 会话首屏历史还没落地 / 消息流首帧还没测量落定时先不画「未落位子代理卡」：
+          // 那时 WS 补发的尾部消息已进 store，但派发子代理的 spawn_subagent 条目还没到，
+          // 卡片会先沉到轮末再跳回原位（见 suppressUnplacedSubagents）。
+          // plan-20261115-flow-subagent-ready：抑制条件补上 flowReady——缓存命中路径
+          // sessionLoading 已为假，但虚拟化首帧同样还没测量落定。
+          suppressUnplacedSubagents={suppressUnplaced}
+          flowReady={flowReady}
         />
       );
     },
-    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors, backgroundBusy, tailIndex, backgroundEndedAt, messagesPending]
+    [turns, runningTurnId, subagentsOfRound, planTurnId, plansByTurn, actions, isRunning, latestUserId, flowErrorTurnId, hiddenTurnErrors, backgroundBusy, tailIndex, backgroundEndedAt, suppressUnplaced, flowReady]
   );
 
   // S8：流式文本/信号不再在此计算（已下沉到 <StreamingTail> 的精确 selector）。
@@ -1881,6 +2163,7 @@ function MainMessageFlow({
       // 主代理未跑但工作流在跑时同样开启流式槽位（否则尾部「等待响应…」不渲染）
       running={isRunning || workflowBusy}
       renderEntry={renderEntry}
+      loadedMessageIds={loadedMessageIds}
       streamingNode={
         // v42: 压缩期间状态行改显「压缩中…」（优先于「处理中…／等待响应…」；
         // 若同时存在 turn 级瞬态提示（如重试），瞬态提示仍优先）。
@@ -1888,6 +2171,8 @@ function MainMessageFlow({
           active={visible && (isRunning || workflowOnly)}
           statusLabel={turnStatus ?? (isCompacting ? "压缩中…" : undefined)}
           persistedText={workflowOnly ? "" : lastPersistedText(entries)}
+          workStartMs={activeRoundStartMs}
+          thinkingInTimeline={runningTurnId != null && entries.some((entry) => entry.kind === "turn" && (entry.turnIds ?? [entry.turnId]).includes(runningTurnId))}
         />
       }
       trailingNode={
@@ -1899,7 +2184,7 @@ function MainMessageFlow({
         !isRunning && pendingSubagents === 0 && !activeDebug && !flowError && !messagesPending && suggestionCard !== false && hasSuggestion ? <SuggestionCard />
           // v39: 后台子代理运行期间主会话保持“运行中”——主 turn 未跑但有子代理在跑时，
           // 用与流式状态行同款样式显示「等待子代理结束…」（完成后服务端自动唤醒新一轮）。
-          : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} />
+          : !isRunning && pendingSubagents > 0 ? <SubagentWaitingLine count={pendingSubagents} workStartMs={activeRoundStartMs} />
           : activeDebug ? <DebugCard status={activeDebug} />
           // plan-308-1542 需求1：任务执行类错误统一在消息流末尾报（不弹右上角）
           : flowError ? (
@@ -1918,6 +2203,7 @@ function MainMessageFlow({
       }
       forceBottomKey={userMsgSeq}
       sessionKey={currentSessionId ?? 0}
+      onFlowReady={setFlowReady}
       jumpDots
       search
       scrollTarget={resolvedScrollTarget}
@@ -1943,6 +2229,7 @@ function SubagentMessageFlow({
 }) {
   const currentSessionId = useScoped("currentSessionId");
   const storeMessages = useVisibleChat((s) => (threadId != null ? s.subagentMessages[threadId] : undefined) ?? EMPTY_SUBAGENT_MESSAGES, visible);
+  const loadedMessageIds = useMemo(() => new Set(storeMessages.map((message) => message.id)), [storeMessages]);
   // S8：子代理流式文本同样下沉到 <StreamingTail>（见其注释），此处不再订阅缓冲。
   const subagentMeta = useVisibleChat((s) => (threadId != null ? s.subagentMeta[threadId] : undefined), visible);
   // plan-75-334 阶段1：turn 行状态改由本层统一查询（与改造前每个 TurnGroup 各自查询语义一致）
@@ -1955,19 +2242,71 @@ function SubagentMessageFlow({
   // plan-330-1648 M6: REST 历史回填——事件桶只覆盖“本次连接期间”收到的消息，
   // 重开面板/断线/切会话后会有缺口（用户反馈：面板内容不完整）。这里按 threadId 拉一次历史，
   // 与事件桶按 id 去重后并入（升序），不覆盖已有流式状态。
+  //
+  // plan-723-3029：首屏装载改成「① 刷新尾锚定窗口 → ② 精确补回派发消息」一条链，
+  // 失败重试按钮也复用这条链，不会出现「只补了头、尾窗口还是旧的」这种半截状态。
+  /** 装载序号：切面板 / 重新装载 / 卸载时递增，用来丢弃过期回包（等价于原来的 cancelled 标志）。 */
+  const loadSeqRef = useRef(0);
+  /** 已处理过补头的 threadId：补头只自动尝试一次，成功后不再重复请求。 */
+  const headFilledRef = useRef<number | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<{ label: string; detail: string } | null>(null);
+
+  const loadThreadHistory = useCallback(async (sid: number, tid: number) => {
+    const seq = ++loadSeqRef.current;
+    const alive = () => seq === loadSeqRef.current;
+    setHistoryNotice(null);
+    try {
+      const result = await refreshMessageWindow(sid, useChatStore.getState().subagentMessages[tid] ?? [], tid);
+      if (!alive()) return;
+      mergeHistoryIntoChat(sid, result.items, tid, result.checkedIds);
+    } catch (error) {
+      /* plan-723-3029：原来是静默 `catch {}`——失败时 messageHistory 里该线程的窗口状态还是 EMPTY
+       * （hasBefore=false），连「加载更早消息」按钮都不渲染，用户只看到一片空白，
+       * 分不清「加载失败」还是「本来就没有记录」。现在把失败态交给宿主的提示位，自带重试入口。 */
+      if (alive()) setHistoryNotice({ label: "历史加载失败，点击重试", detail: String(error) });
+      return;
+    }
+    /* plan-723-3029：精确补回「主代理派发给该子代理的任务消息」。
+     *
+     * 首屏窗口是尾锚定的（server/app/services/message_window.py：按 id desc 取 + 1MB 预算，
+     * 默认 limit 100），而派发消息是该线程 id 最小的一条（agent_loop 里 sender_type=user、
+     * thread_id=agentId 的那条任务消息），消息一多就被裁出窗口——面板于是从「用时 N 分」开始，
+     * 看不到主代理到底让它干什么。
+     * 后端已在 listSessionSubagents 下发 spawn_message_id（= 该线程 min(message.id)），
+     * 直接按 id 定位一次，比逐页 before 往前翻便宜得多，也不会把整个历史拉进内存。 */
+    if (headFilledRef.current === tid) return; // 已经补过（或判定无需补），不重复请求
+    const spawnId = useChatStore.getState().subagentMeta[tid]?.spawnMessageId ?? null;
+    if (spawnId == null) return; // 旧数据 / 无锚点：交给既有的「加载更早消息」兜底
+    headFilledRef.current = tid; // 先记账：自动尝试只做一次，失败后要靠用户点重试才会再来
+    const loaded = useChatStore.getState().subagentMessages[tid] ?? [];
+    if (loaded.some((m) => Number(m.id) === spawnId)) return; // 已在窗口内，无需补
+    try {
+      const items = await aroundMessages(sid, spawnId, tid);
+      // 回包作废（面板被隐藏 / 换线程 / 重新装载）：交还补头权，下次可见时再来一次
+      if (!alive()) { headFilledRef.current = null; return; }
+      // 合并走分页历史同一条口径（mergeHistoryIntoChat → chat.ts 的 _mergeRefreshed：
+      // 按 id 去重、输出按 id 升序），不自己 push 进 store，避免顺序错乱。
+      mergeHistoryIntoChat(sid, items, tid);
+      if (!items.some((m) => Number(m.id) === spawnId)) throw new Error("未返回派发消息");
+    } catch (error) {
+      /* plan-723-3029 R3：这个早退原来连补头权都不归还——「补头请求在面板隐藏/切换线程期间失败」时
+       * 既不报错也不清 headFilledRef，本次挂载内 headFilledRef 一直是该 tid，再可见时 2270 那行直接
+       * return，自动补头永久失效（首帧只能从「用时 N 分」开始，看不到派发任务消息）。
+       * 现在无论回包是否作废都归还补头权；只在记录的仍是本线程时才清，避免把别的线程刚拿到的权抹掉。 */
+      if (!alive()) {
+        if (headFilledRef.current === tid) headFilledRef.current = null;
+        return;
+      }
+      headFilledRef.current = null; // 交出重试权：用户点「重试」时再试一次（不做自动重试）
+      setHistoryNotice({ label: "任务消息加载失败，点击重试", detail: String(error) });
+    }
+  }, []);
+
   useEffect(() => {
     if (!visible || threadId == null || currentSessionId == null) return;
-    const requestedSid = currentSessionId;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const result = await refreshMessageWindow(requestedSid, useChatStore.getState().subagentMessages[threadId] ?? [], threadId);
-        if (cancelled) return;
-        mergeHistoryIntoChat(requestedSid, result.items, threadId, result.checkedIds);
-      } catch { /* 非阻塞：拉取失败就只用事件桶 */ }
-    })();
-    return () => { cancelled = true; };
-  }, [threadId, currentSessionId, visible]);
+    void loadThreadHistory(currentSessionId, threadId);
+    return () => { loadSeqRef.current += 1; };
+  }, [threadId, currentSessionId, visible, loadThreadHistory]);
 
   // 将子代理消息按 timeline 构建（子代理消息通常是平铺的 tool/text/thinking）
   // S8b：同样走增量构建器（与主会话同一套引用复用语义）。
@@ -1978,7 +2317,7 @@ function SubagentMessageFlow({
   // 子会话就是普通会话，它的输出与主会话同排版（不再六节橙卡），因此无需定位该消息。
 
   const renderEntry = useCallback(
-    (entry: TimelineEntry) => {
+    (entry: TimelineEntry, index: number) => {
       if (entry.kind !== "turn") return <StandaloneEntry entry={entry} />;
       // plan-75-334 阶段1：父层统一计算的全局派生值经 props 传入。
       //  · turnStatus 保留改造前语义（子代理消息的 turn_id 也可能命中主会话 turns 行）；
@@ -1988,7 +2327,7 @@ function SubagentMessageFlow({
       return (
         <TurnGroup
           entry={entry}
-          isRunning={isRunning}
+          isRunning={isRunning && index === entries.length - 1}
           actions={actions || "copy-only"}
           flow="subagent"
           agentId={threadId ?? undefined}
@@ -2000,7 +2339,7 @@ function SubagentMessageFlow({
         />
       );
     },
-    [isRunning, actions, threadId, turns]
+    [isRunning, actions, threadId, turns, entries.length]
   );
 
 
@@ -2013,19 +2352,31 @@ function SubagentMessageFlow({
       entries={entries}
       running={isRunning}
       renderEntry={renderEntry}
+      loadedMessageIds={loadedMessageIds}
       streamingNode={
         // plan-75-334 阶段3：面板隐藏时不推进流式视觉更新（active=false ⇒ TailBody 返回 null，
         // 流式 Markdown 不重算）；恢复可见时 active 恢复，以当前缓冲一次性对齐。
         <StreamingTail
           source={threadId ?? -1}
+          thinkingInTimeline={entries.at(-1)?.kind === "turn"}
           active={isRunning && visible}
           statusLabel={isRunning ? "子代理执行中…" : undefined}
           persistedText={lastPersistedText(entries)}
+          workStartMs={subagentMeta?.startedAt ? (parseUtc(subagentMeta.startedAt) || undefined) : undefined}
         />
       }
       sessionKey={`${currentSessionId ?? 0}:${threadId ?? 0}`}
       jumpDots={false}
       search={visible}
+      /* plan-723-3029：装载失败（含补派发消息失败）的可见化入口——点击重跑整条装载链。
+         失败时 hasBefore=false，内核自带的「加载更早消息」不出现，所以必须由这里给出口。 */
+      historyNotice={historyNotice != null && currentSessionId != null && threadId != null ? (
+        <Tooltip content={historyNotice.detail}>
+          <Button size="xs" variant="subtle" onClick={() => void loadThreadHistory(currentSessionId, threadId)}>
+            {historyNotice.label}
+          </Button>
+        </Tooltip>
+      ) : undefined}
       className={className}
       emptyText="子代理尚未产生输出"
     /></FlowVisibilityContext.Provider>

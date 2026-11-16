@@ -1890,7 +1890,7 @@ class WorkflowRuntime:
         meta = self._meta[node_id]
         plan = list(self._retry_plan())
         count = self._retries.get(node_id, 0)
-        if count < len(plan):
+        if not result.retry_handled and count < len(plan):
             delay = float(plan[count])
             self._retries[node_id] = count + 1
             next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()

@@ -180,6 +180,8 @@ class SubagentHandle:
     tokens_used: int = 0
     # 每个执行步骤的监听回调（参数为当前消息列表）：工作流据此写入增量检查点日志
     on_step: object | None = None
+    # plan-20261112-retry-policy-1：将模型层已经处理重试的事实交给子代理与工作流收尾。
+    retry_handled: bool = False
 
 
 class SubagentManager:
@@ -256,6 +258,7 @@ class SubagentManager:
         """子代理驱动循环：执行 → 瞬时故障保活重试 → 终态或暂停。
 
         - 成功：status=done，清空检查点；
+        - plan-20261112-retry-policy-1：模型层已处理重试的瞬时故障直接暂停，保存进度供手动继续；
         - 瞬时故障（网关/超时/空响应/流丢帧）且设置中的重试次数>0：按最后一个重试间隔等待，
           从检查点原地续跑（已完成步骤不重做），直到恢复 / 达到保活上限 / 主代理中断；
         - 主代理中断（取消信号 / CancelledError）：status=paused，保存检查点（可续跑）；
@@ -332,6 +335,7 @@ class SubagentManager:
                     out = AgentOutput(kind="error", error=f"执行异常: {str(e)[:300]}")
 
                 handle.tokens_used += int(getattr(out, "tokens", 0) or 0)
+                handle.retry_handled = out.retry_handled
                 if out.kind == "message":
                     handle.status = "done"
                     handle.summary = out.text or ""
@@ -360,7 +364,7 @@ class SubagentManager:
                     return
                 if out.transient:
                     waits = _retry_plan()
-                    if waits and self.owner_active:
+                    if waits and self.owner_active and not out.retry_handled:
                         # plan-565-2323 G6：保活必须有上限。旧实现「瞬时故障 → 无限 continue」，
                         # 且每轮把任务重写回 in_progress，上游凭据错误时永不判死。
                         keepalive_rounds += 1
@@ -910,6 +914,11 @@ def _dump_message(m) -> dict | None:
         payload = m.model_dump(exclude_none=True)
         if m.skill_load_snapshots:
             payload["skill_load_snapshots"] = m.skill_load_snapshots
+        # plan-20261109-compact-structure：断点恢复仍需来源与原始思考签名，不能只保存协议字段。
+        for field_name in ("source_message_ids", "context_kind", "checkpoint_id", "thinking_blocks"):
+            value = getattr(m, field_name)
+            if value:
+                payload[field_name] = value
         return payload
     if isinstance(m, dict):
         return {k: v for k, v in m.items() if v is not None}

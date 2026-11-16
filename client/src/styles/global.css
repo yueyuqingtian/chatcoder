@@ -332,7 +332,16 @@ a { color: var(--accent); text-decoration: none; }
 .sb-session { display: flex; align-items: center; gap: var(--sb-row-gap); height: 32px; padding: 0 var(--sb-row-pad); border-radius: var(--r-md); font-size: var(--sidebar-fs, 14px); color: var(--text-1); cursor: pointer; position: relative; transition: background var(--dur-fast); }
 .sb-session:hover { background: var(--sidebar-hover); color: var(--text-1); }
 .sb-session.active { background: var(--sidebar-selected); color: var(--text-1); font-weight: 500; }
-.sb-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.sb-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: clip; white-space: nowrap; color: var(--text-1);
+  /* plan-20261116-sidebar-title：标题被行尾槽位裁掉的右缘用渐隐代替硬省略号，过渡更自然 */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent 100%);
+}
+/* 行尾槽位左侧为长时间文本预留了 10px 空档（见 .sb-session-time / .sb-sub-toggle 的负 margin），
+   标题不延伸时这段空档 + 行 gap 会形成标题与归档图标之间约 18px 的空白。
+   这里让标题吃掉这 10px（右缘已在渐隐区内，不会盖住时间文字与图标）；
+   有子会话开关 / 工作流标记的行不延伸，否则会与紧邻的图标重叠。 */
+.sb-session:not(:has(.sb-sub-toggle, .sb-session-wf)) .sb-session-title { margin-right: -10px; }
 /* S1（plan-41-197）：标题 hover 跑马灯——文本溢出时悬停自动横向滚动浏览全文
    （Sidebar 在 mouseenter 测量后写 --marquee-x / --marquee-dur，不改 state 避免重渲染）。 */
 .sb-session-title > .sb-title-inner { display: inline-block; transform: translateX(0); }
@@ -947,9 +956,9 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .rc-footer .btn.danger:disabled { opacity: 0.6; cursor: default; }
 /* plan-282-1421（第4项）：进行中状态行——呼吸点与文案间距由样式承担
    （原先靠内联 style marginRight，统一后消除内联样式）。 */
-.turn-status-line { display: flex; align-items: center; gap: 6px; padding: 0; color: var(--text-3); font-size: 12px; line-height: var(--chat-line-height, 2.2); }
+.turn-status-line { display: flex; align-items: center; gap: 8px; padding: 0; color: var(--text-3); font-size: 12.5px; line-height: var(--chat-line-height, 2.2); }
 .turn-status-line .thinking-breath-dot { flex-shrink: 0; }
-.turn-status-line > span:last-child { animation: status-pulse var(--dur-loop) var(--ease-in-out) infinite; }
+.turn-status-line .thinking-block-status { font-weight: 500; }
 @keyframes status-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 /* 思考块：与工具调用 (tc-row/tc-output) 保持 100% 一致的紧凑平铺与展开样式 */
 .thinking-node {
@@ -1013,19 +1022,20 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   font-size: 12px;
 }
 .thinking-output {
-  margin: 2px 0 4px 0;
-  padding: 6px 10px;
-  border-radius: var(--r-sm);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  margin: 4px 0 6px calc(var(--flow-icon, 16px) + var(--flow-icon-gap, 8px));
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+  border: 1px solid var(--surface-inset-border);
   max-height: 280px;
   overflow-y: auto;
 }
-.thinking-pre {
+.thinking-output .thinking-pre {
   margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.4;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.72;
   color: var(--text-2);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1056,6 +1066,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   align-items: center;
   justify-content: center;
   color: var(--text-3);
+  opacity: 0;
   /* plan-353-1738 M4b（S5）：旋转统一 --dur-3 + --ease-spring（原 --dur-fast 且无曲线） */
   transition: transform var(--dur-3) var(--ease-spring), color var(--dur-fast), opacity var(--dur-3) var(--ease-standard);
 }
@@ -1066,6 +1077,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .turn-worktime.clickable:hover .turn-worktime-arrow,
 .turn-worktime.clickable:focus-visible .turn-worktime-arrow {
   color: var(--text-1);
+  opacity: 1;
 }
 /* 工作过程容器（思考/工具/子代理），支持折叠与平滑过渡；间距交给 .turn-flow gap
    plan-353-1738 M4a（S2）：由「max-height: none ↔ 0」改为 grid-template-rows 0fr↔1fr。
@@ -1176,7 +1188,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .tc-chevron { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 4px; flex-shrink: 0; color: var(--text-3); opacity: 0; transition: opacity var(--dur-fast), transform var(--dur-3) var(--ease-spring); }
 /* v19: 任意可展开行 hover 提亮；展开态完整可见 */
 .tc-row.has-output:hover .tc-chevron,
-.tc-row.expanded .tc-chevron { opacity: 1; }
+.tc-row.has-output:focus-visible .tc-chevron { opacity: 1; }
 .tc-chevron.open { transform: rotate(90deg); }
 .tc-chevron-spacer { width: 0; }
 .tc-output { margin: 2px 0 4px 0; padding: 6px 10px; border-radius: var(--r-sm); background: var(--bg-elevated); border: 1px solid var(--border); max-height: 280px; overflow-y: auto; }
@@ -1219,6 +1231,16 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .tc-grep-ln { color: var(--text-3); flex-shrink: 0; }
 .tc-grep-text { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-error-output { margin: 4px 0 0; padding: 6px 10px; border-radius: var(--r-sm); background: var(--error-soft); color: var(--error); font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+/* plan-693-2868（P1）：微应用调用（microapp_call）的展开内容——一行「appId · method」+ 参数/结果 + 「查看界面」。
+   只做排布，不加边框与左侧色条：外层 .tc-output 已有底色与描边，这里再套一层卡会变成双层框。 */
+.tc-microapp { display: flex; flex-direction: column; gap: 6px; }
+.tc-microapp-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.tc-microapp-app { color: var(--text-1); font-weight: 600; font-family: var(--font-mono); }
+.tc-microapp-method {
+  padding: 0 6px; height: 18px; display: inline-flex; align-items: center;
+  border-radius: var(--r-pill); background: color-mix(in oklab, var(--pc-cyan) 12%, transparent);
+  color: var(--pc-cyan); font-size: 11px; font-family: var(--font-mono);
+}
 .file-badge { flex-shrink: 0; border-radius: var(--r-sm); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; letter-spacing: 0.2px; }
 /* plan-548: 消息流「N 个文件已更改」折叠条（ArtifactList）已移除——变更统一在输入框上方
  * TaskStatusPanel 展示；仅保留其复用的 .artifact-file-review 审核勾选框样式。 */
@@ -1645,6 +1667,15 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   background: var(--bg-main);
   box-sizing: border-box;
 }
+/* plan-693-2868 P0-4：微应用界面容器。
+   这里必须用绝对定位撑满，不能用 flex:1 —— 父容器 .rp-content 是 position:relative 的
+   普通块（不是 flex），子元素的 flex:1 对它无效，高度会塔成内容高度，表现为
+   「面板里只看得到一条」。浏览器面板也是同一套做法（见 .browser-viewport webview）。 */
+.microapp-viewport { position: absolute; inset: 0; display: flex; overflow: hidden; background: var(--bg-main); }
+.microapp-frame { flex: 1; min-height: 0; width: 100%; border: none; background: var(--bg-main); }
+.microapp-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 24px; text-align: center; }
+.microapp-empty-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.microapp-empty-desc { font-size: 12px; line-height: 1.6; color: var(--text-3); max-width: 260px; }
 /* DOM 快照 / 控制台子视图：覆盖在视口之上，内部滚动 */
 .browser-subview { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; background: var(--bg-main); overflow: hidden; }
 .browser-subview-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -2871,7 +2902,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 .plan-confirm-label { font-size: 11px; color: var(--text-3); display: block; margin-bottom: 4px; }
 .plan-confirm-task-text { font-size: 13px; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
 .plan-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.plan-confirm-actions .btn-primary { padding: 7px 16px; border: none; border-radius: var(--r-sm); background: var(--accent); color: #fff; font-size: 13px; cursor: pointer; }
+.plan-confirm-actions .btn-primary { padding: 7px 16px; border: none; border-radius: var(--r-sm); background: var(--accent); color: var(--accent-contrast, #fff); font-size: 13px; cursor: pointer; }
 .plan-confirm-actions .btn-primary:hover { filter: brightness(1.1); }
 .plan-confirm-actions .btn-ghost { padding: 7px 16px; border: 1px solid var(--border); border-radius: var(--r-sm); background: transparent; color: var(--text-2); font-size: 13px; cursor: pointer; }
 .plan-confirm-actions .btn-ghost:hover { background: var(--bg-hover); color: var(--text-1); }
@@ -4473,13 +4504,29 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 /* ── 消息流动效 ── */
 /* plan-334-1661 S7：`.mf-entry-new` 与 `@keyframes msg-in` 已删除——全仓无挂载点
    （原注释写“仅对真正新增的条目挂”，但组件侧始终未实现），属死样式。 */
-/* v13: 日常状态不再使用紫粉流光循环——`.text-flow`/`.text-shine` 降级为静态中性文字。
-   保留类名与结构（组件仍引用），仅移除 background-clip 渐变与循环动画。 */
+/* plan-flow-redesign：运行态工具/状态专属文字流动扫光效果（仅用于正在执行的工具、运行中子代理动作与底部加载状态） */
 .text-flow {
   color: var(--text-2);
 }
 .text-shine {
-  color: var(--text-2);
+  background: linear-gradient(
+    100deg,
+    var(--shine-base, var(--text-2)) 0%,
+    var(--shine-base, var(--text-2)) 36%,
+    var(--shine-peak, var(--text-1)) 50%,
+    var(--shine-base, var(--text-2)) 64%,
+    var(--shine-base, var(--text-2)) 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: text-shine-sweep var(--dur-flow-shine) linear infinite;
+}
+@keyframes text-shine-sweep {
+  0% { background-position: 120% 0; }
+  100% { background-position: -100% 0; }
 }
 /* plan-282-1421（第4项）：流式三点光标及其配套动效全部移除——
    `.stream-caret` 三点光标、`.breath-pulse` 三点呼吸光斑、`@keyframes breath-3`
@@ -5738,6 +5785,9 @@ html[data-window-motion="1"] .app-pane { transition: none !important; }
 .inst-kind { flex-shrink: 0; padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-hover); color: var(--text-3); font-size: 10.5px; font-weight: 400; }
 .inst-desc { margin-top: 2px; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inst-actions { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; margin-left: auto; }
+/* plan-693-2868（P4b）：微应用行没有启停开关，用它占住与 ui/Switch 同尺寸的槽位，
+   保证各行右侧操作区宽度一致、图标按钮不左右跳动（不画任何视觉，只占位）。 */
+.inst-switch-slot { display: inline-block; width: 32px; height: 18px; flex-shrink: 0; }
 /* 常驻使用说明（plan-59-286）：装完之后"怎么用"要一直看得见 */
 .inst-hint { flex-shrink: 0; font-size: 12px; line-height: 1.6; color: var(--text-3); }
 /* 空态：图标/说明 + 主按钮引导（计划 41-226：点空类型标签时有“去市场”出口，不会“点了没反应”） */

@@ -112,3 +112,44 @@ async def test_cleanup_expired_removes_db_entry(db, workspace):
     # DB 登记同步清理
     await db.refresh(snap)
     assert snap.file_list == []
+
+
+async def test_cleanup_reports_kept_when_nothing_deletable(db, workspace):
+    """plan-20261115：保留期内的活跃快照不删，但必须回传 kept 让界面能解释。
+
+    用户反馈「清理 checkpoint 始终清理不完」——实测服务端每次都正常执行，
+    只是 14 天保留期内的文件按设计不删，而旧实现返回 results=[] / deleted=0，
+    界面只能显示「已清理 0 个」，看起来就是清理失败。
+    """
+    ckpt_dir = workspace / ".chatcoder" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    fresh = ckpt_dir / "fresh.bin"
+    fresh.write_bytes(b"f")
+    snap = TurnSnapshot(session_id=1, turn_id=1,
+                        file_list=[{"ckpt": str(fresh), "path": "a.bin"}], new_files=[])
+    db.add(snap)
+    await db.commit()
+
+    result = await checkpoint_gc.cleanup(db, str(workspace))
+    assert result["deleted"] == 0
+    assert result["kept"] == 1  # 保留期内 → 不删但要如实报告
+    assert fresh.exists()
+
+
+async def test_cleanup_accepts_shared_refs(db, workspace):
+    """复用调用方算好的引用集：结果必须与自行计算一致（多工作区批量清理路径）。"""
+    ckpt_dir = workspace / ".chatcoder" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    orphan = ckpt_dir / "orphan.bin"
+    orphan.write_bytes(b"o")
+    ref = ckpt_dir / "ref.bin"
+    ref.write_bytes(b"r")
+    snap = TurnSnapshot(session_id=1, turn_id=1,
+                        file_list=[{"ckpt": str(ref), "path": "a.bin"}], new_files=[])
+    db.add(snap)
+    await db.commit()
+
+    refs = await checkpoint_gc._referenced_ckpts(db)
+    result = await checkpoint_gc.cleanup(db, str(workspace), refs=refs)
+    assert result["deleted"] == 1  # 仅孤儿
+    assert not orphan.exists() and ref.exists()

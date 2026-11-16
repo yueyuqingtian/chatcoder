@@ -10,27 +10,41 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  api, type McpServerOut, type PluginMarketItem, type SkillOut,
+  api, type McpServerOut, type MicroAppOut, type PluginMarketItem, type SkillOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { useNavIntentStore } from "../../store/navIntent";
+import { useMicroAppsStore } from "../../store/microapps";
+import { describeExtError, useMicroappsExtStore } from "../../store/microappsExt";
+// 成功 / 失败反馈走全局提示队列（本文件的 notify() 只写 chat.error，装不下成功语气）
+import { notify as toast } from "../../store/toast";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
 import { Button, DadaLoader, Empty, Input, Menu, PageActions, Segmented, Select, Switch, Tooltip } from "../ui";
 import {
   IconBox, IconPlug, IconPlus, IconRefresh, IconSearch, IconTrash, IconZap, IconGitBranch, IconSettings, IconInfo,
+  IconPuzzle, IconStop,
 } from "../icons";
 import { ActionDialogs, toneOf } from "./MarketPanel";
+import { MicroAppSettings } from "./MicroAppSettings";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
 import { CordisPluginsSection } from "./CordisPluginsSection";
 
-type InstKind = "plugin" | "skill" | "connector";
+/** plan-693-2868（D1 / §7 P4-3）：「拓展」第四类 = 微应用。
+ *
+ *  与前三类的语义差异（这是本页最容易写错的一处）：
+ *  - 插件 / 技能 / 连接器都有「启用」状态（是否注入 AI 的工具面或上下文）；
+ *  - **微应用没有启用/停用**：它装进库就能被 `/` 菜单注入、被 `microapp_call` 调用，
+ *    界面是否打开由用户主动触发（内置的在「拓展 → 微应用」卡片菜单里，外置的额外由宿主
+ *    按需拉起自己的进程）。所以 microapp 行**不渲染 Switch**，
+ *    计数也只表示「装了几个」，不表示「启用了几个」（§6.4「默认不启用」指的是不自动打开界面）。 */
+type InstKind = "plugin" | "skill" | "connector" | "microapp";
 
 interface Row {
   key: string;
   kind: InstKind;
-  /** 插件用名称做标识；技能/连接器同时持有数据库 id */
+  /** 插件用名称做标识；技能/连接器同时持有数据库 id；微应用为 appId */
   name: string;
   dbId?: number;
   displayName: string;
@@ -42,6 +56,12 @@ interface Row {
   iconUrl?: string;
   /** 本机落盘路径 / 连接地址，详情里展示 */
   path?: string;
+  /** 外置微应用（plan-external-microapps）：清单由主进程扫目录得到，不在后端库里。
+   *  不提供卸载（目录是用户自己的，误删代价太高）。 */
+  external?: boolean;
+  /** 外置微应用的进程**正在运行**（主进程 statusOf 的 state === "running"）。
+   *  只有运行时操作区才出现「停止进程」图标；未运行不渲染，不留点不动的死按钮。 */
+  running?: boolean;
 }
 
 /** 从安装元数据取市场图标地址（仅接受 https，与市场页同口径） */
@@ -79,6 +99,8 @@ const KIND_META: Record<InstKind, { label: string; icon: React.ReactNode }> = {
   plugin: { label: "插件", icon: <IconBox size={13} /> },
   skill: { label: "技能", icon: <IconZap size={13} /> },
   connector: { label: "连接器", icon: <IconPlug size={13} /> },
+  // plan-693-2868（D1）：第四类。图标用拼图（和「拓展」语义一致），与前三类的方块/闪电/插头区分开
+  microapp: { label: "微应用", icon: <IconPuzzle size={13} /> },
 };
 
 /** 来源键 → 分组标题（plan-41-225：一张表说了算——
@@ -98,6 +120,9 @@ const SOURCE_LABEL: Record<string, string> = {
   plugin: "插件贡献",
   local: "本机安装",
   installed: "本机安装",
+  // plan-693-2868（P4）：微应用的 `.origin.json` 两种来源（§6.1）
+  import: "本地导入",
+  community: "社区",
 };
 
 function notify(msg: string) { useChatStore.setState({ error: msg }); }
@@ -112,7 +137,14 @@ export function InstalledPanel() {
   const [plugins, setPlugins] = useState<PluginMarketItem[]>([]);
   const [skills, setSkills] = useState<SkillOut[]>([]);
   const [connectors, setConnectors] = useState<McpServerOut[]>([]);
-  const [counts, setCounts] = useState<Record<InstKind, number>>({ plugin: 0, skill: 0, connector: 0 });
+  /** plan-693-2868（P4b）：微应用走 `/api/microapps`，与前三类不同源（D11：不扩 MarketKind）。 */
+  const [microApps, setMicroApps] = useState<MicroAppOut[]>([]);
+  /** plan-external-microapps：外置微应用直接订阅 store——拉起 / 停止进程都会改 items，
+   *  订阅后行内的「停止进程」图标与状态立刻跟着变，不用整页重新加载。 */
+  const extItems = useMicroappsExtStore((s) => s.items);
+  const [counts, setCounts] = useState<Record<InstKind, number>>({
+    plugin: 0, skill: 0, connector: 0, microapp: 0,
+  });
   const [loading, setLoading] = useState(false);
   /** plan-537-2262 S2：三个列表接口各自的失败项（"插件（原因）" 形式）；非空即视为数据不完整 */
   const [loadError, setLoadError] = useState<string[]>([]);
@@ -125,7 +157,9 @@ export function InstalledPanel() {
   const [dropTarget, setDropTarget] = useState<Row | null>(null);
   /** plan-284-1450：已安装条目详情（此前行不可点，用户无法查看详情与落盘位置） */
   const [detail, setDetail] = useState<Row | null>(null);
-  const [dialog, setDialog] = useState<null | InstKind>(null);
+  /** 导入 / 安装弹窗：只覆盖插件 / 技能 / 连接器——微应用走「导入 zip 包」的独立通道
+   *  （`POST /api/microapps/import`，见 MarketPanel 的「微应用」标签），不混进这三个既有弹窗。 */
+  const [dialog, setDialog] = useState<null | "plugin" | "skill" | "connector">(null);
   /** 内置连接器（database / debugger）的专属配置面板（plan-41-198：保留原配置能力） */
   const [configServer, setConfigServer] = useState<McpServerOut | null>(null);
   /** dsh 第三方插件数量（由子组件上报）：有插件时不再显示整页空态，避免「装了却提示没装」 */
@@ -147,20 +181,37 @@ export function InstalledPanel() {
       // 三个列表长度即事实源——计数与列表天然一致，少一次请求也少一处不一致风险。
       // plan-537-2262 S2：逐项结算——此前三个接口统一 .catch(() => []) 把失败吞成空数组，
       // 页面上就变成「还没有安装任何扩展」，用户会以为已装内容丢了。
-      const [pl, sk, mc] = await Promise.allSettled([
-        api.pluginInstalled(), api.listSkills(), api.listMcpServers(),
+      // plan-693-2868（P4b）：第四路 = 微应用库（`/api/microapps`），失败同样进 failures
+      //   ——库根不可读时不能假装「一个都没装」。
+      const [pl, sk, mc, ma] = await Promise.allSettled([
+        api.pluginInstalled(), api.listSkills(), api.listMcpServers(), api.listMicroApps(),
       ]);
       const failures: string[] = [];
       const plList: PluginMarketItem[] = pl.status === "fulfilled" ? pl.value : [];
       const skList: SkillOut[] = sk.status === "fulfilled" ? sk.value : [];
       const mcList: McpServerOut[] = mc.status === "fulfilled" ? mc.value : [];
+      const maList: MicroAppOut[] = ma.status === "fulfilled" ? (ma.value?.apps ?? []) : [];
       if (pl.status === "rejected") failures.push(`插件（${reasonText(pl.reason)}）`);
       if (sk.status === "rejected") failures.push(`技能（${reasonText(sk.reason)}）`);
       if (mc.status === "rejected") failures.push(`连接器（${reasonText(mc.reason)}）`);
+      if (ma.status === "rejected") failures.push(`微应用（${reasonText(ma.reason)}）`);
       setPlugins(plList);
       setSkills(skList);
       setConnectors(mcList);
-      setCounts({ plugin: plList.length, skill: skList.length, connector: mcList.length });
+      setMicroApps(maList);
+      // plan-external-microapps：外置微应用清单由主进程扫目录得到，与后端库不同源。
+      // 它读不到时不影响上面四类——但要在失败汇总里说清楚，否则用户会以为外置的丢了。
+      const extStore = useMicroappsExtStore.getState();
+      if (extStore.available) {
+        await extStore.load(true);
+        const after = useMicroappsExtStore.getState();
+        if (after.error) failures.push(`外置微应用（${describeExtError(after.error)}）`);
+      }
+      const extCount = useMicroappsExtStore.getState().items.length;
+      setCounts({
+        plugin: plList.length, skill: skList.length, connector: mcList.length,
+        microapp: maList.length + extCount,
+      });
       setLoadError(failures);
       if (failures.length) notify(`拓展列表加载失败：${failures.join("；")}`);
     } finally {
@@ -204,8 +255,39 @@ export function InstalledPanel() {
         path: m.url || m.command || undefined,
       });
     }
+    // plan-693-2868（P4b）：微应用行。`enabled: true` 只是「已安装」的占位——
+    // 微应用没有启停语义（装上即可注入），行内不渲染 Switch（见下方渲染处）。
+    for (const m of microApps) {
+      out.push({
+        key: `microapp:${m.appId}`, kind: "microapp", name: m.appId,
+        displayName: m.name || m.appId,
+        description: m.description || "",
+        enabled: true,
+        // `.origin.json` 缺失时后端已回落 local，这里再兜一次
+        source: m.origin?.source || "local",
+        path: m.path || undefined,
+      });
+    }
+    // 外置微应用也归到「微应用」类，**与内置行完全一致**：同一套来源标签、同一种说明口径、
+    // 同样不渲染 Switch（见下方渲染处）。用户视角它就是一个装在本机的微应用，
+    // 「自带进程 / 仅前端」「外置」这些实现细节不该出现在已安装列表里。
+    // `external` 只留一个用途：它的目录属于用户自己（常在仓库里），行内不给「移除」。
+    for (const x of extItems) {
+      out.push({
+        key: `microext:${x.id}`, kind: "microapp", name: x.id,
+        displayName: x.name || x.id,
+        // 说明口径与内置行一致：用 microapp.json 自己的 description（为空则由渲染处兜「暂无说明」）。
+        // 版本号已经在名称行旁的来源标签里体现，不再占用说明栏；声明问题保持最高优先级。
+        description: x.problems.length ? `声明问题：${x.problems.join("；")}` : (x.description || ""),
+        enabled: true,
+        source: "local",
+        path: x.dir,
+        external: true,
+        running: x.state === "running",
+      });
+    }
     return out;
-  }, [plugins, skills, connectors]);
+  }, [plugins, skills, connectors, microApps, extItems]);
 
   /** 来源选项（从已加载行聚合，保证下拉里不会出现空选项） */
   const sourceOptions = useMemo(() => {
@@ -227,9 +309,9 @@ export function InstalledPanel() {
     return list;
   }, [rows, kindFilter, sourceFilter, query]);
 
-  /** 按来源分组（同组内保持 插件 → 技能 → 连接器 的稳定顺序） */
+  /** 按来源分组（同组内保持 插件 → 技能 → 连接器 → 微应用 的稳定顺序） */
   const grouped = useMemo(() => {
-    const order: InstKind[] = ["plugin", "skill", "connector"];
+    const order: InstKind[] = ["plugin", "skill", "connector", "microapp"];
     const map = new Map<string, Row[]>();
     for (const r of [...filtered].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))) {
       const label = SOURCE_LABEL[r.source] || r.source || "其他";
@@ -241,6 +323,9 @@ export function InstalledPanel() {
   }, [filtered]);
 
   const toggleEnabled = async (row: Row) => {
+    // plan-693-2868（P4b）：微应用没有启停语义（装上即可注入），行内也不渲染 Switch；
+    // 外置微应用同样如此——它与内置行完全一致，进程由宿主按需拉起，不需要用户拨开关。
+    if (row.kind === "microapp") return;
     setBusy(row.key);
     try {
       if (row.kind === "plugin") await api.pluginSetEnabled(row.name, !row.enabled);
@@ -257,6 +342,23 @@ export function InstalledPanel() {
     finally { setBusy(null); }
   };
 
+  /** 停止一个正在运行的外置微应用进程（plan-external-microapps）。
+   *
+   *  为什么放在操作区图标里而不是行内开关：用户明确要求外置行与内置行长得一样、不要启停开关；
+   *  而进程一旦被拉起就必须有地方结束它，否则只能退出整个应用。图标只在 state === "running"
+   *  时渲染（未运行不出现），停止后立即重读清单，让界面反映真实状态。 */
+  const stopExternal = async (row: Row) => {
+    if (busy === row.key) return;
+    setBusy(row.key);
+    try {
+      const ok = await useMicroappsExtStore.getState().stop(row.name);
+      // 无论成败都重读一次：进程可能已经自行退出，界面不能停在旧状态
+      await useMicroappsExtStore.getState().load(true);
+      if (ok) toast.success(`已停止「${row.displayName}」的进程`);
+      else toast.error(`停止「${row.displayName}」失败，请稍后重试`);
+    } finally { setBusy(null); }
+  };
+
   const doRemove = async () => {
     const t = dropTarget;
     setDropTarget(null);
@@ -266,7 +368,17 @@ export function InstalledPanel() {
       if (t.kind === "plugin") await api.pluginUninstall(t.name);
       else if (t.kind === "skill" && t.dbId != null) await api.deleteSkill(t.dbId);
       else if (t.kind === "connector" && t.dbId != null) await api.deleteMcpServer(t.dbId);
+      // plan-693-2868（P4b）：微应用按列表行移除 = 删掉该 appId 的**全部版本**
+      // （`version="all"`，见 routers/microapps.py `_delete_version`）。
+      // 单版本删除留给详情弹窗里的「按版本」入口，避免列表行一次误删半个库。
+      // plan-external-microapps：外置条目不在这里移除——它的目录属于用户自己（常在仓库里），
+      // 从设置页删目录是不可接受的副作用，所以运维入口只到「停进程」为止。
+      else if (t.kind === "microapp" && !t.external) await api.removeMicroApp(t.name, "all");
+      else if (t.kind === "microapp" && t.external) return;
       await load();
+      // 微应用清单是 `/` 菜单与工具卡「查看界面」的数据源（store/microapps.ts），
+      // 删除后必须强制刷新，否则菜单里还会留着刚删掉的那个（点了就失败）。
+      if (t.kind === "microapp") await useMicroAppsStore.getState().load(true);
       await useChatStore.getState().loadBootstrap();
     } catch (e) { notify(String(e)); }
     finally { setBusy(null); }
@@ -346,7 +458,7 @@ export function InstalledPanel() {
   }, []);
   useEffect(() => { if (repoOpen) void loadRepos(); }, [repoOpen, loadRepos]);
 
-  /** 计数标签：固定渲染四类（全部 / 插件 / 技能 / 连接器），**不按数据量过滤**。
+  /** 计数标签：固定渲染五类（全部 / 插件 / 技能 / 连接器 / 微应用），**不按数据量过滤**。
    *
    *  plan-41-226 修正：此前按「无数据不渲染」过滤，本机插件数为 0 时「插件」标签整个消失，
    *  用户反馈「没有插件选项」。标签是**导航**（告诉用户有哪些类型可看），不是结果列表；
@@ -358,10 +470,12 @@ export function InstalledPanel() {
   useEffect(() => { if (!showCordis) setDshCount(0); }, [showCordis]);
 
   const filterTabs: Array<{ key: "all" | InstKind; label: string; n: number }> = [
-    { key: "all", label: "全部", n: counts.plugin + counts.skill + counts.connector + (showCordis ? dshCount : 0) },
+    { key: "all", label: "全部", n: counts.plugin + counts.skill + counts.connector + counts.microapp + (showCordis ? dshCount : 0) },
     { key: "plugin", label: "插件", n: counts.plugin + (showCordis ? dshCount : 0) },
     { key: "skill", label: "技能", n: counts.skill },
     { key: "connector", label: "连接器", n: counts.connector },
+    // plan-693-2868（D1 / P4b）：第四类。计数 = 库里装了几个 appId（不是版本数）
+    { key: "microapp", label: "微应用", n: counts.microapp },
   ];
 
   return (
@@ -423,7 +537,9 @@ export function InstalledPanel() {
       </div>
 
       {/* plan-59-286：每类拓展的常驻使用说明——"装完之后怎么用"必须在界面里说清，
-          否则用户装完不知道下一步（这是此前最影响可用性认知的缺口）。 */}
+          否则用户装完不知道下一步（这是此前最影响可用性认知的缺口）。
+          plan-693-2868（P4b）：微应用没有「启用」这一步，说明要直接讲「怎么用起来」——
+          注入到输入框；界面在「拓展 → 微应用」里点卡片打开（外置的由宿主按需拉起进程）。 */}
       <div className="inst-hint">
         {kindFilter === "plugin"
           ? "插件打包技能与连接器：技能随任务自动匹配，连接器需在列表中启用后才可用。"
@@ -431,10 +547,16 @@ export function InstalledPanel() {
             ? "技能随任务自动匹配（AI 按描述与触发条件选用），也可在对话中用 / 引用。"
             : kindFilter === "connector"
               ? "连接器需启用后才对 AI 可用；启用时会自动获取工具清单，失败可点刷新重试。"
-              : "技能随任务自动匹配；连接器需启用后才可用；插件打包技能与连接器。"}
+              : kindFilter === "microapp"
+                ? "微应用装上即可用，没有启用开关：在对话里用 / 注入引用；外置微应用的界面在「拓展 → 微应用」里点卡片打开。"
+                : "技能随任务自动匹配；连接器需启用后才可用；插件打包技能与连接器；微应用装上即可用。"}
       </div>
 
       <div className="inst-scroll">
+        {/* plan-693-2868（P3b / D1）：设置 → 拓展第四组的配置区——库位置 / 社区仓库 / 拉黑管理。
+            只在选中「微应用」分类时出现：它是这一类自己的配置，混在「全部」里会挤掉主列表。
+            位置在列表上方（先配置、再管理），符合「第一眼知道去哪儿改」。 */}
+        {kindFilter === "microapp" && <MicroAppSettings />}
         {loading && rows.length === 0 && <div className="inst-loading"><DadaLoader label="正在加载已安装内容…" /></div>}
         {/* dsh 第三方插件：独立数据源（桌面端主进程），作为插件分组置顶——
             安装入口在已安装页第一眼可见；搜索词与页面搜索框共用。 */}
@@ -465,7 +587,11 @@ export function InstalledPanel() {
             ) : (
               <Empty
                 title={kindFilter !== "all" ? `还没有安装${filterTabs.find((c) => c.key === kindFilter)?.label ?? "该类型"}` : "还没有安装任何扩展"}
-                desc="去市场挑几个，嗒嗒的口袋就更鼓了"
+                /* plan-693-2868（P4b）：微应用的空态不能说「去市场挑」——微应用的市场在左面板
+                   「拓展」的「微应用」标签里（本地库 + 社区），措辞按那一处走。 */
+                desc={kindFilter === "microapp"
+                  ? "去「拓展 → 微应用」看看本机与社区，或者让 AI 帮你创建一个"
+                  : "去市场挑几个，嗒嗒的口袋就更鼓了"}
                 action={<Button variant="primary" size="sm" onClick={gotoMarket}>前往市场</Button>}
               />
             )}
@@ -515,24 +641,49 @@ export function InstalledPanel() {
                           </button>
                         </Tooltip>
                       )}
+                      {/* plan-external-microapps：进程在跑时给「停止进程」——它是这一行唯一
+                          与进程生命周期相关的动作，未运行就不渲染（不留死按钮）。 */}
+                      {row.external && row.running && (
+                        <Tooltip title="停止进程（已在运行）">
+                          <button className="ui-icon-btn size-xs" aria-label="停止进程"
+                            disabled={busy === row.key}
+                            onClick={() => void stopExternal(row)}>
+                            <IconStop size={14} />
+                          </button>
+                        </Tooltip>
+                      )}
                       <Tooltip title="查看详情">
                         <button className="ui-icon-btn size-xs" aria-label="查看详情" onClick={() => setDetail(row)}>
                           <IconInfo size={14} />
                         </button>
                       </Tooltip>
-                      <Tooltip title={row.kind === "plugin" ? "卸载" : "移除"}>
-                        <button className="ui-icon-btn size-xs" aria-label="移除" onClick={() => setDropTarget(row)}>
-                          <IconTrash size={14} />
-                        </button>
-                      </Tooltip>
+                      {/* plan-external-microapps：外置条目没有「移除」——它的目录在用户本机（常在仓库里），
+                          从设置页删目录是不可接受的副作用；下线只到「停止进程」为止（见上方图标）。
+                          直接从操作区省略，不留一个点了会弹窗又什么都不能做的死按钮。 */}
+                      {!row.external && (
+                        <Tooltip title={row.kind === "plugin" ? "卸载" : row.kind === "microapp" ? "从微应用库移除" : "移除"}>
+                          <button className="ui-icon-btn size-xs" aria-label="移除" onClick={() => setDropTarget(row)}>
+                            <IconTrash size={14} />
+                          </button>
+                        </Tooltip>
+                      )}
                     </span>
-                    {/* 开关统一走 ui/Switch（项目规则：开关不得自绘） */}
-                    <Switch
-                      checked={row.enabled}
-                      onChange={() => void toggleEnabled(row)}
-                      disabled={busy === row.key}
-                      aria-label={`${row.displayName} 启用状态`}
-                    />
+                    {/* 开关统一走 ui/Switch（项目规则：开关不得自绘）。
+                        plan-693-2868（P4b）：**微应用行不渲染 Switch**——它没有启停语义
+                        （装上即可被 / 注入、被 microapp_call 调用），给一个拨不动的假开关
+                        比不给更糟。外置微应用与内置行完全一致，同样不给开关。
+                        右侧只留一个与开关同宽的占位，保证各行操作区宽度一致、
+                        图标按钮不因缺一列而左右跳动。 */}
+                    {row.kind === "microapp"
+                      ? <span className="inst-switch-slot" aria-hidden />
+                      : (
+                        <Switch
+                          checked={row.enabled}
+                          onChange={() => void toggleEnabled(row)}
+                          disabled={busy === row.key}
+                          aria-label={`${row.displayName} 启用状态`}
+                        />
+                      )}
                   </div>
                 </div>
               ))}
@@ -691,19 +842,26 @@ export function InstalledPanel() {
         footer={
           detail ? (
             <>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy === detail.key}
-                onClick={() => void toggleEnabled(detail)}
-              >
-                {detail.enabled ? "停用" : "启用"}
-              </button>
-              <button
-                className="btn btn-danger-ghost btn-sm"
-                onClick={() => { setDropTarget(detail); setDetail(null); }}
-              >
-                <IconTrash size={12} /> {detail.kind === "plugin" ? "卸载" : "删除"}
-              </button>
+              {/* plan-693-2868（P4b）：微应用没有启停语义，详情里也不给「启用/停用」按钮 */}
+              {detail.kind !== "microapp" && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy === detail.key}
+                  onClick={() => void toggleEnabled(detail)}
+                >
+                  {detail.enabled ? "停用" : "启用"}
+                </button>
+              )}
+              {/* 外置微应用的目录属于用户自己（常在仓库里），不提供删除：
+                  从设置页删目录是不可接受的副作用，直接不给按钮，而不是给一个点了没反应的死按钮 */}
+              {!detail.external && (
+                <button
+                  className="btn btn-danger-ghost btn-sm"
+                  onClick={() => { setDropTarget(detail); setDetail(null); }}
+                >
+                  <IconTrash size={12} /> {detail.kind === "plugin" ? "卸载" : "删除"}
+                </button>
+              )}
             </>
           ) : null
         }
@@ -714,7 +872,10 @@ export function InstalledPanel() {
             <div className="inst-detail-facts">
               <div className="inst-fact">
                 <span className="inst-fact-k">状态</span>
-                <span className="inst-fact-v">{detail.enabled ? "已启用" : "已停用"}</span>
+                {/* 微应用没有启用/停用两态：说「已安装即可用」，避免用户去找开关 */}
+                <span className="inst-fact-v">
+                  {detail.kind === "microapp" ? "已安装（装上即可用）" : detail.enabled ? "已启用" : "已停用"}
+                </span>
               </div>
               <div className="inst-fact">
                 <span className="inst-fact-k">来源</span>
@@ -737,13 +898,21 @@ export function InstalledPanel() {
 
       <ConfirmDialog
         open={dropTarget !== null}
-        title={dropTarget?.kind === "plugin" ? "卸载插件" : dropTarget?.kind === "skill" ? "删除技能" : "删除连接器"}
+        title={
+          dropTarget?.kind === "plugin" ? "卸载插件"
+            : dropTarget?.kind === "skill" ? "删除技能"
+              : dropTarget?.kind === "microapp" ? "移除微应用" : "删除连接器"
+        }
         message={
           dropTarget?.kind === "plugin"
             ? `将移除插件「${dropTarget?.displayName}」的本地文件，并注销它贡献的技能。\n\n此操作不可恢复（可重新安装）。`
-            : `将删除「${dropTarget?.displayName}」。\n\n此操作不可恢复。`
+            // plan-693-2868（P4b）：列表行的移除 = 删掉该 appId 的全部版本（version="all"），
+            // 弹窗必须写明这一点——否则用户以为只删了当前版本。
+            : dropTarget?.kind === "microapp"
+              ? `将从微应用库删除「${dropTarget?.displayName}」，**会删除该微应用的所有版本**，其中包含本地改动。\n\n此操作不可恢复（可重新导入或从社区重新安装）。`
+              : `将删除「${dropTarget?.displayName}」。\n\n此操作不可恢复。`
         }
-        confirmLabel={dropTarget?.kind === "plugin" ? "卸载" : "删除"}
+        confirmLabel={dropTarget?.kind === "plugin" ? "卸载" : dropTarget?.kind === "microapp" ? "移除" : "删除"}
         danger
         onCancel={() => setDropTarget(null)}
         onConfirm={() => void doRemove()}

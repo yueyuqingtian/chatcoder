@@ -57,9 +57,11 @@ SKILLS_ROOT = Path(
 
 _TIMEOUT = 60.0
 _DOWNLOAD_TIMEOUT = 180.0
-_MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024      # 单包 80MB（实测插件包 ~2MB，留足余量）
+# plan-693-2868 §6.4 体积表 / §7 P5 第 7 条：社区包上限 100MB，下载上限留 5MB 余量
+# （原 80MB 是市场插件包口径，实测 ~2MB；社区要装 100MB 级的包，故统一放宽）。
+_MAX_DOWNLOAD_BYTES = 105 * 1024 * 1024     # 单包 105MB（社区包上限 100MB + 余量）
 _MAX_ENTRIES = 4000                          # zip 条目数上限
-_MAX_UNPACKED_BYTES = 300 * 1024 * 1024      # 解压后总体积上限
+_MAX_UNPACKED_BYTES = 300 * 1024 * 1024      # 解压后总体积默认上限（社区安装按包体积放大）
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -142,20 +144,25 @@ async def _download(url: str, dest: Path, *, expect_sha256: str = "") -> int:
     return written
 
 
-def _extract_zip(zip_path: Path, dest: Path) -> None:
+def _extract_zip(zip_path: Path, dest: Path, *, max_unpacked_bytes: int | None = None) -> None:
     """安全解压（同步实现，调用方放线程执行）。
 
     逐条校验：拒绝绝对路径与 `..`，并用 realpath 再次确认落点在 dest 内——
     只做字符串前缀判断会被 `a/../../b` 之类的构造绕过。
+
+    `max_unpacked_bytes` 为解压后总体积上限，默认沿用模块常量 300MB（既有调用方行为不变）；
+    plan-693-2868 §6.4 的社区安装按 `max(300MB, 包体积 × 4)` 传入，让 100MB 级的包有
+    足够解压空间，同时仍能挡住 zip bomb。
     """
+    limit = _MAX_UNPACKED_BYTES if max_unpacked_bytes is None else int(max_unpacked_bytes)
     dest_resolved = dest.resolve()
     with zipfile.ZipFile(zip_path) as zf:
         infos = zf.infolist()
         if len(infos) > _MAX_ENTRIES:
             raise ValueError(f"压缩包条目过多（{len(infos)} > {_MAX_ENTRIES}）")
         total = sum(int(i.file_size) for i in infos)
-        if total > _MAX_UNPACKED_BYTES:
-            raise ValueError("解压后体积超过上限，已中止")
+        if total > limit:
+            raise ValueError(f"解压后体积超过上限（{total} > {limit}），已中止")
         for info in infos:
             name = info.filename
             if not name or name.startswith(("/", "\\")) or ".." in Path(name).parts:

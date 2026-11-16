@@ -1,0 +1,100 @@
+/* 微应用独立窗口样式（只承载一个 webview + 右上角一枚全屏按钮）。
+ *
+ * 只 @import 设计令牌（tokens.css 是纯变量定义，不会把主窗组件样式拖进来），
+ * 因此本窗口与主窗共用同一套圆角 / 动效 / 语义色令牌（与 pet.css 同一做法）。
+ *
+ * 两条硬约束：
+ *  ① 工具条是浮层，**不能**压住微应用内容：只占右上角，底色用 --bg-panel 纯色（§2.1-2），
+ *     不做整条横栏——微应用自己就是完整页面，横栏等于替它抢走一条高度。
+ *  ② 不用左侧装饰细竖线表达任何层次（AGENTS §2）。
+ */
+@import "../styles/tokens.css";
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-main);
+  color: var(--text-1);
+  font: 12px/1.5 "Segoe UI", "Microsoft YaHei", -apple-system, sans-serif;
+}
+
+#microapp-root,
+.maw-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  min-height: 0;
+}
+
+/* webview 撑满窗口：Electron 的 webview 是独立进程的渲染面，必须显式给满高 */
+.maw-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: flex;
+  background: var(--bg-panel);
+}
+
+/* 右上角浮层工具条：单枚图标按钮，悬停前保持低存在感，不遮挡微应用的主体内容 */
+.maw-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  /* webview 是独立渲染层：浮层必须显式提层，否则会被它盖住 */
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+  /* 只让按钮本身接收点击：工具条底衬不抢微应用页面的点击 */
+  pointer-events: none;
+  opacity: 0.6;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.maw-tools:hover { opacity: 1; pointer-events: auto; }
+.maw-tools > * { pointer-events: auto; }
+
+/* 工具条图标按钮：主窗的 .ui-icon-btn 定义在 components.css（本入口没引入，也不会为一个按钮
+ * 把整卷组件库拖进来），所以这里用令牌写一份最小实现——圆角 / 悬停底色 / 文字色全部走令牌，
+ * 与主窗图标按钮同一套视觉口径。 */
+.maw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+.maw-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.maw-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6);
+  text-align: center;
+}
+.maw-empty-title { font-size: 13px; font-weight: 600; line-height: 20px; color: var(--text-1); }
+.maw-empty-desc { font-size: 12px; line-height: 18px; color: var(--text-3); }

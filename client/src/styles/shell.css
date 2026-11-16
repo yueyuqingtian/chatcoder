@@ -112,6 +112,19 @@
   padding-left: calc(var(--nav-cluster-w) - var(--shell-gap) + 4px);
 }
 
+/* ── 几何动画期间，标题栏右端那组图标不参与横向位移（plan-20261115-tb-drift）──
+   问题：折叠右面板时卡片右缘向右铺开近一个面板宽，同时标题栏的 padding-right 从 8px 收回到
+   --wc-w + 4 给右上角控件组让位；两个几何量同时过渡，让「打开工作区 / 终端」这两个小图标在 260ms 里
+   横移 300px 以上，且相对标题栏自身还在向左滑——观感就是一段凭空漂移的「鬼畜」动画。
+   处理：几何动画期间（body.panel-animating 由 applyPaneUpdate 写入，左右面板、全屏切换同源）
+   把这组图标整组藏起来，动画收尾后再在终位淡入。按钮仍在 DOM 里（只是短暂透明），不参与这段位移。
+   为什么收起点不做淡出：--ease-drawer 前段最快，位移的一大半发生在开头 100ms 内，
+   带过渡地淡出等于让人正好看见位移最快的那一段；直接隐藏才是真正的「不漂移」。
+   动效关闭 / prefers-reduced-motion 时 pane 过渡不播放，本规则也随之不生效，不会留下闪烁。
+   注意：不能改成「padding 瞬变」——那会让两个图标在动画起点先跳一下再被卡片拖着走，反而更明显。 */
+.app-center > .titlebar .titlebar-right { transition: opacity var(--dur-3) var(--ease-standard); }
+body.panel-animating .app-center > .titlebar .titlebar-right { opacity: 0; transition: none; }
+
 /* ── 右面板卡片 ── */
 .app-right > .app-pane-right {
   height: auto;

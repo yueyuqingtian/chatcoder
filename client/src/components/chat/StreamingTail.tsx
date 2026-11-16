@@ -34,29 +34,37 @@ export interface StreamingTailProps {
    *  与流式正文完全一致时不再渲染流式正文——后端已落库、缓冲尚未清空，
    *  否则同一条消息会显示两份（用户反馈"偶尔重复显示一条消息，过几秒又变回一条"）。 */
   persistedText?: string;
+  /** plan-flow-redesign：当前轮次起始时间戳（毫秒），透传给底部状态行计算「· 已工作 X 分 Y 秒」。 */
+  workStartMs?: number;
+  /** plan-20261114-message-flow：思考已由对应轮次原位渲染，尾部只负责正文与总计时。 */
+  thinkingInTimeline?: boolean;
 }
 
 /** plan-20261112-loading-home-sidebar：正文落库只隐藏重复正文，工具收集结果期间仍需保留运行反馈。 */
-function TailBody({ active, statusLabel, persistedText, text, thinking, threadId }: {
+function TailBody({ active, statusLabel, persistedText, workStartMs, text, thinking, threadId, thinkingInTimeline }: {
   active: boolean;
   statusLabel?: string;
   persistedText?: string;
+  workStartMs?: number;
   text: string;
   thinking: string;
   threadId?: number;
+  thinkingInTimeline?: boolean;
 }) {
   if (!active) return null;
   const visibleText = visibleStreamingText(text, persistedText);
   return (
-    <StreamingText active={active} thinking={thinking} text={visibleText} statusLabel={statusLabel} threadId={threadId} />
+    <StreamingText active={active} thinking={thinkingInTimeline ? "" : thinking} text={visibleText} statusLabel={statusLabel} threadId={threadId} workStartMs={workStartMs} />
   );
 }
 
 /** 主会话尾部：订阅合并文本派生（唯一维护点在 store/streamMerged）。 */
-const MainTail = memo(function MainTail({ active, statusLabel, persistedText }: {
+const MainTail = memo(function MainTail({ active, statusLabel, persistedText, workStartMs, thinkingInTimeline }: {
   active: boolean;
   statusLabel?: string;
   persistedText?: string;
+  workStartMs?: number;
+  thinkingInTimeline?: boolean;
 }) {
   recordComponentRender("streamingTail");
   const text = useMergedStreamText();
@@ -66,18 +74,22 @@ const MainTail = memo(function MainTail({ active, statusLabel, persistedText }: 
       active={active}
       statusLabel={statusLabel}
       persistedText={persistedText}
+      workStartMs={workStartMs}
       text={text}
       thinking={thinking}
+      thinkingInTimeline={thinkingInTimeline}
     />
   );
 });
 
 /** 子代理尾部：直接订阅本线程桶（按 threadId 隔离，无跨桶拼接）。 */
-const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel, persistedText }: {
+const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel, persistedText, workStartMs, thinkingInTimeline }: {
   threadId: number;
   active: boolean;
   statusLabel?: string;
   persistedText?: string;
+  workStartMs?: number;
+  thinkingInTimeline?: boolean;
 }) {
   recordComponentRender("streamingTail");
   const text = useChatStore((s) => s.subagentStreams[threadId] || "");
@@ -88,13 +100,15 @@ const SubagentTail = memo(function SubagentTail({ threadId, active, statusLabel,
       active={active}
       statusLabel={statusLabel}
       persistedText={persistedText}
+      workStartMs={workStartMs}
       text={text}
       thinking={thinking}
+      thinkingInTimeline={thinkingInTimeline}
     />
   );
 });
 
-export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel, persistedText }: StreamingTailProps) {
+export const StreamingTail = memo(function StreamingTail({ source = "main", active, statusLabel, persistedText, workStartMs, thinkingInTimeline }: StreamingTailProps) {
   // plan-75-334 阶段0：记录组件渲染（仅采集期间统计，零开销）
   // plan-20261101-performance：隐藏时卸载订阅者，后台缓冲继续接收，恢复时读最新快照。
   if (!active) return null;
@@ -102,6 +116,6 @@ export const StreamingTail = memo(function StreamingTail({ source = "main", acti
   // plan-334-1661 S3：按数据源分流订阅——主会话不订阅子代理桶、子代理不订阅主会话合并文本，
   // 两边互不牵动重渲染（子代理面板在未就绪时传 -1，按单桶读取自然得到空串）。
   return typeof source === "number"
-    ? <SubagentTail threadId={source} active={active} statusLabel={statusLabel} persistedText={persistedText} />
-    : <MainTail active={active} statusLabel={statusLabel} persistedText={persistedText} />;
+    ? <SubagentTail threadId={source} active={active} statusLabel={statusLabel} persistedText={persistedText} workStartMs={workStartMs} thinkingInTimeline={thinkingInTimeline} />
+    : <MainTail active={active} statusLabel={statusLabel} persistedText={persistedText} workStartMs={workStartMs} thinkingInTimeline={thinkingInTimeline} />;
 });

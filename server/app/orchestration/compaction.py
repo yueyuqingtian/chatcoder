@@ -267,7 +267,7 @@ def finalize_compacted_messages(
     """
     if not messages:
         return messages
-    out = repair_tool_call_ids(messages)
+    out = repair_tool_call_ids([m.model_copy(deep=True) for m in messages])
     out = ensure_tool_pairing(out)
     out = normalize_tool_sequence(out)
     out = ensure_conversation_lead(out, language)
@@ -344,12 +344,12 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
             if prev.tool_calls or m.tool_calls:
                 new_tcs = (prev.tool_calls or []) + (m.tool_calls or [])
 
-            normalized[-1] = ChatMessage(
-                role="assistant",
-                content=new_content,
-                tool_calls=new_tcs,
-                reasoning_content=new_reasoning,
-            )
+            normalized[-1] = prev.model_copy(update={
+                "content": new_content, "tool_calls": new_tcs, "reasoning_content": new_reasoning,
+                "source_message_ids": list(dict.fromkeys(prev.source_message_ids + m.source_message_ids)),
+                "content_blocks": (prev.content_blocks or []) + (m.content_blocks or []) or None,
+                "thinking_blocks": (prev.thinking_blocks or []) + (m.thinking_blocks or []) or None,
+            })
             continue
 
         # 连续两个 user 消息的处理：合并文本
@@ -360,12 +360,12 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
             new_blocks = None
             if prev.content_blocks or m.content_blocks:
                 new_blocks = (prev.content_blocks or []) + (m.content_blocks or [])
-            normalized[-1] = ChatMessage(
-                role="user",
-                content=new_content,
-                content_blocks=new_blocks,
-                skill_load_snapshots=(prev.skill_load_snapshots or []) + (m.skill_load_snapshots or []) or None,
-            )
+            normalized[-1] = prev.model_copy(update={
+                "content": new_content, "content_blocks": new_blocks,
+                "skill_load_snapshots": (prev.skill_load_snapshots or []) + (m.skill_load_snapshots or []) or None,
+                "source_message_ids": list(dict.fromkeys(prev.source_message_ids + m.source_message_ids)),
+                "context_kind": "current_task" if "current_task" in (prev.context_kind, m.context_kind) else prev.context_kind,
+            })
             continue
 
         normalized.append(m)
@@ -392,7 +392,7 @@ def normalize_tool_sequence(messages: list[ChatMessage]) -> list[ChatMessage]:
 def build_api_copy(
     messages: list[ChatMessage],
     workspace_root: str | None = None,
-    *, preserve_reasoning: bool = False,
+    *, preserve_reasoning: bool = True,
 ) -> list[ChatMessage]:
     """v6.0 + v16: 基于原始历史构造发给模型的 API 副本。
 
@@ -751,6 +751,7 @@ async def auto_compact(
     summary_msg = ChatMessage(
         role="developer",
         content=f"{get_summary_prefix(language)}\n\n{summary_text}",
+        context_kind="checkpoint", checkpoint_id="memory-auto",
     )
 
     # v2.2 (对齐 zcode 3.10): 压缩边界标记 + ReadState 提醒——
@@ -894,7 +895,8 @@ def emergency_compact(
     if summary_parts:
         summary += "关键内容:\n" + "\n".join(summary_parts[:30])
 
-    summary_msg = ChatMessage(role="system", content=summary)
+    summary_msg = ChatMessage(role="system", content=summary,
+                              context_kind="checkpoint", checkpoint_id="memory-emergency")
 
     # 组装：system(原) + summary + 最近回合
     # plan-599-2520：统一走 finalize（补 id → 配对 → 规范化 → user 承接）。

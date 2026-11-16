@@ -14,6 +14,7 @@ from app.core.logging import setup_logging
 from app.gateway.routers import (
     archive,
     approvals,
+    community,
     debug,
     desktop,
     diagnostics,
@@ -22,6 +23,8 @@ from app.gateway.routers import (
     kiro_auth,
     market,
     memories,
+    microapps,
+    microapps_ext,
     models,
     permission_profiles,
     plugins,
@@ -389,6 +392,12 @@ def create_app() -> FastAPI:
     app.include_router(plugins.router, prefix="/api", tags=["plugins"])
     # plan-41-198：拓展页市场目录（内置精选 + 本机真实项）/ 已安装聚合计数
     app.include_router(market.router, prefix="/api", tags=["market"])
+    # plan-693-2868 §6.5 / §7 P5：社区微应用（只读索引 + 下载安装；发布与撤回走 Electron IPC）
+    app.include_router(community.router, prefix="/api", tags=["community"])
+    # plan-693-2868 §6.5 / §7 P4：本机微应用库管理（list / detail / validate / remove / import）
+    app.include_router(microapps.router, prefix="/api", tags=["microapps"])
+    # protocol 13-external-microapps §2：外置微应用只读接入（生进程与端口归 Electron 主进程）
+    app.include_router(microapps_ext.router, prefix="/api", tags=["microapps-ext"])
     # plan-282-1441（#7/#8）：内置 MCP 的状态宿主端点（调试会话 + 数据库连接配置）
     app.include_router(debug.router, prefix="/api", tags=["debug"])
     app.include_router(debug.db_router, prefix="/api", tags=["db"])

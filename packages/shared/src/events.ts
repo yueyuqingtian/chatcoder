@@ -190,6 +190,13 @@ export type ServerWsEvent =
    *  前端据此保持忙碌：pending=true 通知已入队、唤醒即将进行；pending=false 且带 turn_id 唤醒轮已创建（立即接管运行态，
    *  并把对应的唤醒消息归入该轮）；pending=false 且无 turn_id 唤醒被放弃（含用户停止）。 */
   | { event: "workflow.wakeup"; payload: { session_id: number; pending: boolean; turn_id?: number | null } }
+  /* plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§5：微应用宿主桥的两个下行事件。
+     它们只走全局通道（/ws/global，server/app/gateway/ws.py 的 ws_global_endpoint 直接写回发起连接），
+     不进会话事件流——payload 没有 session_id，与 seq 补偿缓冲无关。
+     渲染层的消费者是 client/src/browserAgent/microappHost.ts（转交主进程 → 发起那条微应用界面），
+     chat store 的 handleWs 只作穷举登记。 */
+  | { event: "microapp.host.response"; payload: MicroappHostResponsePayload }
+  | { event: "microapp.host.push"; payload: MicroappHostPushPayload }
   | { event: "error"; payload: { code?: string; message?: string } }
   /** 服务端对客户端请求的确认（approval/cancel/sync 等） */
   | { event: "ack"; payload: { ref: string; ok?: boolean; resolved?: boolean } }
@@ -211,6 +218,38 @@ export interface BgProcessEventPayload {
 }
 
 export type BgProcessExitReason = "completed" | "stopped_by_user" | "stopped_by_agent" | "stopped_by_system";
+
+/**
+ * 宿主桥回执（契约 §4）：服务端按 `reqId` 配对不同请求的回包，渲染层原样交回主进程。
+ * `reason` 是 `microapp-host-<reason>` 全串（页面侧 Error.message 以它开头），`message` 是
+ * `"<reason>: <细节>"` 的可读文案。
+ */
+export interface MicroappHostResponsePayload {
+  reqId: string;
+  /** 发起方实例标识；主进程用它把回执定位到正确的 guest（协议 §6） */
+  uid?: string;
+  ok: boolean;
+  result?: unknown;
+  reason?: string;
+  message?: string;
+}
+
+/**
+ * 宿主桥下行流式事件（契约 §5）：服务端已按 100ms 或 200 行聚批，渲染层不再改批。
+ * `stream.log` 给 `lines`（一批内的多行），`stream.state` 给 `state` 与退出码。
+ * 注意 `stream` 字段恒为 `"stdout"`——后端把 stderr 合并进同一路输出，页面按单流渲染。
+ */
+export interface MicroappHostPushPayload {
+  uid: string;
+  streamId: string;
+  /** 同一 streamId 内单调递增；页面按它去重与排序 */
+  seq: number;
+  event: "stream.log" | "stream.state" | string;
+  lines?: string[];
+  stream?: string;
+  state?: string;
+  code?: number | null;
+}
 
 /**
  * 压缩结果载荷（compact.summary / compact.completed）。
@@ -306,6 +345,21 @@ export type ClientWsEvent =
   | { event: "approval.explain"; payload: { approval_id: string } }
   | { event: "terminal.input"; payload: { id: string; data: string } }
   | { event: "browser.command"; payload: { id: string; cmd: string; payload: Record<string, unknown> } }
+  /* plan-693-2868 · 契约 §4/§7：微应用页面发起的宿主操作上行。
+     链路是「页面 → preload → 主进程 →（IPC microapp:hostRequest）渲染层 → 本事件 → 后端」；
+     走全局通道（/ws/global），回执与流式推送按 reqId / uid 回来。
+     `sessionId` 由渲染层按**标签所属会话桶**填入（不是当前活动会话）：后端据此定位工作区根目录，
+     填错会把命令跑进用户正在看的项目里。 */
+  | { event: "microapp.host.request"; payload: {
+      reqId: string;
+      uid: string;
+      appId?: string;
+      version?: string;
+      sessionId: number;
+      /** exec.start / exec.stop / exec.status / fs.read / fs.list / workspace.info（契约 §4） */
+      op: string;
+      args: Record<string, unknown>;
+    } }
   | { event: "cancel"; payload: { turn_id: number } }
   /** 断线补偿请求：重连后带 last_seq 请求补发 */
   | { event: "sync.request"; payload: { last_seq: number } };

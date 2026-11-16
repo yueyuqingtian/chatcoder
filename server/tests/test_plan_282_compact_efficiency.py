@@ -165,7 +165,7 @@ def test_build_api_copy_strips_and_reports_reclaim():
     """build_api_copy 集成剥离，并把条数记入 reclaim（供前端提示）。"""
     take_last_reclaim()  # 清空上一轮统计
     msgs = _build_rounds(8)
-    api = build_api_copy(msgs)
+    api = build_api_copy(msgs, preserve_reasoning=False)
 
     reasons = [m.reasoning_content for m in api if m.role == "assistant"]
     assert reasons[-_REASONING_KEEP_TOOL_ROUNDS:] == ["THINK-6", "THINK-7", "THINK-8"]
@@ -224,5 +224,5 @@ def test_effective_tokens_matches_outbound():
         __import__("app.orchestration.token_counter", fromlist=["x"]).estimate_message_tokens_from_model(r)
         for r in rows
     )
-    # 有效口径必须显著小于全量口径（旧 reasoning 已排除）
-    assert eff < raw, f"effective={eff} 应小于 raw={raw}"
+    # plan-20261109-compact-structure：完整回传思考时不能低估旧回合的实际占用。
+    assert eff == raw, f"effective={eff} 应等于 raw={raw}"

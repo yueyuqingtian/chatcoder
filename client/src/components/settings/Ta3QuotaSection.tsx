@@ -19,6 +19,7 @@ import {
 } from "../../api/client";
 import { IconBarChart, IconCpu, IconExternalLink, IconGauge, IconRefresh } from "../icons";
 import { fmtTokens } from "./usage/chartUtils";
+import { Ta3UsageTrendChart } from "./Ta3UsageTrendChart";
 import { Tooltip } from "../ui";
 
 const QUOTA_WARN_PERCENT = 80;
@@ -269,10 +270,10 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
         tokenCount: toNumberOrNull(p.tokenCount) ?? 0,
       }))
       .filter((p) => p.date);
-    const maxToken = points.reduce((m, p) => Math.max(m, p.tokenCount), 0);
+    // 图表由 UsageTrendChart 自己算坐标轴上限，这里只保留浮层与脚注需要的合计
     const totalRequests = points.reduce((s, p) => s + p.requestCount, 0);
     const totalTokens = points.reduce((s, p) => s + p.tokenCount, 0);
-    return { points, maxToken, totalRequests, totalTokens };
+    return { points, totalRequests, totalTokens };
   }, [trend]);
 
   const models = useMemo(() => (modelStatus?.models || []).map((m) => {
@@ -499,37 +500,33 @@ export function Ta3QuotaSection({ provider }: { provider: ProviderOut }) {
             </>
           )}
 
-          <div className="ta3-quota-trend">
-            <div className="ta3-quota-trend-head">
-              <span>用量趋势</span>
+          {/* 趋势图改用「用量统计」页的卡片语汇：外框由 .up-card 提供，
+              图表组件自带的外框被 usage.css 的 `.up-card .usage-trend` 规则清零，全页只有一层边框 */}
+          <div className="ta3-quota-trend up-card">
+            <div className="ta3-quota-trend-head up-card-head">
+              <span className="ta3-quota-trend-title">用量趋势</span>
               <div className="ta3-quota-seg">
                 <button className={trendPeriod === "DAILY" ? "active" : ""} onClick={() => switchPeriod("DAILY")}>按天</button>
                 <button className={trendPeriod === "MONTHLY" ? "active" : ""} onClick={() => switchPeriod("MONTHLY")}>按月</button>
               </div>
             </div>
-            {trendView.points.length > 0 ? (
-              <>
-                <div className="ta3-quota-bars">
-                  {trendView.points.map((p) => (
-                    <div
-                      key={p.date}
-                      className="ta3-quota-bar-col"
-                      title={`${p.label}：请求 ${p.requestCount} 次 · ${fmtTokens(p.tokenCount)} token`}
-                    >
-                      <div
-                        className="ta3-quota-bar-v"
-                        style={{ height: `${trendView.maxToken > 0 ? Math.max(2, (p.tokenCount / trendView.maxToken) * 100) : 0}%` }}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="ta3-quota-trend-foot">
-                  合计：请求 {trendView.totalRequests} 次 · {fmtTokens(trendView.totalTokens)} token
-                </div>
-              </>
-            ) : (
-              <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconBarChart size={16} /></span>暂无趋势数据</div>
-            )}
+            <div className="up-card-body">
+              {trendView.points.length > 0 ? (
+                <>
+                  {/* 纯 SVG 图表（坐标轴 / 图例 / 悬停浮层都由 UsageTrendChart 提供），与用量统计页同一套 */}
+                  <Ta3UsageTrendChart points={trendView.points} period={trendPeriod} />
+                  <div className="ta3-quota-trend-foot">
+                    合计：请求 {trendView.totalRequests} 次 · {fmtTokens(trendView.totalTokens)} token
+                  </div>
+                </>
+              ) : loading && !error ? (
+                /* 加载中：为图表预留与真实图表相近的高度（图例 + 220px 画布 + 合计脚注），
+                   数据到达后不会把下方「模型状态」整体推下去 */
+                <span className="mkt-sk" style={{ width: "100%", height: 270 }} />
+              ) : (
+                <div className="ta3-quota-empty"><span className="ta3-quota-empty-ic" aria-hidden><IconBarChart size={16} /></span>暂无趋势数据</div>
+              )}
+            </div>
           </div>
 
           <div className="ta3-quota-models">

@@ -15,7 +15,7 @@ import { openGallery } from "./gallery";
 import { create } from "zustand";
 import { applyPaneUpdate } from "../perf/paneTransition";
 
-export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow" | "side" | "git";
+export type PanelTabId = "task-summary" | "browser" | "terminal" | "files" | "subagent" | "debug" | "workflow" | "side" | "git" | "microapp";
 export interface PanelTab {
   id: PanelTabId;
   /** 同类型标签的展示序号（只用于文案「文件 2」，不再承担唯一标识） */
@@ -25,7 +25,21 @@ export interface PanelTab {
    *  事件处理器绑到错误的元素上，表现为「点关闭没反应 / 点标签切不过去、但 hover 正常」。 */
   uid?: string;
   /** v2.2 (对齐 zcode 3.13): 子代理详情 tab 参数（threadId=agent_id） */
-  meta?: { threadId?: number; agentName?: string };
+  /** plan-693-2868：微应用标签的绑定信息——appId 是去重键，version/entry 决定加载哪个版本的界面；
+   *  与子代理的 threadId/agentName 共存于同一 meta，避免再引入第二套标签参数。
+   *  `uid` 是标签自身 `uid` 的镜像（协议 §6 按 meta 里的身份描述实例）：权威值仍是顶层的
+   *  `PanelTab.uid`（`panelTabKey` 用它做唯一 key），这里复制一份供「按实例身份找标签」的调用方
+   *  少写一次顶层字段；重建标签（`reopenClosedTab`）时会与新 uid 一起刷新，不会留旧值。
+   *  它同时是宿主桥的实例标识来源：`microapp#3` → webview 的 `?uid=` → 页面 preload 的 instance.uid。 */
+  meta?: {
+    threadId?: number; agentName?: string;
+    appId?: string; version?: string; entry?: string;
+    instanceId?: string; bindingId?: string; uid?: string;
+    /** plan-external-microapps：外置微应用（自带前后端与进程）——有值就直连该 http 地址，
+     *  不再走 `app://microapp/<appId>/<version>/<entry>` 包装，也不注入宿主桥 preload。
+     *  它同时也是「是否外置」的唯一判据（渲染层不再单独存一个布尔镜像，避免两处判断分叉）。 */
+    externalUrl?: string;
+  };
 }
 
 /** 标签唯一 key（渲染、比较、关闭都走它）。历史标签没有 uid 时回退到旧口径，保证老状态不崩。 */
@@ -184,6 +198,12 @@ interface PanelState extends PanelBucket {
   openNewTab: (id: PanelTabId) => void;
   /** v2.2 (对齐 zcode 3.13): 打开子代理详情 tab（每线程独立实例，可多开） */
   openSubagent: (threadId: number, agentName?: string) => void;
+  /** plan-693-2868：打开微应用标签。同 appId 聚焦已有标签（升级换版本仍复用），不同 appId 各开一个、不设上限。
+   *  plan-external-microapps：`externalUrl` 有值时是外置微应用——面板直连该 http 地址。 */
+  openMicroApp: (appId: string, version: string, entry?: string, externalUrl?: string) => void;
+  /** plan-693-2868 回归修复：只在**指定会话**的桶里挂上微应用标签，绝不展开面板。
+   *  AI 调 `microapp_call` 时用它——界面（webview）挂上就开始加载，但「打开面板」的权力仍只在用户手上。 */
+  ensureMicroAppTab: (sessionId: number | null, appId: string, version: string, entry?: string, externalUrl?: string) => void;
   /** plan-156-620：待在 Git 面板展开差异的文件（工具卡点击文件时写入，GitPanel 消费后清空）。
    *  plan-156-621：带上项目标识——面板跨项目保活时，旧项目的路径不能拿到当前仓库请求差异。
    *  plan-20261019-git-multirepo：repo 是文件所属仓库（相对项目根），面板先切到该仓库再展开。 */
@@ -334,6 +354,72 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     apply();
   },
 
+  openMicroApp: (appId, version, entry, externalUrl) => {
+    const key = get().activeBucket;
+    const b = get().buckets[key] ?? emptyBucket();
+    // 同 appId 已开则激活：升级后 meta.version 变化，但用户视角还是同一个应用，不该再堆一个标签
+    const existing = b.tabs.find((t) => t.id === "microapp" && t.meta?.appId === appId);
+    const needExpand = !get().expanded;
+    if (existing) {
+      writeBucket(key, (cur) => ({
+        ...cur,
+        tabs: cur.tabs.map((t) => (panelTabKey(t) === panelTabKey(existing) ? { ...t, meta: { ...t.meta, version, entry, externalUrl } } : t)),
+        activeKey: panelTabKey(existing),
+      }));
+      if (needExpand) applyPaneUpdate(() => set({ expanded: true }));
+      return;
+    }
+    // uid 由 store 统一分配（跨桶单调递增），是宿主桥的实例标识来源（协议 §6）：
+    // webview 的 `?uid=`、主进程的 uid→guest 映射、页面的 instance.uid 全靠它，
+    // 所以**每一条**创建微应用标签的路径都必须写入顶层的 uid，并在 meta 里留一份镜像。
+    const uid = nextUid("microapp");
+    const tab: PanelTab = { id: "microapp", instance: nextInstance(b.tabs, "microapp"), uid, meta: { appId, version, entry, uid, externalUrl } };
+    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
+    if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
+    apply();
+  },
+
+  /** plan-693-2868 回归修复：AI 调用 `microapp_call` 前由宿主侧调用它。
+   *
+   *  为什么需要：微应用界面（guest webview）**唯一**来源是右侧面板里的那个微应用标签，
+   *  此前只「找」不「造」——用户没手动打开界面时调用必然报「没有找到 xxx 的界面」。
+   *
+   *  三条约束：
+   *  ① 绝不 `set({ expanded: true })`：面板的打开权只在用户手上（docs/app1/README.md 四条界面约定），
+   *     `openMicroApp` 里的 needExpand 逻辑不能复用；容器常驻挂载（App.tsx），折叠状态下 webview 照样加载。
+   *  ② 桶 key 取 `bucketKeyOf(sessionId)` 而不是 `activeBucket`：AI 可能在后一个会话里调用，
+   *     标签必须落在**发起调用的那个会话**，不能塞进用户此刻正在看的会话。
+   *  ③ 用户正在看这个桶的面板时不抢 activeKey（不打断），否则设为当前标签——用户一展开就停在这个应用上
+   *     （与 `ensureTabIn` 同语义）。
+   */
+  ensureMicroAppTab: (sessionId, appId, version, entry, externalUrl) => {
+    const key = bucketKeyOf(sessionId);
+    const s = get();
+    const b = s.buckets[key] ?? emptyBucket();
+    // 同 appId 复用已有标签：升级后 meta.version 变化，但用户视角还是同一个应用，不该再堆一个标签
+    const existing = b.tabs.find((t) => t.id === "microapp" && t.meta?.appId === appId);
+    const userWatching = s.onScreen && s.activeBucket === key && b.activeKey != null;
+    if (existing) {
+      const existingKey = panelTabKey(existing);
+      // 只刷新 meta（版本 / 入口 / 外置地址），不新建实例：webview 的 src 会随之变化并重新加载
+      writeBucket(key, (cur) => ({
+        ...cur,
+        tabs: cur.tabs.map((t) => (panelTabKey(t) === existingKey ? { ...t, meta: { ...t.meta, version, entry, externalUrl } } : t)),
+        activeKey: userWatching ? cur.activeKey : existingKey,
+      }));
+      return;
+    }
+    // 与 openMicroApp 同一口径：uid 必须写在顶层（宿主桥按它寻址），meta 里同步一份镜像
+    const uid = nextUid("microapp");
+    const tab: PanelTab = { id: "microapp", instance: nextInstance(b.tabs, "microapp"), uid, meta: { appId, version, entry, uid, externalUrl } };
+    writeBucket(key, (cur) => ({
+      ...cur,
+      tabs: [...cur.tabs, tab],
+      activeKey: userWatching ? cur.activeKey : panelTabKey(tab),
+    }));
+  },
+
+
   closeTab: (key) => {
     const bucket = get().activeBucket;
     const inBucket = (get().buckets[bucket]?.tabs ?? []).some((t) => panelTabKey(t) === key);
@@ -383,7 +469,15 @@ export const usePanelStore = create<PanelState>((set, get) => ({
       if (existing) return { ...b, closedStack: stack, activeKey: panelTabKey(existing) };
       // 恢复的标签重新分配 uid / instance：旧 key 可能已被后来新开的同类型标签占用，
       // 直接放回会造成重复 key（点击串到别的标签上）。
-      const revived: PanelTab = { ...closed, instance: nextInstance(b.tabs, closed.id), uid: nextUid(closed.id) };
+      // 微应用标签的 meta.uid 镜像必须跟着换：否则宿主桥会把恢复后的界面当成旧实例，
+      // 下行日志按 uid 投递就会找不到目标（协议 §6 的实例寻址）。
+      const revivedUid = nextUid(closed.id);
+      const revived: PanelTab = {
+        ...closed,
+        instance: nextInstance(b.tabs, closed.id),
+        uid: revivedUid,
+        meta: closed.meta && closed.meta.uid != null ? { ...closed.meta, uid: revivedUid } : closed.meta,
+      };
       return { ...b, tabs: [...b.tabs, revived], closedStack: stack, activeKey: panelTabKey(revived) };
     });
   },

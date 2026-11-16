@@ -42,6 +42,9 @@ export interface ToolLeaf {
   changeStat: { path: string; additions: number; deletions: number } | null;
   /** plan-20261015-browser-agent：截图类工具结果的预览图（落库在工具结果消息里，刷新后仍在原位） */
   image: ToolImage | null;
+  /** plan-flow-redesign：良性退出码 1 的中性状态说明（如「无匹配（退出码 1）」） */
+  exitNote?: string | null;
+  returncode?: number | null;
 }
 
 export type ToolNode =
@@ -53,7 +56,7 @@ export type ToolNode =
   | { kind: "write-merged"; leaves: ToolLeaf[] };
 
 /** v19: 写入类工具——独占一行（用户要求"一个写操作就是一行"），仅紧邻同文件可合并 */
-export const WRITE_TOOLS = new Set(["fs_write", "editor_apply_diff", "multi_file_edit"]);
+export const WRITE_TOOLS = new Set(["fs_write", "editor_apply_diff", "multi_file_edit", "apply_patch"]);
 
 /** v25: 是否按"写操作行"展示——白名单写盘工具，或非白名单工具但结果携带 change_stat
  * （模型用 terminal_exec 等"工具伪装"改文件，服务端检测到变更后在 tool.result 附 change_stat，
@@ -113,6 +116,7 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
  *  plan-20261021-subq-row：子会话提问也不在此列——它已是一行普通的工具条目（见 subsessionQuestionItem），
  *  任务完成后随工作过程一起折叠；此前常显的卡片会在汇报上方留下一大块，与其它过程信息的层次不一致。 */
 export function isOutsideProcess(item: TurnItem): boolean {
+  // plan-20261116-subagent-collapse：派发/续跑也是执行过程，常显会让收起后的卡片残留在汇报顶部。
   return item.kind === "workflow" || item.kind === "workflow-wakeup";
 }
 
@@ -168,6 +172,53 @@ export interface WorkflowNodeCard {
   programId?: number | null;
   /** 派发时刻：线程首条消息的 id（见 placeWorkflowNodeCards） */
   spawnMessageId?: number | null;
+}
+
+/** plan-20261112-subagent-placement：派发结果中的身份不受展示名截断或重名影响。 */
+export function subagentIdOf(item: Extract<TurnItem, { kind: "subagent" }>): number | null {
+  const content = item.msg.content;
+  if (normalizeToolName(String(content.tool ?? "")) === "resume_subagent") {
+    const id = Number((content.args as Record<string, unknown> | undefined)?.agent_id);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+  const result = item.result?.content;
+  if (result?.ok === false) return null;
+  const output = typeof result?.output === "string" ? result.output.trim() : "";
+  const match = /^(?:Subagent|Exploration subagent) #(\d+)\b/i.exec(output);
+  const id = match ? Number(match[1]) : 0;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/** plan-20261112-subagent-placement：渲染与兜底排除必须共用认领结果，否则长标题会重复沉底。 */
+export function matchSubagentDispatches<T extends WorkflowNodeCard & { name: string }>(
+  items: readonly TurnItem[], cards: readonly T[],
+): Map<number, T> {
+  const matched = new Map<number, T>();
+  const byId = new Map(cards.map((card) => [card.agentId, card]));
+  items.forEach((item, index) => {
+    if (item.kind !== "subagent") return;
+    const result = item.result?.content;
+    if (result?.ok === false || /^Error[：:]/i.test(String(result?.output ?? "").trim())) return;
+    const id = subagentIdOf(item);
+    if (id != null) {
+      const card = byId.get(id);
+      if (card) matched.set(index, card);
+      return;
+    }
+    const args = item.msg.content.args as Record<string, unknown> | undefined;
+    const title = String(args?.task_title ?? "");
+    if (!title) return;
+    // 服务端展示名限制为 40 个 Unicode 字符；旧数据无结果时只允许唯一候选，禁止包含匹配串卡。
+    const shortTitle = Array.from(title).slice(0, 40).join("");
+    const candidates = cards.filter((card) => {
+      const name = card.name.replace(/^探索[·:：\s]*/, "");
+      return card.name === title || name === title || card.name === shortTitle || name === shortTitle;
+    });
+    const sameTurn = candidates.filter((card) => card.turnId === item.msg.turn_id);
+    const pool = sameTurn.length ? sameTurn : candidates;
+    if (pool.length === 1) matched.set(index, pool[0]);
+  });
+  return matched;
 }
 
 /** 条目的起始消息 id，即创建先后的依据：消息类条目取其消息 id；工具簇与工作流卡取其首条工具调用的 id。 */
@@ -348,6 +399,8 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
       ? { path: statRaw.path, additions: Number(statRaw.additions ?? 0), deletions: Number(statRaw.deletions ?? 0) }
       : null,
     image: rc.image && typeof (rc.image as { url?: unknown }).url === "string" ? (rc.image as ToolImage) : null,
+    exitNote: typeof rc.exit_note === "string" ? rc.exit_note : null,
+    returncode: typeof rc.returncode === "number" ? rc.returncode : null,
   };
 }
 
@@ -390,6 +443,55 @@ export function leafPathOf(leaf: ToolLeaf): string {
   // v25: 非白名单写盘工具（terminal_exec 等）路径来自 change_stat
   if (leaf.changeStat?.path) return leaf.changeStat.path.replace(/\\/g, "/");
   return "";
+}
+
+/** 从一组消息里收集「实际写过的文件」（去重、正斜杠）。
+ *
+ *  plan-20261116-subagent-live-stats：子代理面板头部的「变更文件数」在运行期用它实时统计——
+ *  后端的 files_touched 只在子代理收尾解析汇报文本时才回填，运行期恒为 0，
+ *  用户只能等子代理跑完才看到数字（反馈「跑完才显示」）。这里直接看线程消息里的
+ *  写盘工具调用与工具结果携带的 change_stat，随消息流实时增长。
+ *  失败的写盘不算（同 call_key 的结果 ok=false），避免把没落盘的调用计进去。 */
+export function changedFilesOf(messages: MessageOut[]): string[] {
+  const norm = (v: unknown) => (typeof v === "string" && v ? v.replace(/\\/g, "/") : "");
+  const failed = new Set<string>();
+  for (const m of messages) {
+    if (m.msg_type !== MsgType.ToolResult) continue;
+    const c = (m.content ?? {}) as Record<string, unknown>;
+    if (c.ok === false && c.call_key != null) failed.add(String(c.call_key));
+  }
+  const out = new Set<string>();
+  for (const m of messages) {
+    const c = (m.content ?? {}) as Record<string, unknown>;
+    // 工具结果里的 change_stat：覆盖 terminal_exec 这类「伪装写盘」的路径
+    if (m.msg_type === MsgType.ToolResult) {
+      const stat = c.change_stat as { path?: unknown } | undefined;
+      const p = norm(stat?.path);
+      if (p) out.add(p);
+      continue;
+    }
+    if (m.msg_type !== MsgType.ToolCall) continue;
+    if (c.call_key != null && failed.has(String(c.call_key))) continue;
+    const tool = normalizeToolName(String(c.tool ?? ""));
+    if (!WRITE_TOOLS.has(tool)) continue;
+    const args = (c.args && typeof c.args === "object" ? c.args : {}) as Record<string, unknown>;
+    const direct = norm(args.path) || norm(args.file_path) || norm(args.filepath);
+    if (direct) {
+      out.add(direct);
+      continue;
+    }
+    // multi_file_edit：一次调用改多个文件，逐个计入
+    const edits = args.edits;
+    if (Array.isArray(edits)) {
+      for (const e of edits) {
+        if (!e || typeof e !== "object") continue;
+        const rec = e as Record<string, unknown>;
+        const p = norm(rec.path) || norm(rec.file_path) || norm(rec.filepath);
+        if (p) out.add(p);
+      }
+    }
+  }
+  return [...out];
 }
 
 /** 将某 turn 的工具调用/结果消息聚合成 ToolNode[]。
@@ -976,7 +1078,7 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   for (const m of msgs) {
     if (m.msg_type !== MsgType.ToolResult) continue;
     const rc = m.content as Record<string, unknown>;
-    const tool = String(rc.tool ?? "");
+    const tool = normalizeToolName(String(rc.tool ?? ""));
     // 子代理结果由 SubagentCard 展示、不进 ToolTree；卡片用它区分「在跑」与「派发被拒」。
     // plan-568-2333：resume_subagent 的结果同样单独索引——续跑也要按时间线入条。
     if (tool === "spawn_subagent" || tool === "resume_subagent") {
@@ -1089,7 +1191,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // 动作本身的时间线锚点——后端在工具执行前就已落库 TOOL_CALL，位置精确。此前只认
       // spawn_subagent，续跑调用被当成普通工具节点混进 ToolTree，卡片只能走 TurnGroup 的
       // 未落位兜底槽位，表现为「子代理卡片始终停在消息流底部」。
-      if (c.tool === "spawn_subagent" || c.tool === "resume_subagent") {
+      const tool = normalizeToolName(String(c.tool ?? ""));
+      if (tool === "spawn_subagent" || tool === "resume_subagent") {
         // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
         // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
         flushTools();
@@ -1195,4 +1298,73 @@ export function getTurnById(
     turnIndexCache.set(turns, map);
   }
   return map.get(turnId);
+}
+
+/** plan-flow-redesign：属于“执行过程”可按时间序归并进 ProcessGroup 的条目类型。 */
+export function isInlineProcessItem(item: TurnItem): boolean {
+  return item.kind === "thinking" || item.kind === "tools" || item.kind === "shot";
+}
+
+/** plan-flow-redesign：把工具节点里的 action-cluster 展平为按时间序排列的单行 leaf，
+ *  保留 write-merged（同文件连续编辑合并），消除过程组内“聚合行套明细行”的二次嵌套。 */
+export function flattenClusterNodes(nodes: readonly ToolNode[]): ToolNode[] {
+  const out: ToolNode[] = [];
+  for (const n of nodes) {
+    if (n.kind === "action-cluster" || n.kind === "group") {
+      for (const leaf of n.leaves) out.push({ kind: "leaf", leaf });
+    } else {
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+/** plan-flow-redesign：统计一组过程项内的总步数（思考 + 工具调用叶 + 截图）。 */
+export function countProcessSteps(items: readonly TurnItem[], indices: readonly number[]): number {
+  let steps = 0;
+  for (const idx of indices) {
+    const it = items[idx];
+    if (!it) continue;
+    if (it.kind === "tools") {
+      for (const n of it.nodes) {
+        steps += n.kind === "leaf" ? 1 : n.leaves.length;
+      }
+    } else {
+      steps += 1;
+    }
+  }
+  return steps;
+}
+
+export type ProcessChunk =
+  | { kind: "group"; indices: number[] }
+  | { kind: "item"; index: number };
+
+/** plan-20261114-message-flow：子代理派发是独立时序锚点，不能被相邻过程组吞掉。
+ *  把过程段内连续的思考/工具合并为同一时序 ProcessGroup，
+ *  中间出现正文、计划卡、注入用户消息或分割线时自然断开，确保两段对话之间的过程各自收拢。
+ *  仅含 1 个步骤（单条思考 / 单条工具 / 单个子代理）时直接平铺渲染，避免“1 行包 1 行”的多余套壳。 */
+export function chunkProcessIndices(items: readonly TurnItem[], indices: readonly number[]): ProcessChunk[] {
+  const chunks: ProcessChunk[] = [];
+  let buf: number[] = [];
+  const flush = () => {
+    if (buf.length === 0) return;
+    if (countProcessSteps(items, buf) >= 2) {
+      chunks.push({ kind: "group", indices: buf });
+    } else {
+      for (const idx of buf) chunks.push({ kind: "item", index: idx });
+    }
+    buf = [];
+  };
+  for (const idx of indices) {
+    const it = items[idx];
+    if (it && isInlineProcessItem(it)) {
+      buf.push(idx);
+    } else {
+      flush();
+      chunks.push({ kind: "item", index: idx });
+    }
+  }
+  flush();
+  return chunks;
 }

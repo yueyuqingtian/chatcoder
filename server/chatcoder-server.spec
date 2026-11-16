@@ -22,6 +22,11 @@ datas = [
     # `Path(__file__).parent.parent / "data" / "plugin_catalog.json"` 读取，
     # 不打进产物则打包版的市场页会空空如也（源码运行正常、打包后失效）。
     (str(SERVER_DIR / "app" / "data"), "app/data"),
+    # plan-693-2868（P2）：内置技能正文目录。seed 按
+    # `Path(__file__).parent.parent / "resources" / "skills"` 读取，打包态回落到
+    # `_MEIPASS/app/resources/skills`；不打进产物则缺文件只记一条 warning 后跳过，
+    # 打包版会静默少掉「微应用创建」技能（源码运行正常）。
+    (str(SERVER_DIR / "app" / "resources"), "app/resources"),
 ]
 
 # 内置 Chromium 浏览器二进制（约 430MB）：让浏览器工具开箱可用，用户无需手动执行

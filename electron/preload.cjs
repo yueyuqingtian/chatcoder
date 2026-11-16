@@ -55,6 +55,49 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     ipcRenderer.on("browserAgent:event", handler);
     return () => ipcRenderer.removeListener("browserAgent:event", handler);
   },
+  // ── plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6：微应用宿主桥的渲染层入口 ──
+  // 页面（微应用 webview）的 window.microapp.invoke 由主进程接住，转成这里的 hostRequest；
+  // 渲染层拿到后转发后端，结果用 hostReply 回包（主进程再原样回给发起方页面）。
+  // 下行推送（流式日志等）用 hostPush，按 uid 直达目标 guest。
+  // 这三条就是协议里渲染层需要认识的全部频道，不要为了「顺手」再加旁路。
+  onMicroappHostRequest: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("microapp:hostRequest", handler);
+    return () => ipcRenderer.removeListener("microapp:hostRequest", handler);
+  },
+  microappHostReply: (payload) => ipcRenderer.send("microapp:hostReply", payload || {}),
+  microappHostPush: (payload) => ipcRenderer.invoke("microapp:hostPush", payload || {}),
+  /* ── plan-external-microapps · docs/app1/13-external-microapps.md ──
+     外置微应用宿主（主进程 electron/external-microapps.cjs）。外置微应用自带前后端与进程，
+     不需要宿主桥；渲染层只负责「列清单 / 启停 / 查状态 / 调方法」这四件事。 */
+  microappsExtList: () => ipcRenderer.invoke("microappsExt:list"),
+  microappsExtStart: (id) => ipcRenderer.invoke("microappsExt:start", id),
+  microappsExtStop: (id) => ipcRenderer.invoke("microappsExt:stop", id),
+  microappsExtStatus: (id) => ipcRenderer.invoke("microappsExt:status", id),
+  microappsExtCall: (id, method, args) => ipcRenderer.invoke("microappsExt:call", id, method, args || {}),
+  /* 微应用**独立窗口**（拓展页 / 已安装列表 / 右侧面板「在新窗口打开」）：
+     同一 appId 重复打开由主进程聚焦已有窗口，不再开第二个。窗口承载方式见 main.cjs 的
+     openMicroAppWindow：外置微应用直接加载它自己的 http 地址，内置微应用加载 microapp.html 外壳。 */
+  openMicroAppWindow: (opts) => ipcRenderer.invoke("microapp:openWindow", opts || {}),
+  /** 内置微应用窗口外壳的全屏按钮（外置微应用页面走 F11 / Esc，主进程处理） */
+  toggleMicroAppWindowFullscreen: () => ipcRenderer.invoke("microapp:windowFullscreenToggle"),
+  onMicroAppWindowFullscreen: (cb) => {
+    const handler = (_e, on) => cb(on === true);
+    ipcRenderer.on("microapp:windowFullscreen", handler);
+    return () => ipcRenderer.removeListener("microapp:windowFullscreen", handler);
+  },
+  /** 某个微应用独立窗口被关掉（主窗口据此释放该窗口实例的宿主桥 uid 绑定） */
+  onMicroAppWindowClosed: (cb) => {
+    const handler = (_e, payload) => cb(payload || {});
+    ipcRenderer.on("microapp:windowClosed", handler);
+    return () => ipcRenderer.removeListener("microapp:windowClosed", handler);
+  },
+  /** 微应用独立窗口加载失败（外置进程可能已退出 / 页面 404）：主窗口据此给用户一条可见提示 */
+  onMicroAppWindowLoadFailed: (cb) => {
+    const handler = (_e, payload) => cb(payload || {});
+    ipcRenderer.on("microapp:windowLoadFailed", handler);
+    return () => ipcRenderer.removeListener("microapp:windowLoadFailed", handler);
+  },
   // 窗口控制
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximize: () => ipcRenderer.send("window:maximizeToggle"),
@@ -138,6 +181,15 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
   // plan-20261021-usage-update：更新设置（发现新版本自动静默下载等）
   getUpdateSettings: () => ipcRenderer.invoke("app:getUpdateSettings"),
   setUpdateSettings: (patch) => ipcRenderer.invoke("app:setUpdateSettings", patch || {}),
+  // plan-20261024-update-channel：下载通道（镜像1 / 镜像2 / github）的测速与选择
+  getUpdateChannels: () => ipcRenderer.invoke("app:getUpdateChannels"),
+  measureUpdateChannels: () => ipcRenderer.invoke("app:measureUpdateChannels"),
+  setUpdateChannel: (id) => ipcRenderer.invoke("app:setUpdateChannel", id),
+  onUpdateChannels: (cb) => {
+    const handler = (_e, snapshot) => cb(snapshot);
+    ipcRenderer.on("app:updateChannels", handler);
+    return () => ipcRenderer.removeListener("app:updateChannels", handler);
+  },
   getAppVersion: () => ipcRenderer.invoke("app:getVersion"),
   onUpdateStatus: (cb) => {
     const handler = (_e, state) => cb(state);
@@ -180,6 +232,27 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     const handler = () => cb();
     ipcRenderer.on("app:openPetSettings", handler);
     return () => ipcRenderer.removeListener("app:openPetSettings", handler);
+  },
+
+  // ── plan-693-2868 §3.4 / §6.4 / D20：微应用社区发布与撤回 ──
+  // 只转发 IPC：PAT 的加密存储、中转上传、issue 提交与轮询全在主进程（community-github.cjs），
+  // 渲染层既拿不到 token 原文（set-token 只回 {saved, encrypted}），也不需要知道 GitHub 细节。
+  // 所有方法都返回 {ok:true, ...} 或 {ok:false, code, message}，不抛异常，便于界面直接判断。
+  community: {
+    tokenStatus: () => ipcRenderer.invoke("community:token-status"),
+    setToken: (token) => ipcRenderer.invoke("community:set-token", token),
+    clearToken: () => ipcRenderer.invoke("community:clear-token"),
+    getRepo: () => ipcRenderer.invoke("community:get-repo"),
+    setRepo: (repo) => ipcRenderer.invoke("community:set-repo", repo),
+    publish: (opts) => ipcRenderer.invoke("community:publish", opts),
+    withdraw: (opts) => ipcRenderer.invoke("community:withdraw", opts),
+    pollIssue: (issueNumber, opts) => ipcRenderer.invoke("community:poll-issue", issueNumber, opts),
+    /** 订阅发布进度（stage/percent/attempt/issueUrl 等）；返回取消订阅函数。 */
+    onProgress: (cb) => {
+      const handler = (_event, payload) => cb(payload);
+      ipcRenderer.on("community:publish-progress", handler);
+      return () => ipcRenderer.removeListener("community:publish-progress", handler);
+    },
   },
 });
 

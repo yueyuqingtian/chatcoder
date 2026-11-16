@@ -890,6 +890,7 @@ class EvCompactEvent(WsEventPayload):
     saved_tokens: int | None = None
     summary_message_id: int | None = None
     summary: str | None = None
+    summary_source: str | None = None
     trigger: str | None = None
 
 
@@ -986,6 +987,27 @@ class EvMergeProgress(WsEventPayload):
     summary: dict | None = None
 
 
+class EvMicroappHostEvent(WsEventPayload):
+    """微应用宿主桥（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4/§5）。
+
+    `microapp.host.response`：按 reqId 与上行请求配对（ok + result / reason + message）。
+    `microapp.host.push`：流式下行（stream.log 带 lines / stream.state 带 state[+code]），
+    两者都自带 uid 与 streamId，渲染层再转给主进程投递到对应 guest。
+    """
+    reqId: str | None = None
+    uid: str | None = None
+    ok: bool | None = None
+    result: dict | None = None
+    reason: str | None = None
+    message: str | None = None
+    streamId: str | None = None
+    seq: int | None = None
+    lines: list | None = None
+    stream: str | None = None
+    state: str | None = None
+    code: int | None = None
+
+
 # 事件名 → payload 模型（broadcast 校验用；未登记的兜底 WsEventPayload）
 WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "message.created": WsEventPayload,
@@ -1053,4 +1075,7 @@ WS_EVENT_PAYLOAD_MODELS: dict[str, type[WsEventPayload]] = {
     "debug.paused": EvDebugPaused,
     "merge.progress": EvMergeProgress,
     "arthas.event": EvArthasEvent,
+    # plan-693-2868 宿主桥 v2：后端 → 渲染层（上行 microapp.host.request 不经广播，无需登记）
+    "microapp.host.response": EvMicroappHostEvent,
+    "microapp.host.push": EvMicroappHostEvent,
 }

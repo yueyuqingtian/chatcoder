@@ -19,6 +19,8 @@ import { isBusy } from "../../perf/bus";
 import { scrollActiveMenuOption } from "../../utils/menuScroll";
 import { questionEnterIndex } from "./questionKeyboard";
 import { getPastedFiles } from "./composerPaste";
+// plan-693-2868 P1 收尾：引用 chip 的发送后生命周期（送达清空 / 失败保留），规则在纯函数里
+import { refsAfterSend, deliveredFromQueue } from "./composerRefsLifecycle";
 import { notify } from "../../store/toast";
 import { registerReconcileTask, RECONCILE_ORDER } from "../../perf/reconcile";
 import {
@@ -61,6 +63,7 @@ import { firstVisiblePending } from "../../store/pendingInteractions";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { usePanelStore } from "../../store/panel";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
+import { useMicroAppsStore } from "../../store/microapps";
 import { useI18n } from "../../store/i18n";
 import { parseRefLines } from "../../utils/refLines";
 // plan-633-2604（R3）：拖入文件夹——取出目录路径后作为 dir 引用交给 AI（AI 侧用 fs_list 查看）
@@ -96,18 +99,23 @@ export interface ComposerCoreProps {
   followFocusRequest?: boolean;
 }
 
-/** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。 */
-export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
+/** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。
+ *  plan-693-2868（P1）：新增 "microapp"（微应用引用，值为 appId）——
+ *  与 client.ComposerRefOut、drafts.ComposerRefDraft 三处必须同步，漏一处 tsc 就报错。 */
+export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
 
 export interface ComposerRef {
   project_label?: string;
   /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用
-   *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹，值为目录路径，AI 侧用 fs_list 自行查看） */
+   *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹，值为目录路径，AI 侧用 fs_list 自行查看）
+   *  plan-693-2868（P1）：新增 "microapp"（微应用，值为 appId；version 另存，供「查看界面」按版本开标签） */
   kind: ComposerRefKind;
-  /** 原始值：文件为工作区相对路径，目录为绝对路径，技能为技能名，连接器/插件为各自名称 */
+  /** 原始值：文件为工作区相对路径，目录为绝对路径，技能为技能名，连接器/插件为各自名称，微应用为 appId */
   value: string;
   /** 展示名 */
   label: string;
+  /** plan-693-2868（P1）：仅微应用引用使用——记录注入时的版本，避免升级后打开成另一个版本 */
+  version?: string;
 }
 
 /** 引用 chips → 随消息文本追加的可读引用行（模型可见；后端仍为纯文本透传）。
@@ -130,6 +138,12 @@ export function buildRefsSuffix(refs: ComposerRef[], workspaceRoot?: string | nu
   if (skills.length > 0) lines.push(`使用技能：${skills.join("、")}`);
   if (connectors.length > 0) lines.push(`使用连接器：${connectors.join("、")}`);
   if (pluginRefs.length > 0) lines.push(`使用插件：${pluginRefs.join("、")}`);
+  // plan-693-2868（P1）：微应用引用——写明 appId（调 microapp_call 靠它定位），
+  // 并说明「界面是否打开与本次注入无关」，避免模型误以为用户已经看着界面。
+  const microApps = refs.filter((r) => r.kind === "microapp");
+  if (microApps.length > 0) {
+    lines.push(`使用微应用：${microApps.map((r) => `${r.label}（appId=${r.value}${r.version ? `, version=${r.version}` : ""}）`).join("、")}（用 microapp_call 调用其方法；用户只注入了引用，界面未打开）`);
+  }
   return lines.join("\n");
 }
 
@@ -150,13 +164,18 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const fileRef = useRef<HTMLInputElement>(null);
 
   const isRunning = useScoped("isRunning");
+  /* plan-723-3029 R3：切回会话的复位窗口里 isRunning 被置空（供渲染层可信），但服务端 turn 可能仍在跑。
+   * 行为口（发送/停止/排队三态、停止键）要按「可能在跑」保守处理，否则停止键会退化成发送键。
+   * 它只在这里参与交互判定，绝不传给任何渲染态。 */
+  const runtimeHintTurnId = useScoped("runtimeHintTurnId");
   const currentSessionId = useScoped("currentSessionId");
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   // 会话级「执行中」：主代理轮次在跑、后台工作流在跑（含工作流结束后等待唤醒主代理的空档）、或后台子代理未结束——任一即算。
   // 工作流可能已不占用任何轮次（如「开始执行」只启动了程序），停止按钮要能中断它与子代理，也要能取消待送达的唤醒。
   const workflowBusy = useWorkflowStore((s) => selectSessionWorkflowBusy(s, currentSessionId));
   const pendingSubagents = useScoped("pendingSubagents");
-  const busy = isRunning || workflowBusy || pendingSubagents > 0;
+  // plan-723-3029 R3：hint 存在也算 busy——仅影响交互判定，不进渲染态
+  const busy = isRunning || runtimeHintTurnId != null || workflowBusy || pendingSubagents > 0;
   const stopSessionExecution = useScoped("stopSessionExecution");
   const projects = useChatStore((s) => s.projects);
   const models = useChatStore((s) => s.models);
@@ -396,6 +415,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     return () => { cancelled = true; };
   }, []);
 
+  /** plan-693-2868（P1）：拉一次已安装微应用清单（store 内部去重，重复挂载不会重复请求）。
+   *  取不到时按空清单处理 → 菜单展示空态，不影响其它分区。 */
+  useEffect(() => { void useMicroAppsStore.getState().load(); }, []);
+
   const sendTurn = useScoped("sendTurn");
   const cancelTurn = useScoped("cancelTurn");
   const updateQueuedInput = useScoped("updateQueuedInput");
@@ -437,9 +460,19 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const [disabledMcpCount, setDisabledMcpCount] = useState(0);
   /** plan-282-1441（#9）：/ 菜单「插件」分区数据源（已安装且已启用的插件） */
   const [plugins, setPlugins] = useState<PluginMarketItem[]>([]);
+  /** plan-693-2868（P1）：/ 菜单「微应用」分区数据源——与工具卡「查看界面」共用同一份缓存
+   *  （store/microapps.ts）。接口在 P4 落地前必然取不到：空清单 → 菜单展示「还没有微应用」空态。 */
+  const microapps = useMicroAppsStore((s) => s.items);
   const [showSkills, setShowSkills] = useState(false);
   const [skillIndex, setSkillIndex] = useState(0);
   const [skillQuery, setSkillQuery] = useState("");
+  /** plan-693-2868 回归修复：`/` 菜单每次打开都对齐一次微应用清单。
+   *  此前只在挂载时拉一次（见上面的 load effect），新建 / 导入 / 安装之后菜单里永远是旧列表，
+   *  必须重启应用才看得到新应用。`showSlash` 只在「关 → 开」这一刻翻转（输入框 onChange 里按 `/`
+   *  判定），所以这个 effect 不会进击键热路径；store 侧再按 ttl 去重，正常输入不会反复扫磁盘库。 */
+  useEffect(() => {
+    if (showSlash) void useMicroAppsStore.getState().refreshIfStale();
+  }, [showSlash]);
   /** 同一时刻只开一个输入框浮窗（+ / 权限 / 模型与思考深度） */
   const closeFloats = () => {
     setShowPlus(false);
@@ -482,6 +515,17 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       })));
     }
   }, [draftKey, composerBackfill]);
+
+  /** 会话切换（主对话靠重挂载、侧边对话等场景复用同一实例）：chip 属于上一个 key。
+   *  不换桶的话，上一会话的微应用/文件引用会显示在新会话的输入框上（看起来像「引用已提交并被
+   *  带进下一条消息」）。这里换成目标 key 自己的草稿 chip（通常为空）。
+   *  声明在下方草稿同步 effect **之前**：先换桶，同步 effect 再按新 key 落盘就不会把旧 chip 写过去。 */
+  const refsKeyRef = useRef(draftKey);
+  useEffect(() => {
+    if (refsKeyRef.current === draftKey) return;
+    refsKeyRef.current = draftKey;
+    setRefs(useDraftsStore.getState().getDraft(draftKey)?.refs ?? []);
+  }, [draftKey]);
 
   /** plan-546: 草稿防抖同步——输入/附件/配置变化 300ms 后写入草稿 store；
    * 发送成功后置 skipDraftSyncRef 跳过一次，避免空状态写回导致草稿复活 */
@@ -626,18 +670,25 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     []
   );
 
+  /** / 菜单的过滤词：只取「行首或空白后」那一段 `/xxx`。
+   *  plan-693-2868 回归修复：触发处（onChange）用的是「光标前文本」，而这里五处过滤用的是**整段 input**；
+   *  光标不在末尾时两者会不一致（比如先打 `/`、再在它前面粘贴内容，或继续在别处编辑）——
+   *  触发侧认为在 `/` 上下文里（菜单照开），过滤侧却匹配不到而 return []。
+   *  表现出来就是「浮窗开着、却一条命令/技能都没有」，只剩一句「未找到匹配」。
+   *  所以匹配不到时一律按**空查询**处理（显示全部），绝不能清空列表。 */
+  const slashQueryOf = (text: string): string => {
+    const m = text.match(/(?:^|\s)\/([^\s]*)$/);
+    return m ? m[1].toLowerCase() : "";
+  };
+
   const filteredSlash = useMemo(() => {
-    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
-    if (!match) return [];
-    const query = match[1].toLowerCase();
+    const query = slashQueryOf(input);
     return slashCommands.filter((s) => s.cmd.slice(1).toLowerCase().includes(query));
   }, [input, slashCommands]);
 
   /** 会话 229: / 菜单技能区（与快捷命令共用 "/" 前缀过滤词） */
   const filteredSlashSkills = useMemo(() => {
-    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
-    if (!match) return [];
-    const q = match[1].toLowerCase();
+    const q = slashQueryOf(input);
     if (!q) return skills;
     return skills.filter(
       (s) => s.name.toLowerCase().includes(q) || (s.display_name ?? "").toLowerCase().includes(q)
@@ -646,9 +697,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   /** plan-282-1441（#9）：/ 菜单「连接器」分区（已启用的 MCP，共用 "/" 过滤词） */
   const filteredSlashMcp = useMemo(() => {
-    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
-    if (!match) return [];
-    const q = match[1].toLowerCase();
+    const q = slashQueryOf(input);
     if (!q) return mcpServers;
     return mcpServers.filter(
       (m) => m.name.toLowerCase().includes(q) || (m.display_name ?? "").toLowerCase().includes(q)
@@ -666,9 +715,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   /** plan-282-1441（#9）：/ 菜单「插件」分区（已启用的插件，共用 "/" 过滤词） */
   const filteredSlashPlugins = useMemo(() => {
-    const match = input.match(/(?:^|\s)\/([^\s]*)$/);
-    if (!match) return [];
-    const q = match[1].toLowerCase();
+    const q = slashQueryOf(input);
     if (!q) return plugins;
     return plugins.filter(
       (p) => p.name.toLowerCase().includes(q)
@@ -677,15 +724,35 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     );
   }, [input, plugins]);
 
-  /** 会话 229: / 菜单扁平项（命令 + 技能 + 连接器 + 插件，键盘导航共用同一索引） */
+  /** plan-693-2868（P1）：/ 菜单「微应用」分区（已安装微应用，共用 "/" 过滤词）。
+   *  名称 / appId / 描述任一命中即可——用户既可能记得显示名，也可能记得 appId。 */
+  const filteredSlashMicroApps = useMemo(() => {
+    const q = slashQueryOf(input);
+    if (!q) return microapps;
+    return microapps.filter(
+      (m) => m.appId.toLowerCase().includes(q)
+        || (m.name ?? "").toLowerCase().includes(q)
+        || (m.description ?? "").toLowerCase().includes(q),
+    );
+  }, [input, microapps]);
+
+  /** plan-693-2868（P1）：微应用分组空态只在「没装微应用**且**用户没输入过滤词」时出现——
+   *  用户已经在按名字筛选时，末尾再压一块空态只是噪音。 */
+  const slashQuery = useMemo(() => slashQueryOf(input), [input]);
+  const microAppEmpty = microapps.length === 0 && (slashQuery ?? "") === "";
+
+  /** 会话 229: / 菜单扁平项（命令 + 技能 + 连接器 + 插件 + 微应用，键盘导航共用同一索引） */
   const slashItems = useMemo(
     () => [
       ...filteredSlash.map((s) => ({ kind: "cmd" as const, key: s.cmd, label: s.cmd, description: s.desc, icon: <IconTerminal size={16} /> })),
       ...filteredSlashSkills.map((s) => ({ kind: "skill" as const, key: s.name, label: s.display_name || s.name, description: s.display_name ? `$${s.name}${s.description ? ` · ${s.description}` : ""}` : s.description || "技能", icon: <IconSparkles size={16} /> })),
       ...filteredSlashMcp.map((m) => ({ kind: "mcp" as const, key: m.name, label: m.display_name || m.name, description: m.description || m.name, icon: <IconPlug size={16} /> })),
       ...filteredSlashPlugins.map((p) => ({ kind: "plugin" as const, key: p.name, label: p.displayName || p.name, description: p.descriptionZh || p.description || p.category || "插件", icon: <IconPuzzle size={16} /> })),
+      // plan-693-2868（P1）：微应用分组排最后——引用它的是「让 AI 去操作某个界面」，
+      // 比技能/连接器更少用；排在末尾不挤占常用项的可见区域。
+      ...filteredSlashMicroApps.map((m) => ({ kind: "microapp" as const, key: m.appId, label: m.name || m.appId, description: m.description || `${m.appId} · v${m.version}`, icon: <IconBox size={16} /> })),
     ],
-    [filteredSlash, filteredSlashSkills, filteredSlashMcp, filteredSlashPlugins]
+    [filteredSlash, filteredSlashSkills, filteredSlashMcp, filteredSlashPlugins, filteredSlashMicroApps]
   );
 
   const slashVisible = showSlash;
@@ -1046,8 +1113,63 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     setShowSlash(false);
   };
 
-  /** 会话 229: / 菜单项选择（命令走原逻辑，技能/连接器/插件走插入） */
-  const pickSlashItem = (item: { kind: "cmd" | "skill" | "mcp" | "plugin"; key: string }) => {
+  /** plan-693-2868（P1）：选择微应用（/ 菜单）→ 追加微应用引用 chip。
+   *  这里**只注入引用、不打开右侧面板**（产品要求：注入 ≠ 打开界面；
+   *  打开面板只发生在用户显式点「查看界面」，见工具卡 MicroAppCallView）。
+   *  value 存 appId，label 存显示名，version 单独记下供「查看界面」按版本开标签。 */
+  const insertMicroApp = (appId: string, label: string, version?: string) => {
+    clearTriggerPrefix(/(^|\s)\/[^\s]*$/);
+    setRefs((prev) => (prev.some((r) => r.kind === "microapp" && r.value === appId)
+      ? prev
+      : [...prev, { kind: "microapp", value: appId, label, version }]));
+    setShowSlash(false);
+  };
+
+  /** plan-693-2868（P4）：跨组件注入入口——左面板「拓展 → 微应用」的「注入到输入框」。
+   *
+   *  为什么用事件而不是共享 store：chip 的权威构造在**这个组件里**（去重规则、label/version
+   *  口径）。外面各写一份必然漂移；事件只传 {appId,label,version}，由这里按同一份规则追加。
+   *  与 / 菜单一样**不打开右侧面板**（§7 P1 验收：注入不弹窗）。
+   *
+   *  这里直接写 setRefs 而不是复用 insertMicroApp：后者会先 clearTriggerPrefix，
+   *  而那是给「/ 菜单刚敲完前缀」用的，依赖当时的 input 与光标位置；
+   *  外部按钮注入时输入框里没有触发词，去清反而可能吃掉用户已输入的内容。 */
+  useEffect(() => {
+    const onInjectMicroApp = (e: Event) => {
+      const detail = (e as CustomEvent<{ appId?: string; label?: string; version?: string }>).detail;
+      const appId = String(detail?.appId || "").trim();
+      if (!appId) return;
+      const label = String(detail?.label || appId);
+      const version = detail?.version;
+      setRefs((prev) => (prev.some((r) => r.kind === "microapp" && r.value === appId)
+        ? prev
+        : [...prev, { kind: "microapp", value: appId, label, version }]));
+      setShowSlash(false);
+      // 焦点回输入框：用户点完「注入」通常接着打字
+      window.setTimeout(() => taRef.current?.focus(), 0);
+    };
+    window.addEventListener("chatcoder:composer-microapp", onInjectMicroApp);
+    return () => window.removeEventListener("chatcoder:composer-microapp", onInjectMicroApp);
+  }, []);
+
+  /** plan-693-2868（P1）：空态「让 AI 创建」——只把诉求写进输入框，不替用户按发送。
+   *  技能正文（microapp-create）在 P2 落地，这里先用一句通用诉求引导。 */
+  const requestCreateMicroApp = () => {
+    setShowSlash(false);
+    const ask = "帮我创建一个微应用：";
+    setInput((prev) => (prev.trim() ? prev : ask));
+    window.setTimeout(() => taRef.current?.focus(), 0);
+  };
+
+  /** plan-693-2868（P1）：空态「去拓展里安装」——落到设置 → 拓展，安装入口在那一页。
+   *  （微应用是拓展的第四类，P4 起在拓展页有专属标签；此处在 P4 之前先落到拓展页。） */
+  const goInstallMicroApp = () => {
+    setShowSlash(false);
+    window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "extensions" } }));
+  };
+
+  /** 会话 229: / 菜单项选择（命令走原逻辑，技能/连接器/插件/微应用走插入） */
+  const pickSlashItem = (item: { kind: "cmd" | "skill" | "mcp" | "plugin" | "microapp"; key: string }) => {
     if (item.kind === "cmd") pickSlash(item.key);
     else if (item.kind === "mcp") {
       const m = mcpServers.find((x) => x.name === item.key);
@@ -1055,6 +1177,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     } else if (item.kind === "plugin") {
       const pl = plugins.find((x) => x.name === item.key);
       insertPlugin(item.key, pl?.displayName || item.key);
+    } else if (item.kind === "microapp") {
+      const app = microapps.find((x) => x.appId === item.key);
+      insertMicroApp(item.key, app?.name || item.key, app?.version);
     } else insertSkill(item.key, true);
   };
 
@@ -1063,6 +1188,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       // 清空当前会话视图（与命令中心「新任务」一致的本地重置语义）
       useChatStore.setState({
         messages: [], turns: [], tasks: [], runningTurnId: null, isRunning: false,
+        // plan-723-3029 R3：本地重置同步清掉行为口 hint，否则输入框会继续判为「可能在跑」
+        runtimeHintTurnId: null,
         interruptedTurnId: null, streamingBuffers: {}, thinkingBuffers: {}, usage: null,
         pendingApproval: null, approvalQueue: [], pendingPlan: null, reviewedFiles: {},
       });
@@ -1213,12 +1340,19 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   // 发送时引用会被拼成「可查看目录：…」引用行，模型据此去看目录，正文可以是空的。
   const historyLoadFailed = useChatStore((s) => s.sessionLoadError);
   const historyUnavailable = useChatStore((s) => s.sessionLoading || s.sessionLoadError);
-  const hasSendContent = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0 || refs.length > 0);
+  /** plan-693-2868（P1）曾把微应用 chip 定为「发送后保留」（便于连续追问同一个应用），
+   *  实际表现是缺陷：发完消息 chip 还挂在输入框上，看起来像引用没提交；后续输入还会把它
+   *  同步回草稿，切走再切回来又出现（跨会话、跨消息重复携带）。
+   *  现在不再按 kind 留例外——所有引用都是「这一次的意图」，生命周期见 composerRefsLifecycle。 */
+  const hasSendContent = Boolean(input.trim() || attachments.length > 0 || composerBrowserRefs.length > 0
+    || refs.length > 0);
   const canSend = !historyUnavailable && !uploading && hasSendContent;
 
   const handleCancel = () => {
     // 停止 = 中断本会话的一切执行：运行中的主代理（连带子代理）、后台子代理、运行中的工作流（暂停，保留进度）
-    if (isRunning) void cancelTurn();
+    // plan-723-3029 R3：hint 存在时 isRunning 已复位，但停止仍必须下发——
+    // cancelTurn 会走「向后端补查 running turn」那条分支（见 chat.ts）。
+    if (isRunning || runtimeHintTurnId != null) void cancelTurn();
     void stopSessionExecution();
   };
 
@@ -1294,7 +1428,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         skipDraftSyncRef.current = true;
         setInput("");
         setAttachments([]);
-        setRefs([]);
+        // 引用已随消息送达（refsSuffix / refPayload 在上方取用过）→ chip 全部清空。
+        // 发送失败走 catch，到不了这里，chip 因此原样保留。
+        setRefs((prev) => refsAfterSend(prev, true));
         setEffort(null);
         setShowSlash(false);
         setShowAt(false);
@@ -1323,16 +1459,26 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         return;
       }
     }
-    await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
+    // sendTurn 的 null 既可能是失败也可能是「运行中入队」——队列里多了新项说明本次发送已被接收
+    const queuedBefore = new Set(useChatStore.getState().queuedInputs.map((q) => q.id));
+    const turnId = await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
+    const delivered = turnId != null
+      || deliveredFromQueue(queuedBefore, useChatStore.getState().queuedInputs);
     if (goalText0) setGoalArmed(false);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);
-    setRefs([]);
+    // 引用 chip：送达（含入队）→ 清空，避免"看起来引用没提交"以及下一条消息重复携带；
+    // 发送失败 → 原样保留，用户挑好的引用不丢，直接重试即可。
+    setRefs((prev) => refsAfterSend(prev, delivered));
     setShowSlash(false);
     setShowAt(false);
     // v7: 发送后仅清文字/附件，保留思考深度等输入框配置——深度按会话持久化（重进/重启不丢）
-    if (draftKey !== "new") useDraftsStore.getState().clearDraftText(draftKey);
+    if (draftKey !== "new") {
+      useDraftsStore.getState().clearDraftText(draftKey);
+      // 失败时保留的 chip 一并写回草稿：否则用户切走再切回来，刚挑好的引用就没了
+      if (!delivered) useDraftsStore.getState().patchDraft(draftKey, { refs });
+    }
     setSending(false);
   };
 
@@ -1704,6 +1850,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   : r.kind === "dir" ? "移除文件夹引用"
                   : r.kind === "mcp" ? "移除连接器引用"
                   : r.kind === "plugin" ? "移除插件引用"
+                  : r.kind === "microapp" ? "移除微应用引用"
                   : "移除技能引用";
                 return (
                   <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.kind === "session" ? `${r.label} · ${r.project_label || "会话"} · #${r.value}` : r.value}>
@@ -1718,6 +1865,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                           : r.kind === "dir" ? <IconFolder size={12} />
                           : r.kind === "mcp" ? <IconPlug size={12} />
                           : r.kind === "plugin" ? <IconPuzzle size={12} />
+                          : r.kind === "microapp" ? <IconBox size={12} />
                           : <IconSparkles size={12} />}
                       </span>
                       <span className="composer-ref-name">{r.label}</span>
@@ -1866,6 +2014,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                 setShowSlash(false);
                 setShowAt(false);
                 setShowSkills(false);
+                // 没有菜单可关时，Esc = 取消本轮已选引用：chip 属于「这一次的意图」，
+                // 不能留到下一轮（否则下一条消息又会带上同一枚引用）。
+                setRefs((prev) => (prev.length > 0 ? [] : prev));
               }
             }}
             />
@@ -1956,7 +2107,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   空闲：发送；执行中（含后台工作流 / 子代理）且输入为空：停止；主代理轮次运行中有输入：加入排队；仅后台执行时有输入：直接发送。 */}
               {(() => {
                 // 执行中：输入为空 → 停止（中断主代理、子代理与工作流）；主代理轮次运行中有输入 → 排队；仅后台执行时有输入 → 直接发送
-                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (hasSendContent || uploading ? (isRunning ? "queue" : "send") : "stop") : "send";
+                // plan-723-3029 R3：hint 存在（切回会话的复位窗口）时与真在跑同构：
+                // 无输入 → 停止；有输入 → 排队。渲染态仍只认 isRunning，不受 hint 影响。
+                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (hasSendContent || uploading ? (isRunning || runtimeHintTurnId != null ? "queue" : "send") : "stop") : "send";
                 const tip = uploading ? "附件上传中，请稍候…" : sendState === "stop" ? "停止：中断主代理、子代理与工作流" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
                 return (
                   <Tooltip content={tip} side="top">
@@ -2073,8 +2226,9 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       <div className="mention-anchor">
         <Collapse open={slashVisible} lazy>
           <CommandMenu ref={slashMenuRef} items={slashItems} index={selectedSlashIndex} listId={slashListId}
-            disabledMcpCount={disabledMcpCount}
+            disabledMcpCount={disabledMcpCount} microAppEmpty={microAppEmpty}
             onIndex={(i) => { kbScrollRef.current = null; setSlashIndex(i); }} onPick={pickSlashItem}
+            onCreateMicroApp={requestCreateMicroApp} onInstallMicroApp={goInstallMicroApp}
             onClose={() => setShowSlash(false)} onManageExtensions={() => {
               setShowSlash(false);
               window.dispatchEvent(new CustomEvent("chatcoder:open-settings", { detail: { tab: "extensions" } }));

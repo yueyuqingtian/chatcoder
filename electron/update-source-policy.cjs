@@ -5,9 +5,9 @@
  * 换源只往后转、不回头，回退到 GitHub 后再也回不到自建源；4 个并发分块被同一次抖动同时打断，
  * 共用的失败计数瞬间凑满就换源。这里把「用哪个源」收拢成一个状态机，由下载器的所有 worker 共享：
  *
- *  - 优先级固定：镜像 > 自建源 > GitHub，不测速、不重排（镜像实测更快，见 plan-20261022-update-route）；
+ *  - plan-20261116-review-fixes：优先级尊重显式 rank，缺省为镜像 > 自建源 > GitHub；
  *  - 镜像线路固定单连接：gh-proxy 对多连接并发会主动降速；
- *  - 切换序列：M → P → M → P → G → G …（两轮镜像 / 自建源都失败才进 GitHub），每次切换前按 2s、4s、8s… 退避；
+ *  - 缺省序列：M → P → M → P → G → G …；显式优选的 GitHub 参与正常轮换，每次换源前退避；
  *  - 同一时刻只试一个源：退避期间所有 worker 都停在闸门上；切到一个还没连通的源时只放一个请求过去探路；
  *  - 只认「源故障」：某个请求失败时，若同一源在它发出之后还有别的连接收到过数据，只算单块失败，同源重试；
  *  - 自动回切：不在最高优先级源上时，由下载器定时探测更高优先级的源，通了就 promote 回去。
@@ -24,7 +24,9 @@ function hostOf(url) {
   try { return new URL(url).host; } catch { return String(url).slice(0, 40); }
 }
 
-/** 统一成带层级的源列表。旧调用方传字符串数组：第一个视为自建源，其余视为镜像（保持原有先后） */
+/** 统一成带层级的源列表。旧调用方传字符串数组：第一个视为自建源，其余视为镜像（保持原有先后）
+ *  plan-20261024-update-channel：可选 `rank` 显式指定优先级（越小越先），用于「测速优选通道排最前」。
+ *  传了 rank 就不再看 tier；同 rank 按传入顺序。 */
 function normalizeSources(urls) {
   const list = [];
   (Array.isArray(urls) ? urls : []).forEach((u, i) => {
@@ -34,10 +36,12 @@ function normalizeSources(urls) {
     if (list.some((s) => s.url === o.url)) return;
     list.push(o);
   });
-  // 稳定排序：层级优先，同层保持传入顺序
-  list.sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier]);
+  // 稳定排序：显式 rank 优先，其次层级；同序保持传入顺序
+  const rankOf = (o) => (Number.isFinite(o.rank) ? o.rank : TIER_RANK[o.tier]);
+  list.sort((a, b) => rankOf(a) - rankOf(b));
   return list.map((o, id) => ({
     id, url: o.url, tier: o.tier, label: o.label || TIER_LABEL[o.tier], host: hostOf(o.url),
+    rank: rankOf(o),
     dead: false, noRange: false, reason: "", lastOkAt: 0,
     // 单源在途请求上限：镜像默认 1（多连接并发会被 gh-proxy 降速），其余不限制
     maxConcurrency: Number.isFinite(o.maxConcurrency)
@@ -62,9 +66,15 @@ function createSourceController(o) {
   const random = o.random || Math.random;
   if (!sources.length) throw new Error("没有可用的下载源");
 
-  const nonGh = sources.filter((s) => s.tier !== "github");
-  const gh = sources.filter((s) => s.tier === "github");
+  // plan-20261116-review-fixes：只有最低优先级的 GitHub 才是兜底，显式优选不能被层级覆盖。
+  const rankValue = (s) => Number.isFinite(s.rank) ? s.rank : TIER_RANK[s.tier];
+  const gh = sources.filter((s) => s.tier === "github"
+    && sources.every((other) => rankValue(other) <= rankValue(s)));
+  const nonGh = sources.filter((s) => !gh.includes(s));
   const live = (list) => list.filter((s) => !s.dead);
+  // plan-20261024-update-channel：优先级以 rank 为准（测速优选通道会被排到 rank 0）。
+  // 源没带 rank 时 normalizeSources 已按层级补好，所以这里可以统一比 rank。
+  const rankOf = (s) => (Number.isFinite(s.rank) ? s.rank : (TIER_RANK[s.tier] || 0));
 
   // 序列下标：[0, rounds*nonGh.length) 是两轮自建 / 镜像，之后是尾段（GitHub 循环；没有 GitHub 则全体存活源循环）
   let step = 0;
@@ -221,7 +231,7 @@ function createSourceController(o) {
 
   /** 比当前源优先级更高的存活源（按优先级排列），用于定时回切探测 */
   function higherThanCurrent() {
-    return sources.filter((s) => !s.dead && TIER_RANK[s.tier] < TIER_RANK[cur.tier]);
+    return sources.filter((s) => !s.dead && rankOf(s) < rankOf(cur));
   }
 
   /** 回切到更高优先级的源（探测已经确认它连通） */

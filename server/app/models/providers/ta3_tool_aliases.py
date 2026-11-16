@@ -93,6 +93,9 @@ _EXTENSION_REAL_NAMES: tuple[str, ...] = (
     "cancel_workflow", "amend_workflow", "decide_workflow",
     # 后续任务建议
     "suggest_next_task",
+    # 微应用（plan-693-2868 §7 P0 第 1 条：ta3 通道先行验证——三名缺任一，
+    # ta3 会话下模型看不到也调不动，且 disguise_tools 会静默剔除，无任何报错）
+    "microapp_list", "microapp_call", "microapp_validate",
 )
 
 TO_TA3_EXTENSION: dict[str, str] = {

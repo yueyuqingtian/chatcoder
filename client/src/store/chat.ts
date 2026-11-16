@@ -94,6 +94,9 @@ export interface RunningToolResult {
   duration_ms?: number;
   /** plan-20261015-browser-agent：截图类工具的预览（落库前即可在时间线原位显示） */
   image?: ToolImage;
+  /** plan-flow-redesign：良性退出码 1 的中性状态说明（如「无匹配（退出码 1）」） */
+  exit_note?: string;
+  returncode?: number;
 }
 
 /** 截图类工具结果的预览图（服务端 tool_images.persist_tool_image 产出） */
@@ -342,12 +345,30 @@ function _restorePendingDeltas(slice: SessionSlice) {
 /** slice → 视图投影（切换会话时恢复缓存，跳过重复 REST 拉取）。 */
 function _sliceToView(slice: SessionSlice | undefined): Partial<ChatState> {
   if (!slice) return {};
+  /* plan-723-3029 R2：运行态（runningTurnId / isRunning）不是「可以从缓存恢复的视图真值」。
+   *
+   * 快照里这两项只代表**上次离开该会话那一刻**的状态：切走期间那一轮往往早已结束，
+   * 原样展开会让进入会话的首帧「看起来这轮还在跑」——工具调用汇总行的扫光、
+   * 底部「等待响应…」、「正在思考」全都据此点亮，要等异步 refreshTurns() 回来才熄
+   * （表现为「进会话闪一下扫光，消息流加载完就消失」）。
+   *
+   * 因此这里统一复位为空：运行态只由 refreshTurns()（服务端 status === "running" 的行，
+   * 见 refreshTurns 内的 runningTurnId / isRunning 写入）与 WS 事件（turn.started 等）给出。
+   * 真正在跑的会话不受影响：切会话后立刻会 refreshTurns()，返回 running 行时照常点亮运行态。
+   * 注意此时 _resetSessionState() 已把这两项置为 null / false（switchSession 里先展开它再展开本函数），
+   * 这里显式再写一次，避免将来调整展开顺序时又把这套陈旧值放回视图。 */
+  const view: Partial<ChatState> = { ...slice };
+  view.runningTurnId = null;
+  view.isRunning = false;
+  /* plan-723-3029 R3：运行态分层——上面把「渲染可信度」用的两项复位成空，但快照里那个 turn
+   * 在服务端可能真的还在跑（切走期间既可能结束、也可能没结束）。下面单独留一份 hint 给行为口：
+   * 发送排队 / 停止按钮 / 心跳兜底 / cancelTurn 都按「可能在跑」处理，直到 refreshTurns 或
+   * WS 事件给出真实运行态。渲染态一眼都不读它——否则「进会话闪扫光」的问题会原样复发。 */
+  view.runtimeHintTurnId = slice.runningTurnId ?? null;
   // plan-20261023-ownerfix：旧缓存可能没有清单归属字段，补 null（否则 todos 会被判为不属于任何会话）
-  return {
-    ...slice,
-    todosSessionId: slice.todosSessionId ?? null,
-    turnChangesSig: slice.turnChangesSig ?? {},
-  };
+  view.todosSessionId = slice.todosSessionId ?? null;
+  view.turnChangesSig = slice.turnChangesSig ?? {};
+  return view;
 }
 
 /** 按会话 id 读取会话切片（侧边会话统一的基础设施，plan 20261017-side-session P1）。
@@ -375,6 +396,15 @@ interface ChatState {
   /** 当前正在运行的 turnId（无则 null）。 */
   runningTurnId: number | null;
   isRunning: boolean;
+  /** plan-723-3029 R3：缓存快照里「离开该会话那一刻可能在跑」的 turn id——**只服务行为口**
+   *  （发送排队 / 停止按钮 / 心跳兜底 / cancelTurn），绝不参与任何渲染态。
+   *  背景：_sliceToView 把 runningTurnId / isRunning 复位成空（否则进入会话首帧用陈旧运行态点亮
+   *  工具汇总行的扫光），但这两个字段同时是「行为开关」，复位后到 refreshTurns() 返回前有一个
+   *  listTurns RTT 的空窗：这期间后端可能真的还有 turn 在跑，行为口若按「空闲」处理就会双发
+   *  （后端 create_turn 无会话级并发守卫）、停止键退化成发送键、cancelTurn 直接 return。
+   *  于是把快照当时的 turn id 挪到这里：渲染继续只认真实运行态，行为口按「可能在跑」保守处理。
+   *  清空时机：refreshTurns 写入真实运行态、WS turn.started、cancelTurn 成功、轮次终态收尾、切会话复位。 */
+  runtimeHintTurnId: number | null;
   /** 中断后可续跑的 turn（status=interrupted）。 */
   interruptedTurnId: number | null;
   /** 流式文本缓冲：agentId -> 文本（token.delta 累积）。 */
@@ -475,6 +505,12 @@ interface ChatState {
   runningToolResults: Record<string, RunningToolResult>;
   /** v19: 子代理元信息（agentId -> 名称/turn/任务/状态）——消息流子代理卡片数据源。 */
   subagentMeta: Record<number, SubagentMeta>;
+  /** plan-20261116-subagent-live-stats：子代理运行期累计 token（agentId -> 累计值）。
+   *  后端 task.token_usage 只在子代理收尾（_finish_done → _sync_task）才写入，
+   *  运行期 REST 恒返回 0，面板头部只能等跑完才显示。这里按每步 usage.update
+   *  （agent_kind=sub，prompt+completion）在前端累加，口径与后端 total_tokens 一致。
+   *  agentId 是全局自增主键，跨会话不会撞键，因此不随会话切片保存/恢复。 */
+  subagentTokens: Record<number, number>;
   /** v39: 后台子代理运行数（>0 且主 turn 未运行时显示「等待子代理结束…」并保持会话转圈）。 */
   pendingSubagents: number;
   /** v19: 子代理线程消息桶（threadId=agentId -> 落库消息），右面板完整会话数据源。 */
@@ -926,7 +962,9 @@ function _startHeartbeat() {
   _heartbeatTimer = setTimeout(() => {
     _heartbeatTimer = null;
     const st = useChatStore.getState();
-    if (!st.isRunning) return;
+    // plan-723-3029 R3：带 hint（切回会话的复位窗口）时也要跑一次兜底——此时 isRunning 已复位为
+    // false，若这里直接 return，refreshTurns() 首次失败后就再没人纠偏（心跳是唯一的自愈点）。
+    if (!st.isRunning && st.runtimeHintTurnId == null) return;
     void st.refreshTurns().catch(() => {
       useChatStore.setState({ isRunning: false, runningTurnId: null });
     }).finally(() => {
@@ -1368,6 +1406,8 @@ function _resetSessionState(): Partial<ChatState> {
     pendingSuggestion: null,
     runningTurnId: null,
     isRunning: false,
+    // plan-723-3029 R3：切会话时行为口的「可能在跑」提示一同清空（新会话有它自己的快照）
+    runtimeHintTurnId: null,
     interruptedTurnId: null,
     streamingBuffers: {},
     thinkingBuffers: {},
@@ -1437,6 +1477,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   artifacts: [],
   runningTurnId: null,
   isRunning: false,
+  // plan-723-3029 R3：初值 null——只有切回有缓存快照的会话时才由 _sliceToView 置位
+  runtimeHintTurnId: null,
   interruptedTurnId: null,
   streamingBuffers: {},
   thinkingBuffers: {},
@@ -1470,6 +1512,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runningToolOutput: {},
   runningToolResults: {},
   subagentMeta: {},
+  subagentTokens: {},
   subagentMessages: {},
   subagentStreams: {},
   subagentThinking: {},
@@ -1847,7 +1890,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // v19: 缓存切换同样重建子代理卡片
       void get().loadSessionSubagents();
       // plan-547: 切回会话若已空闲且存在排队输入，立即续发（切走期间 turn 结束事件已丢失）
-      if (!get().isRunning) void get()._drainQueue();
+      // plan-723-3029 R2：视图里的运行态不再从缓存恢复（见 _sliceToView），这里改用快照原始值判断——
+      // 口径与改动前 `!get().isRunning` 完全一致（那时它就是缓存值），真在跑的会话不会因视图复位误发排队输入。
+      if (!cached.isRunning && cached.runningTurnId == null) void get()._drainQueue();
       return;
     }
 
@@ -2124,7 +2169,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendTurn: async (content, attachments, reasoningEffort, mode, modelId, refs) => {
-    const { currentSessionId, isRunning } = get();
+    // plan-723-3029 R3：runtimeHintTurnId 只用于行为口判定（见 ChatState 上的注释）
+    const { currentSessionId, isRunning, runtimeHintTurnId } = get();
     if (!currentSessionId || get().sessionLoading || get().sessionLoadError) return null;
     // 空态新会话可能在 WS 建连前就收到首条消息，先本地投影标题，避免等待事件丢失。
     const currentSession = findSession(get(), currentSessionId);
@@ -2147,7 +2193,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       return null;
     }
-    if (isRunning) {
+    /* plan-723-3029 R3：hint 存在时同样走排队分支——复位窗口里后端 turn 可能仍在跑，
+     * 直发 api.createTurn 会双发（后端 create_turn 无会话级并发守卫，engine.start_turn 只防同 turn 重入）。 */
+    if (isRunning || runtimeHintTurnId != null) {
       set((s) => ({
         queuedInputs: [...s.queuedInputs, {
           id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -2624,7 +2672,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       // plan-365-1770：本地没有 runningTurnId 但界面仍在运行态（发送在途/状态脱节）时，
       // 直接 return 会让「停止」按钮点了没反应；按会话向后端补查当前运行的 turn。
-      if (!st.isRunning || !st.currentSessionId) return;
+      /* plan-723-3029 R3：复位窗口里只有 hint（isRunning 已被 _sliceToView 复位）也要继续往下走——
+       * 交给后面的「向后端补查 running turn」，否则停止键点了完全没反应。 */
+      if ((!st.isRunning && st.runtimeHintTurnId == null) || !st.currentSessionId) return;
       const sid = st.currentSessionId;
       let found: number | null = null;
       try {
@@ -2643,6 +2693,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({
           runningTurnId: null,
           isRunning: false,
+          // plan-723-3029 R3：后端确认没有运行中的 turn，hint 一并作废
+          runtimeHintTurnId: null,
           ...patchSession(s, sid, (x) => setSessionRunning(x, false)),
         }));
         return;
@@ -2655,6 +2707,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       runningTurnId: null,
       isRunning: false,
+      // plan-723-3029 R3：停止是用户明确的本地控制操作，hint 随之失效（否则输入框会一直判忙）
+      runtimeHintTurnId: null,
       interruptedTurnId: turnId,
       turns: s.turns.map((t) => (t.id === turnId ? { ...t, status: "interrupted" } : t)),
       streamingBuffers: {},
@@ -2851,6 +2905,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({ messages: _mergeRefreshed(s.messages.filter((m) =>
         !result.checkedIds.has(m.id) || present.has(m.id)), result.items, new Set()) }));
     } catch (e) {
+      // 切走会话时 abortMessageHistory 会中止本请求（AbortError），旧会话的迟到错误
+      // 不得写进当前会话的全局 error（会被 Toast 弹成红色错误条）；主动中止本身也不算失败。
+      if (get().currentSessionId !== currentSessionId) return;
+      if (e instanceof DOMException && e.name === "AbortError") return;
       set({ error: String(e) });
     }
   },
@@ -2870,6 +2928,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : t)),
         runningTurnId: running?.id ?? null,
         isRunning: Boolean(running),
+        // plan-723-3029 R3：真实运行态落地，行为口的「可能在跑」提示完成使命
+        runtimeHintTurnId: null,
         interruptedTurnId: interrupted?.id ?? (stopping.size ? [...stopping][0] : null),
       });
     } catch (e) {
@@ -3013,9 +3073,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-547: 循环 drain——发送成功后 isRunning=true 自然退出；
       // 发送失败（返回 null）时队头放回并停止，等待下次触发，消息不丢。
       for (;;) {
-        const { queuedInputs, isRunning, currentSessionId, pendingPlan } = get();
-        // 计划等待确认不是结束态，不能提前消费后续消息。
-        if (!currentSessionId || isRunning || pendingPlan || _sendingGuard) return;
+        const { queuedInputs, isRunning, runtimeHintTurnId, currentSessionId, pendingPlan } = get();
+        /* 计划等待确认不是结束态，不能提前消费后续消息。
+         * plan-723-3029 R3：hint 存在时也不要出队——先 pop 再调 sendTurn 的话，sendTurn 会因「可能在跑」
+         * 把这一条重新塞回队尾，下面的失败回滚又把同一条放到队头，同一条消息会变成队列里的两份。 */
+        if (!currentSessionId || isRunning || runtimeHintTurnId != null || pendingPlan || _sendingGuard) return;
         const next = queuedInputs[0];
         if (!next) return;
         set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
@@ -3103,7 +3165,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // v1.3: 合并 addMessage 和清空 buffer 为一次 set()，避免中间态闪烁
         const sid = Number(rawMsg.sender_id);
         if (sid) _clearPendingFor(sid);
-        const isThinking = Boolean((rawMsg.content as Record<string, unknown>).thinking);
+        // plan-20261114-message-flow：两种思考消息都需要移交展开态，不能只识别正文上的兼容标记。
+        const isThinking = rawMsg.msg_type === "thinking" || Boolean((rawMsg.content as Record<string, unknown>).thinking);
         // v19: 子代理线程消息进独立桶（右面板完整会话数据源），不混入主消息流
         const rawThread = rawMsg.thread_id != null ? Number(rawMsg.thread_id) : null;
         if (rawThread != null) {
@@ -3201,6 +3264,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? {
                   runningTurnId: startedTurnId,
                   isRunning: true,
+                  // plan-723-3029 R3：WS 已给出真实运行态，hint 清空
+                  runtimeHintTurnId: null,
                   agentActivity: {},
                   // v7(B/H): 新 turn 清空上一轮运行中的工具实时输出/结果缓存
                   runningToolOutput: {},
@@ -3281,6 +3346,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? {
                   runningTurnId: null,
                   isRunning: false,
+                  // plan-723-3029 R3：轮次到终态，行为口的「可能在跑」提示作废
+                  runtimeHintTurnId: null,
                   ...(activeSid != null ? patchSession(s, activeSid, (x) => setSessionRunning(x, false)) : {}),
                 }
               : {}),
@@ -3347,7 +3414,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : t)),
             ...(clearsRunning
               ? {
-                  runningTurnId: null, isRunning: false,
+                  // plan-723-3029 R3：轮次已完成，hint 同时清空（否则输入框会停在「可能在跑」）
+                  runningTurnId: null, isRunning: false, runtimeHintTurnId: null,
                   streamingBuffers: {}, thinkingBuffers: {},  // v1.3: turn 结束兜底清空
                   subagentStreams: {}, subagentThinking: {},  // v19: 子代理流式缓冲同样兜底清空
                   // v1.1/v37: 本地摘除会话转圈标记（按事件携带的 session_id 精确复位，切会话不串）
@@ -3418,7 +3486,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
             : {}),
           ...(clearsRunningFail
-            ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} }
+            // plan-723-3029 R3：失败也是轮次终态，hint 一并清空
+            ? { runningTurnId: null, isRunning: false, runtimeHintTurnId: null, streamingBuffers: {}, thinkingBuffers: {} }
             : {}),
           ...(failSid != null ? patchSession(s, failSid, (x) => setSessionRunning(x, false)) : {}),
         }));
@@ -3462,7 +3531,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   : t)),
               }
             : {}),
-          ...(clearsRunning ? { runningTurnId: null, isRunning: false, streamingBuffers: {}, thinkingBuffers: {} } : {}),
+          // plan-723-3029 R3：中断同样是轮次终态，hint 一并清空
+          ...(clearsRunning ? { runningTurnId: null, isRunning: false, runtimeHintTurnId: null, streamingBuffers: {}, thinkingBuffers: {} } : {}),
           ...(intSid != null ? patchSession(s, intSid, (x) => setSessionRunning(x, false)) : {}),
         }));
         if (!isCurrentEvent) break;
@@ -3834,6 +3904,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             image: (payload.image && typeof (payload.image as { url?: unknown }).url === "string"
               ? (payload.image as ToolImage)
               : prev?.image),
+            exit_note: (typeof payload.exit_note === "string" ? payload.exit_note : prev?.exit_note),
+            returncode: (typeof payload.returncode === "number" ? payload.returncode : prev?.returncode),
           };
           set((s) => ({
             runningToolResults: { ...s.runningToolResults, [rk]: nextResult },
@@ -4001,7 +4073,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "usage.update": {
         // v19: 圆环仅统计主代理占用——子代理 usage 不覆盖（避免多步任务数字来回跳变）
         const agentKind = String(payload.agent_kind ?? "main");
-        if (agentKind === "sub") break;
+        if (agentKind === "sub") {
+          /* plan-20261116-subagent-live-stats：子代理「消耗」实时累计。
+           * 后端的 task.token_usage 只在子代理收尾（_finish_done → _sync_task）才写入，
+           * 运行期 REST 一直返回 0，面板头部只能等跑完才显示 token 数。
+           * 这里按每次模型调用的 usage.update 累加 prompt+completion（与后端
+           * agent_loop 的 total_tokens += prompt+completion 同口径）。
+           *  - est_after_compact 是压缩后的占用重估，不是一次真实调用，不能计入；
+           *  - 补发重放（isReplay）会重复投递同一条，累加会翻倍，跳过即可
+           *    （完成后 REST 的权威值会覆盖回来）。 */
+          const subAid = Number(payload.agent_id ?? 0);
+          const subSource = String(payload.usage_source ?? "");
+          if (subAid && !isReplay && subSource !== "est_after_compact") {
+            const add = Number(payload.prompt_tokens ?? 0) + Number(payload.completion_tokens ?? 0);
+            if (add > 0) {
+              set((s) => ({
+                subagentTokens: { ...s.subagentTokens, [subAid]: (s.subagentTokens[subAid] ?? 0) + add },
+              }));
+            }
+          }
+          break;
+        }
         // v6.5: total 用 prompt_tokens（真实当前上下文占用），而非 total_tokens(prompt+completion)。
         // prompt_tokens 包含 system+history+tools+当前输入，是"窗口被占用了多少"的真实值。
         // 后端已将 total_tokens 字段也设为 prompt_tokens，这里取 prompt_tokens 更明确。
@@ -4384,6 +4476,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 后台命令事件已在上方转发到后台任务 store，此处仅作穷举登记
       case "bg.process.started":
       case "bg.process.exited":
+        break;
+      // plan-693-2868：微应用宿主桥的回执与流式日志只走全局通道（/ws/global），
+      // 且 payload 不带 session_id（见 events.ts 的 MicroappHostResponsePayload）——
+      // 消费方是 client/src/browserAgent/microappHost.ts，不进任何会话状态机。此处仅作穷举登记。
+      case "microapp.host.response":
+      case "microapp.host.push":
         break;
       default: {
         // 编译期穷举检查：后端新增事件未在 events.ts 登记时此处报错

@@ -151,6 +151,28 @@ def test_transient_without_owner_turn_pauses_instead_of_keepalive(monkeypatch, s
     assert stubs[-1][2]["messages"], "暂停时必须保存检查点"
 
 
+@pytest.mark.parametrize("intervals", [[], [10, 20, 30]])
+def test_model_retry_handled_pauses_without_outer_keepalive(monkeypatch, stubs, intervals):
+    """plan-20261112-retry-policy-1：模型已执行重试计划后，活跃主代理也不能重复调用。"""
+    monkeypatch.setattr(subagent_mod, "_retry_plan", lambda: intervals)
+    calls = []
+
+    async def fake_run(db, **kwargs):
+        calls.append(1)
+        kwargs["checkpoint_sink"](list(kwargs["context_messages"]))
+        return AgentOutput(kind="error", error="网关超时", transient=True, retry_handled=True)
+
+    monkeypatch.setattr(subagent_mod, "run_agent_loop", fake_run)
+    mgr = SubagentManager(session_id=1)
+    mgr.owner_active = True
+    handle = _new_handle()
+    asyncio.run(mgr._drive(handle, agent_id=7, task_id=None, turn_id=3,
+                           messages=_base_messages(), cancel_event=None))
+    assert len(calls) == 1
+    assert handle.status == "paused" and handle.retry_handled and handle.resumable
+    assert stubs[-1][2]["messages"]
+
+
 def test_non_transient_failure_is_failed_but_resumable(monkeypatch, stubs):
     async def fake_run(db, **kwargs):
         kwargs["checkpoint_sink"](list(kwargs["context_messages"]))

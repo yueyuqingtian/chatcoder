@@ -7,7 +7,7 @@ import { useChatStore } from "../../store/chat";
 import { IconAlertCircle, IconCheckCircle, IconDatabase, IconRefresh, IconWrench } from "../icons";
 import { Empty } from "../ui";
 
-interface CheckpointStat { workspace: string; file_count: number; size_mb: number; orphan_count: number }
+interface CheckpointStat { workspace: string; file_count: number; size_mb: number; orphan_count: number; retention_days?: number }
 
 export function DiagnosticsPanel() {
   const [result, setResult] = useState<Array<{ name: string; ok: boolean; detail?: string }> | null>(null);
@@ -41,8 +41,21 @@ export function DiagnosticsPanel() {
     setCleaning(true);
     try {
       const r = await api.cleanupCheckpoints();
-      const deleted = (r.results as Array<{ deleted?: number }>).reduce((a, b) => a + (b.deleted ?? 0), 0);
-      notify.success(`已清理 ${deleted} 个 checkpoint 文件`);
+      /* plan-20261115：GC 只删「孤儿 / 超过保留期 / 超量」三类文件。
+         旧文案只说「已清理 N 个」——N=0 时用户以为清理失败（反馈「永远清理不完」），
+         实际是保留期内的活跃快照按设计不删。这里把保留期与保底原因说清楚。 */
+      const sum = (k: "deleted" | "kept") =>
+        (r.results ?? []).reduce((a, b) => a + (Number(b[k]) || 0), 0);
+      const deleted = sum("deleted");
+      const kept = sum("kept");
+      const days = r.retention_days ?? 0;
+      if (deleted > 0) {
+        notify.success(`已清理 ${deleted} 个 checkpoint 文件`);
+      } else if (kept > 0) {
+        notify.info(`暂无可清理项：${kept} 个文件仍在 ${days} 天保留期内，到期后或被回滚/删除会话时自动回收`);
+      } else {
+        notify.info("没有需要清理的 checkpoint 文件");
+      }
       await run();
     } catch (e) { useChatStore.setState({ error: String(e) }); }
     finally { setCleaning(false); }
@@ -99,7 +112,19 @@ export function DiagnosticsPanel() {
                 {c.orphan_count > 0 && <span className="sc-badge warn">有孤儿</span>}
                 <div className="sc-row-actions">
                   <button className="btn btn-ghost btn-sm" disabled={cleaning}
-                    onClick={async () => { setCleaning(true); try { await api.cleanupCheckpoints(c.workspace); await run(); } catch (e) { useChatStore.setState({ error: String(e) }); } finally { setCleaning(false); } }}>
+                    onClick={async () => {
+                      setCleaning(true);
+                      try {
+                        const r = await api.cleanupCheckpoints(c.workspace);
+                        const d = r.results?.[0]?.deleted ?? 0;
+                        const keptN = r.results?.[0]?.kept ?? 0;
+                        const days = r.retention_days ?? c.retention_days ?? 0;
+                        if (d > 0) notify.success(`已清理 ${d} 个 checkpoint 文件`);
+                        else if (keptN > 0) notify.info(`暂无可清理项：${keptN} 个文件仍在 ${days} 天保留期内`);
+                        else notify.info("没有需要清理的 checkpoint 文件");
+                        await run();
+                      } catch (e) { useChatStore.setState({ error: String(e) }); } finally { setCleaning(false); }
+                    }}>
                     <IconWrench size={12} /> 清理
                   </button>
                 </div>

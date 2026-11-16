@@ -59,7 +59,7 @@ def _resolve_ta3_base_url(model, provider, meta: dict | None) -> str:
 
 def _build_provider(
     api_key: str, base_url: str, model: str, api_format: str = "openai",
-    meta: dict | None = None, provider=None, max_retries: int = 3,
+    meta: dict | None = None, provider=None, max_retries: int = 0,
 ) -> ModelProvider:
     """根据 api_format 构造对应的 Provider 实例。
 
@@ -98,6 +98,7 @@ def _build_provider(
     return OpenAICompatibleProvider(
         api_key=api_key, base_url=base_url, model=model,
         proxy=proxy, proxy_disabled=proxy_disabled(provider), proxy_configured=_configured,
+        max_retries=max_retries,
     )
 
 
@@ -596,8 +597,6 @@ class ModelRegistry:
                         p = _build_provider(
                             api_key=_key, base_url=_base_url, model=model.name,
                             api_format=api_format, meta=_meta, provider=provider,
-                            # 多凭据时降 SDK 内置重试：故障/限流立刻切下一个 Key，不在同一个 Key 上睡
-                            max_retries=1 if len(creds) > 1 else 3,
                         )
                         # ta3 继续走旧的凭据排序与上报路径（见 _pick_credential）
                         _attach_credential_meta(p, provider.id, chosen.id,
@@ -689,12 +688,9 @@ class ModelRegistry:
         else:
             if not (provider.base_url and api_key):
                 return None, "provider_incomplete", None
-            from app.services import credential_service as _cred_svc
-            _total = len(await _cred_svc.list_credentials(db, provider.id))
             p, reason = _build_provider(
                 api_key=api_key, base_url=provider.base_url, model=model.name,
                 api_format=api_format, provider=provider,
-                max_retries=1 if _total > 1 else 3,
             ), "provider_credential"
         if p is not None:
             _attach_credential_meta(p, provider.id, chosen.id)

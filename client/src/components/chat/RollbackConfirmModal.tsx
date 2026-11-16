@@ -1,14 +1,8 @@
-/** 回滚确认弹窗（plan-20261017-goal12 项 3 / 项 11）：
- *
- * 点击回滚（高风险操作）先展示本次将撤销的文件清单 + 回滚前后内容对比，用户审核后才执行。
- * 与手动改动重叠的文件默认让整次回滚拒绝执行（不改任何文件）；用户可选择「跳过冲突文件，回滚其余」，
- * 此时冲突文件保持现状，确认按钮文案明确写出跳过的数量。
- * 外壳统一为 ui/Dialog（与全站弹窗同一退场与配色）。
- */
+/** plan-20261109-rollback-grouped-fix：回滚前按保留文件与撤销改动分组，明确对话影响。 */
 import { useState } from "react";
 import { useChatStore } from "../../store/chat";
-import { Button, Collapse, Dialog, DialogSection, InsetCard } from "../ui";
-import { IconAlertTriangle } from "../icons";
+import { Button, Dialog } from "../ui";
+import { RollbackFileGroups } from "./RollbackFileGroups";
 import type { RollbackPreviewFile } from "../../api/client";
 
 interface DiffRow { type: "same" | "del" | "add"; line: string }
@@ -67,7 +61,7 @@ function FileDiff({ file }: { file: RollbackPreviewFile }) {
   return (
     <div className="rc-diff">
       {file.conflict ? (
-        <pre className="rc-diff-msg">{file.reason || "与手动改动存在重叠，回滚将跳过该文件"}</pre>
+        <pre className="rc-diff-msg">{file.reason || "无法校验文件状态，将保留当前内容"}</pre>
       ) : (
         <div className="rc-diff-body">
           {rows.map((r, idx) => (
@@ -86,109 +80,40 @@ export function RollbackConfirmModal() {
   const pending = useChatStore((s) => s.rollbackPending);
   const confirmRollback = useChatStore((s) => s.confirmRollback);
   const cancelRollback = useChatStore((s) => s.cancelRollback);
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
   const files = pending?.files ?? [];
-  const conflictCount = pending?.conflicts.length ?? files.filter((f) => f.conflict).length;
-  const safeCount = files.filter((f) => !f.conflict).length;
-  const hasConflict = conflictCount > 0;
-  const turnId = pending?.turnId ?? 0;
+  const kept = files.filter((file) => file.conflict);
+  const safeCount = files.length - kept.length;
   const affected = pending?.affected ?? { tasks: 0, messages: 0 };
-
-  const run = async (allowPartial: boolean) => {
+  const hasConflict = kept.length > 0;
+  const run = async () => {
     setConfirming(true);
     try {
-      await confirmRollback({ allowPartial });
+      await confirmRollback({ allowPartial: hasConflict });
     } finally {
       setConfirming(false);
     }
   };
-
-  const confirmLabel = files.length === 0
-    ? "确认撤回"
-    : hasConflict
-      ? `跳过 ${conflictCount} 个冲突文件并回滚`
-      : "确认回滚";
+  const impact = [
+    affected.messages > 0 ? `撤回本轮及之后的 ${affected.messages} 条消息` : "撤回本轮及之后的对话",
+    safeCount > 0 ? `撤销 ${safeCount} 个文件的改动` : "文件保持不变",
+    affected.tasks > 0 ? `取消 ${affected.tasks} 个任务` : null,
+  ].filter(Boolean).join("，");
 
   return (
-    <Dialog
-      open={pending != null}
-      onClose={cancelRollback}
-      title="回滚确认"
-      subtitle="撤销 AI 的改动，保留你的手动改动"
-      width={680}
-      footer={
-        <>
-          <Button variant="secondary" onClick={cancelRollback}>取消</Button>
-          {hasConflict ? (
-            <Button variant="danger" loading={confirming} disabled={safeCount === 0 && affected.messages === 0 && affected.tasks === 0} onClick={() => void run(true)}>
-              {confirmLabel}
-            </Button>
-          ) : (
-            <Button variant="danger" loading={confirming} onClick={() => void run(false)}>
-              {confirmLabel}
-            </Button>
-          )}
-        </>
-      }
+    <Dialog open={pending != null} onClose={confirming ? () => {} : cancelRollback}
+      title="回滚确认" width={640}
+      footer={<>
+        <Button variant="secondary" disabled={confirming} onClick={cancelRollback}>取消</Button>
+        <Button variant="danger" loading={confirming} onClick={() => void run()}>
+          {safeCount > 0 ? "确认回滚" : "仅撤回消息"}
+        </Button>
+      </>}
     >
-      <DialogSection
-        title={files.length === 0 ? `turn #${turnId}` : `涉及 ${files.length} 个文件`}
-        aside={files.length > 0 ? `${safeCount} 可安全回滚 · ${conflictCount} 冲突` : undefined}
-      >
-        <p className="rc-desc">
-          {files.length === 0
-            ? <>将撤回 <b>turn #{turnId}</b> 及其后的对话，<b>本次不修改任何代码文件</b>。</>
-            : <>将回滚 <b>turn #{turnId}</b> 及其后的更改，按时间倒序逐个撤销。</>}
-        </p>
-        {(affected.tasks > 0 || affected.messages > 0) && (
-          <p className="rc-conflict-note">
-            <IconAlertTriangle size={13} />
-            <span>
-              将连带撤销该 turn 之后的执行结果：
-              {affected.tasks > 0 && <>取消 <b>{affected.tasks}</b> 个任务</>}
-              {affected.tasks > 0 && affected.messages > 0 && "、"}
-              {affected.messages > 0 && <>软删 <b>{affected.messages}</b> 条消息</>}
-              。
-            </span>
-          </p>
-        )}
-        {hasConflict && (
-          <p className="rc-conflict-note">
-            <IconAlertTriangle size={13} />
-            <span>
-              有 <b>{conflictCount}</b> 个文件被手动修改，或缺少可核验的完整修改记录。
-              确认后将保留这些文件，只回滚其余文件；该轮及之后的对话仍会撤回。
-            </span>
-          </p>
-        )}
-      </DialogSection>
-
-      {files.length > 0 && (
-        <DialogSection title="文件清单" aside="点击展开查看改动">
-          <InsetCard>
-            <div className="rc-file-list">
-              {files.map((f) => (
-                <div key={f.path} className={`rc-file${f.conflict ? " conflict" : ""}`}>
-                  <button
-                    type="button"
-                    className="rc-file-head"
-                    aria-expanded={expanded === f.path}
-                    onClick={() => setExpanded(expanded === f.path ? null : f.path)}
-                  >
-                    <span className={`rc-file-action ${f.action}`}>{f.action === "delete" ? "删除" : "恢复"}</span>
-                    <span className="rc-file-path">{f.path}</span>
-                    <span className={`rc-file-flag${f.conflict ? " conflict" : ""}`}>{f.conflict ? "冲突跳过" : "可安全回滚"}</span>
-                  </button>
-                  {/* plan-20261019-motion-sweep：对比展开走 Collapse（lazy 保留「展开才计算 LCS」的开销特性） */}
-                  <Collapse open={expanded === f.path} lazy>{() => <FileDiff file={f} />}</Collapse>
-                </div>
-              ))}
-            </div>
-          </InsetCard>
-        </DialogSection>
-      )}
+      <p className="rb-impact">{impact}。</p>
+      {hasConflict && safeCount > 0 && <p className="rb-kept-note">{kept.length} 个文件将保留当前内容。</p>}
+      <RollbackFileGroups key={pending?.turnId ?? "closed"} files={files} renderDetail={(file) => <FileDiff file={file} />} />
     </Dialog>
   );
 }

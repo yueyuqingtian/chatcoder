@@ -1,0 +1,155 @@
+/* 微应用（plan-693-2868 P4 / P5）——左面板「拓展」第四标签 + 设置页第四组的配置区。
+ *
+ * 列表形态与另外三个标签（插件 / 技能 / 连接器）保持一致：直接用 market.css 的
+ * `.mkt-grid` > `.mkt-card` 卡片网格，本文件只保留「微应用专属」的三块：
+ *   ① 网格上方的一行状态说明（.mkt-microapp-hint）与社区读取失败提示（.mkt-microapp-warn）；
+ *   ② 卡片图标槽的青色底（沿用引用 chip 的 --pc-cyan，与其余三个品类区分）；
+ *   ③ 发布弹窗内部排版（输入行 / 进度 / 结果）。
+ * 卡片类一律复用 market.css 的既有定义，这里不新造第二套卡片。
+ */
+
+.mkt-microapp { display: flex; flex-direction: column; gap: var(--sp-4); }
+
+/* 状态说明：网格上方一行，只占一行高度（尺寸 / 颜色全部走令牌） */
+.mkt-microapp-hint { font-size: 12px; line-height: 1.6; color: var(--text-3); }
+
+/* 社区读取失败：警告色文字条（不是卡片，避免看起来像一条独立内容） */
+.mkt-microapp-warn {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--color-amber-600) 12%, transparent);
+  color: var(--color-amber-600);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 卡片图标槽：与另外三页 MarketIcon 的 40px 槽位对齐（圆角、底色同一档），
+   字形取 22px——40px 的字形会把这个方块撑满，视觉重量比隔壁的字母色块重得多。 */
+.mkt-microapp-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--pc-cyan) 12%, transparent);
+  color: var(--pc-cyan);
+}
+
+/* 卡片本体的可点性分两种：
+   · 默认不可点（微应用没有详情弹窗，只有操作区响应），避免「看着能点却没反应」；
+   · `.is-openable`（外置微应用：整张卡片 = 打开界面）恢复市场卡片的手势与抬升，
+     键盘聚焦也给出与 .mkt-card:focus-visible 同一档的焦点环（不新造视觉）。 */
+.mkt-microapp .mkt-card { cursor: default; }
+.mkt-microapp .mkt-card:hover { translate: none; }
+.mkt-microapp .mkt-card.is-openable { cursor: pointer; }
+.mkt-microapp .mkt-card.is-openable:hover { translate: 0 -2px; }
+/* 拉起进程期间降噪：卡片不可再次触发（没有按钮态可借用，只降透明度） */
+.mkt-microapp .mkt-card.is-busy { opacity: 0.6; cursor: progress; }
+
+/* 微应用面板右上角工具条（「在独立窗口里打开」）：
+   浮层压在 webview 上方，只占一枚图标按钮的宽度，不遮挡微应用主体内容。 */
+.microapp-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  /* webview 是独立的渲染层，没有 z-index 时浮层可能被它盖住 */
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+  opacity: 0.65;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.microapp-tools:hover { opacity: 1; }
+
+/* 发布弹窗内部 */
+.mkt-microapp-publish { display: flex; flex-direction: column; gap: var(--sp-4); }
+.mkt-microapp-publish-row { display: flex; align-items: center; gap: var(--sp-2); }
+.mkt-microapp-publish-row > *:first-child { flex: 1; min-width: 0; }
+.mkt-microapp-publish-note { font-size: 12px; line-height: 1.7; color: var(--text-3); }
+.mkt-microapp-publish-note code { font-family: var(--font-mono); font-size: 11.5px; }
+/* 外链动作（去创建 Token / 查看 issue / 打开 issue）是列的直系子项：
+   column flex 默认 stretch 会把按钮拉成整行宽，靠 align-self 收回左侧自然宽度 */
+.mkt-microapp-publish > .btn,
+.mkt-microapp-progress > .btn,
+.mkt-microapp-result > .btn { align-self: flex-start; }
+
+/* 发布进度：轨道固定高度预留槽位（不因进度出现/消失抖动） */
+.mkt-microapp-progress { display: flex; flex-direction: column; gap: var(--sp-2); }
+.mkt-microapp-progress-text { font-size: 12px; color: var(--text-2); }
+.mkt-microapp-progress-track {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.mkt-microapp-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transition: width var(--dur-2) var(--ease-standard);
+}
+
+/* 发布结果：成功/失败只改文字色，不换底色（结果条与进度条同处一列，视觉上不打架） */
+.mkt-microapp-result { font-size: 12px; line-height: 1.7; display: flex; flex-direction: column; gap: var(--sp-1); }
+.mkt-microapp-result.is-ok { color: var(--color-green-600); }
+.mkt-microapp-result.is-err { color: var(--color-red-600); }
+
+/* 隐藏的文件选择器：微应用包导入只认 File 对象（见 MarketPanel.importMicroAppPackage）。
+   用负偏移移出视口而不是 display:none——部分环境下 display:none 的 input.click() 不弹框；
+   同时避免 absolute 相对初始包含块产生 1px 溢出滚动条。 */
+.mkt-hidden-file {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 设置页「拓展 → 微应用」行的类型瓦片：沿用引用 chip 的青色（--pc-cyan），
+   与插件（accent）/技能（amber）/连接器（green）区分开（其余瓦片配色见 settings-b.css） */
+.inst-tile[data-kind="microapp"] {
+  background: color-mix(in oklab, var(--pc-cyan) 14%, transparent);
+  color: var(--pc-cyan);
+}
+
+/* ── 设置页「微应用」组的配置区（MicroAppSettings）──
+ * 复用 ui-card 的行结构，这里只补三处内部排版：库路径块、仓库输入宽度、拉黑列表。 */
+.mas-path {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.mas-input { width: 260px; }
+.mas-blocklist { padding: var(--sp-4) var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4); }
+.mas-blocklist-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.mas-blocklist-title { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.mas-blocklist-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--bg-main);
+  font-size: 12px;
+  color: var(--text-2);
+}
+/* 拉黑条目里的标识（userId / appId）用等宽：一眼区分 id 与普通文案 */
+.mas-blocklist-row > .mono,
+.mas-path.mono { font-family: var(--font-mono); }
+.mas-blocklist-row > .mono { font-size: 11.5px; word-break: break-all; }

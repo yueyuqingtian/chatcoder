@@ -34,15 +34,18 @@ function hangingDownload(u, starts) {
 
 function makeManager(over = {}) {
   const pushes = [];
+  const channelPushes = [];
   const metaStore = { ...(over.meta || {}) };
   const m = createUpdateManager({
     pushState: (s) => pushes.push({ ...s }),
+    pushChannels: (c) => channelPushes.push(c),
     meta: { read: () => ({ ...metaStore }), write: (p) => Object.assign(metaStore, p) },
     feeds: { mirror: { provider: "generic", url: "https://m.example/updates/" }, github: { provider: "github" } },
     updatesBaseUrl: "https://m.example/updates/",
     repo: over.repo === undefined ? { owner: "o", repo: "r" } : over.repo,
     currentVersion: "0.8.5",
-    net: {},
+    // plan-20261024-update-channel：给了 fetch 才能真正跑测速；不给时测速会自行跳过
+    net: over.fetch ? { fetch: over.fetch } : {},
     log() {}, logErr() {},
     tuning: { retryDelayMs: 1 },
     ghProxy: over.ghProxy,
@@ -50,28 +53,62 @@ function makeManager(over = {}) {
   });
   const u = fakeUpdater();
   m.attach(u);
-  return { m, u, pushes, metaStore };
+  return { m, u, pushes, channelPushes, metaStore };
+}
+
+/** 假的测速响应：按 host 返回指定大小/延迟，用于验证「测速优选」与「手动指定」 */
+function fakeProbeFetch(speedByHost = {}) {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url: String(url), headers: (init && init.headers) || {} });
+    const host = new URL(String(url)).host;
+    const spec = speedByHost[host];
+    if (!spec) return new Response(null, { status: 404 });
+    if (spec.hang) return new Promise((_, reject) => {
+      const sig = init && init.signal;
+      const fail = () => { const e = new Error("aborted"); e.name = "AbortError"; reject(e); };
+      if (sig) { if (sig.aborted) fail(); else sig.addEventListener("abort", fail, { once: true }); }
+    });
+    // 每个 chunk 的间隔越长，算出来的速率越低
+    const size = 64 * 1024;
+    const chunks = spec.chunks || 4;
+    const delay = spec.delayMs || 0;
+    let sent = 0;
+    const body = new ReadableStream({
+      async pull(ctl) {
+        if (delay) await new Promise((r) => setTimeout(r, delay));
+        if (sent >= chunks) { ctl.close(); return; }
+        sent += 1;
+        ctl.enqueue(new Uint8Array(size));
+      },
+    });
+    return new Response(body, { status: 206, headers: { "content-range": `bytes 0-${size * chunks - 1}/${size * chunks}`, "content-length": String(size * chunks) } });
+  };
+  return { fetch, calls };
 }
 
 const info = (extra = {}) => ({ version: "0.9.0", releaseNotes: "n", releaseDate: "d", files: [{ url: "chatcoder-Setup-0.9.0.exe", sha512: "x", size: 1 }], ...extra });
 
-test("候选下载源：按 镜像（gh-proxy + 额外镜像）> 自建源 > GitHub 排列，镜像优先", () => {
+test("候选下载源：默认镜像1 > 镜像2 > github，每条地址带通道名与优先级", () => {
   const { m, u } = makeManager();
   u.emit("update-available", info({ mirrors: ["https://cdn.example/x", "http://insecure.example/", "https://m.example/updates/"] }));
   const urls = m._internals.buildDownloadUrls(new URL("https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe"), "chatcoder-Setup-0.9.0.exe");
   assert.deepEqual(urls, [
-    { url: "https://cdn.gh-proxy.org/https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
-    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" },
-    { url: "https://cdn.example/x/chatcoder-Setup-0.9.0.exe", tier: "mirror" },
-    { url: "https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "github" },
+    { url: "https://cdn.gh-proxy.org/https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "mirror", channel: "mirror1", label: "镜像1", rank: 0 },
+    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary", channel: "mirror2", label: "镜像2", rank: 1 },
+    // latest.yml 里的额外镜像算镜像2 的备份地址，不单独占一个通道
+    { url: "https://cdn.example/x/chatcoder-Setup-0.9.0.exe", tier: "primary", channel: "mirror2", label: "镜像2", rank: 2 },
+    { url: "https://github.com/o/r/releases/download/v0.9.0/chatcoder-Setup-0.9.0.exe", tier: "github", channel: "github", label: "github", rank: 3 },
   ]);
 });
 
-test("repo 为空时只剩自建源（不拼镜像与 GitHub）", () => {
+test("repo 为空时只剩镜像2（不拼镜像1 与 github）", () => {
   const { m, u } = makeManager({ repo: null });
   u.emit("update-available", info());
   const urls = m._internals.buildDownloadUrls(new URL("https://m.example/updates/chatcoder-Setup-0.9.0.exe"), "chatcoder-Setup-0.9.0.exe");
-  assert.deepEqual(urls, [{ url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary" }]);
+  assert.deepEqual(urls, [
+    { url: "https://m.example/updates/chatcoder-Setup-0.9.0.exe", tier: "primary", channel: "mirror2", label: "镜像2", rank: 0 },
+  ]);
 });
 
 test("检查更新：每次都从镜像开始，失败依次走自建源、GitHub，不会黏在 GitHub 上", async () => {
@@ -244,4 +281,153 @@ test("normalizeReleaseNotes：兼容字符串 / 数组 / 对象", () => {
   assert.equal(normalizeReleaseNotes([{ note: "x" }, "y"]), "x\n\ny");
   assert.equal(normalizeReleaseNotes({ body: "z" }), "z");
   assert.equal(normalizeReleaseNotes(null), "");
+});
+
+// ── plan-20261024-update-channel：三条通道的测速优选与手动指定 ──
+
+test("已是最新版本也保存安装包信息，自动和重复手动测速均请求三条真实通道", async () => {
+  const probe = fakeProbeFetch({ "m.example": {}, "cdn.gh-proxy.org": {}, "github.com": {} });
+  const { m, u } = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  u.checkForUpdates = async () => {
+    const latest = info({ version: "0.8.5", files: [{ url: "chatcoder-Setup-0.8.5.exe" }] });
+    u.emit("update-not-available", latest);
+    return { isUpdateAvailable: false, updateInfo: latest };
+  };
+  await m.checkForUpdates();
+  for (let i = 0; i < 200 && m.getChannels().measuring; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(m.getState().state, "none");
+  const expected = [
+    "https://cdn.gh-proxy.org/https://github.com/o/r/releases/download/v0.8.5/chatcoder-Setup-0.8.5.exe",
+    "https://m.example/updates/chatcoder-Setup-0.8.5.exe",
+    "https://github.com/o/r/releases/download/v0.8.5/chatcoder-Setup-0.8.5.exe",
+  ];
+  assert.deepEqual(probe.calls.map((c) => c.url).sort(), expected.toSorted());
+  for (const id of ["mirror1", "mirror2", "github"]) assert.equal(m.getChannels().report.channels[id].ok, true);
+  probe.calls.length = 0;
+  await m.measureChannels({ force: true });
+  assert.deepEqual(probe.calls.map((c) => c.url).sort(), expected.toSorted());
+  assert.equal(m.getState().state, "none");
+  assert.equal(u.calls.some(([kind]) => kind === "download"), false);
+});
+
+test("首次检查前重新测速也会探测三条通道的 latest.yml", async () => {
+  const probe = fakeProbeFetch({ "m.example": {}, "cdn.gh-proxy.org": {}, "github.com": {} });
+  const { m } = makeManager({ fetch: probe.fetch });
+  const snap = await m.measureChannels({ force: true });
+  assert.deepEqual(probe.calls.map((c) => c.url).sort(), [
+    "https://cdn.gh-proxy.org/https://github.com/o/r/releases/latest/download/latest.yml",
+    "https://m.example/updates/latest.yml",
+    "https://github.com/o/r/releases/latest/download/latest.yml",
+  ].sort());
+  for (const id of ["mirror1", "mirror2", "github"]) assert.equal(snap.report.channels[id].ok, true);
+});
+
+test("测速优选：自动模式下按测速结果把最快通道排到第一位", async () => {
+  // 镜像2（自建源）最快，镜像1 次之，github 最慢
+  const probe = fakeProbeFetch({
+    "m.example": { chunks: 8, delayMs: 0 },
+    "cdn.gh-proxy.org": { chunks: 4, delayMs: 2 },
+    "github.com": { chunks: 2, delayMs: 10 },
+  });
+  const { m, u } = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  u.emit("update-available", info());
+  const snap = await m.measureChannels({ force: true });
+  assert.equal(snap.preferred, "mirror2", "应选出自建源最快");
+  assert.equal(snap.mode, "auto");
+  assert.equal(snap.effective, "mirror2");
+  assert.equal(snap.report.channels.mirror2.ok, true);
+  assert.ok(snap.report.channels.mirror2.bytesPerSecond > 0);
+  assert.equal(snap.labels.mirror1, "镜像1");
+  // 候选源顺序随之改变：镜像2 排第一
+  const urls = m._internals.buildDownloadUrls(new URL("https://m.example/updates/x.exe"), "chatcoder-Setup-0.9.0.exe");
+  assert.equal(urls[0].channel, "mirror2");
+  assert.equal(urls[0].rank, 0);
+  // 检查更新的 feed 链也从最快通道开始
+  assert.equal(m._internals.feedChain()[0][0], "镜像2");
+});
+
+test("测速：不可用的通道不参与优选，全部失败时回落镜像1", async () => {
+  const probe = fakeProbeFetch({ "m.example": { chunks: 8 }, "cdn.gh-proxy.org": { hang: true } });
+  const { m, u } = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  u.emit("update-available", info());
+  // github 没配 → 404；镜像1 挂住 → 超时；只有镜像2 通
+  const snap = await m.measureChannels({ force: true });
+  assert.equal(snap.preferred, "mirror2");
+  assert.equal(snap.report.channels.github.ok, false);
+  assert.equal(snap.report.channels.mirror1.ok, false);
+  assert.ok(snap.report.channels.mirror1.reason, "失败要给出可读原因");
+
+  // 全部失败：优选为 null，生效通道回落镜像1（保持旧行为，不会没得下）
+  const dead = fakeProbeFetch({});
+  const m2 = makeManager({ fetch: dead.fetch, meta: { autoDownload: false } }).m;
+  const snap2 = await m2.measureChannels({ force: true });
+  assert.equal(snap2.preferred, null);
+  assert.equal(snap2.effective, "mirror1");
+});
+
+test("手动指定通道：设置落盘、优先生效，并以该通道开头", async () => {
+  const probe = fakeProbeFetch({ "m.example": { chunks: 8 }, "cdn.gh-proxy.org": { chunks: 2 }, "github.com": { chunks: 1 } });
+  const { m, u, metaStore } = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  u.emit("update-available", info());
+  await m.measureChannels({ force: true });
+  assert.equal(m.getChannels().effective, "mirror2", "自动模式先按测速");
+
+  const snap = await m.setChannel("github");
+  assert.equal(metaStore.channel, "github", "手动指定要落盘");
+  assert.equal(snap.mode, "github");
+  assert.equal(snap.effective, "github", "手动指定优先于测速结果");
+  assert.equal(m._internals.feedChain()[0][0], "github");
+
+  // 改回 auto：重新按测速结果走
+  const back = await m.setChannel("auto");
+  assert.equal(back.effective, "mirror2");
+});
+
+test("手动指定非法通道被忽略", async () => {
+  const { m } = makeManager({ meta: { autoDownload: false } });
+  await m.setChannel("not-a-channel");
+  assert.equal(m.getChannels().mode, "auto");
+});
+
+test("下载中切换通道：停下并按新通道重开，已完成的部分保留", async () => {
+  const { m, u } = makeManager({ meta: { autoDownload: false } });
+  const starts = [];
+  hangingDownload(u, starts);
+  u.emit("update-available", info());
+  m.downloadNow();
+  await new Promise((r) => setTimeout(r, 10));
+  await m.setChannel("github");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(starts.length, 2, "切换通道应重新发起下载");
+  assert.ok(starts[0].cancelled && !starts[1].cancelled);
+  assert.equal(m.getState().phase, "connecting");
+  await m.cancelDownload();
+});
+
+test("测速结果落盘并在下次启动时恢复，无需等新一轮跑完", async () => {
+  const probe = fakeProbeFetch({ "m.example": { chunks: 8 }, "cdn.gh-proxy.org": { chunks: 1 } });
+  const first = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  first.u.emit("update-available", info());
+  const snap = await first.m.measureChannels({ force: true });
+  assert.equal(snap.preferred, "mirror2");
+  assert.ok(first.metaStore.channelReport, "测速结果应落盘");
+  assert.equal(first.metaStore.preferredChannel, "mirror2");
+
+  // 用同一份 meta 重新创建管理器：启动即带上次的测速结果
+  const second = makeManager({ fetch: probe.fetch, meta: first.metaStore });
+  const restored = second.m.getChannels();
+  assert.equal(restored.preferred, "mirror2");
+  assert.equal(restored.effective, "mirror2");
+  assert.ok(restored.report.testedAt > 0);
+});
+
+test("检查更新后自动测速：有网络栈时会在检查之后跑一次优选", async () => {
+  const probe = fakeProbeFetch({ "m.example": { chunks: 8 }, "cdn.gh-proxy.org": { chunks: 1 } });
+  const { m, u, channelPushes } = makeManager({ fetch: probe.fetch, meta: { autoDownload: false } });
+  u.checkForUpdates = async () => { u.emit("update-available", info()); return { isUpdateAvailable: true }; };
+  await m.checkForUpdates();
+  // 测速是异步触发的：等它落地
+  for (let i = 0; i < 200 && m.getChannels().preferred !== "mirror2"; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(m.getChannels().preferred, "mirror2");
+  assert.ok(channelPushes.length > 0, "测速过程 / 结果应推送给界面");
 });

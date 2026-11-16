@@ -99,6 +99,17 @@ export function subagentCollapseKey(agentId: number, turnId?: number | null): st
   return `subagent-collapse:a${agentId}:t${turnId ?? 0}`;
 }
 
+/** plan-flow-redesign：轮次内单个时序过程组（两段对话之间）的展开键。 */
+export function processGroupKey(
+  flow: "main" | "subagent",
+  turnId: number | null,
+  agentId: number | undefined,
+  anchorKey: string | number,
+): string {
+  if (flow === "subagent" && agentId != null) return `proc-group:a${agentId}:t${turnId ?? 0}:${anchorKey}`;
+  return `proc-group:t${turnId ?? 0}:${anchorKey}`;
+}
+
 /** turn 级工作过程的折叠态（plan-586-2374）。
  *
  *  沿用上面 open 表（true = 展开），与工具行 / 思考块的展开态共用同一份存储：

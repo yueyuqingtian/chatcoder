@@ -680,7 +680,7 @@ def _conflict_result(turn_id: int, plan: RollbackPlan) -> dict:
         "code": "conflict",
         "turn_id": turn_id,
         "conflicts": conflicts,
-        "reason": f"回滚已取消：{len(conflicts)} 个文件在这些轮次之后被改动过，为避免覆盖，未修改任何文件",
+        "reason": f"{len(conflicts)} 个文件无法安全回滚，本次未修改任何文件",
     }
 
 
@@ -1640,7 +1640,7 @@ async def has_turn_write(db: AsyncSession, turn_id: int, path: str) -> bool:
 
 
 async def unrecorded_birth_paths(db: AsyncSession, turn_id: int,
-                                 by_path: dict[str, list[RollbackWrite]]) -> set[str]:
+                                 by_path: dict[str, list[RollbackWrite]], workspace: str = "") -> set[str]:
     """旧记录兜底：首条记录就是「删除」、且删除前备份的修改时间不早于本轮开始的路径。
 
     这类文件是本轮新建（未登记）又被删掉的，对本轮零净变更：不进变更清单，撤销时也不能还原。
@@ -1655,7 +1655,7 @@ async def unrecorded_birth_paths(db: AsyncSession, turn_id: int,
         return set()
     out: set[str] = set()
     for p in cands:
-        ckpt = _checkpoint_for_path(snap, p)
+        ckpt = _checkpoint_for_path(snap, p, workspace)
         if ckpt and file_mtime_after(Path(ckpt), t0):
             out.add(p)
     return out
@@ -1688,7 +1688,7 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
             RollbackWrite.turn_id.in_(turn_ids),
         ).order_by(RollbackWrite.id.asc())
     )
-    writes = list(res.scalars().all())
+    writes = _workspace_writes(workspace, list(res.scalars().all()))
     if not writes:
         return []
 
@@ -1702,7 +1702,8 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     reviewed: dict[str, bool] = {}
     for tid in turn_ids:
         for p, done in (await reviewed_paths(db, tid)).items():
-            reviewed[p] = reviewed.get(p, False) or done
+            key = _workspace_path_key(workspace, p)
+            reviewed[key] = reviewed.get(key, False) or done
     changes: list[dict] = []
     # 旧记录兜底按整轮开始时机判定：文件在某轮新建后又删除时，只有该轮快照能识别
     by_turn: dict[int, dict[str, list[RollbackWrite]]] = {}
@@ -1711,7 +1712,7 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
             by_turn.setdefault(int(w.turn_id), {}).setdefault(write_path_key(w.path), []).append(w)
     bogus: set[str] = set()
     for tid, grouped in by_turn.items():
-        bogus |= await unrecorded_birth_paths(db, tid, grouped)
+        bogus |= await unrecorded_birth_paths(db, tid, grouped, workspace)
     for path, recs in by_path.items():
         if path in bogus:
             continue  # 本轮新建（未登记）又被删除：零净变更
@@ -1809,7 +1810,7 @@ async def session_product_paths(db: AsyncSession, session_id: int, workspace: st
             by_turn_path.setdefault(int(w.turn_id), {}).setdefault(key, []).append(w)
     bogus: set[str] = set()
     for tid, grouped in by_turn_path.items():
-        bogus |= await unrecorded_birth_paths(db, tid, grouped)
+        bogus |= await unrecorded_birth_paths(db, tid, grouped, workspace)
     out: list[str] = []
     for p in order:
         if p in bogus:
@@ -2184,6 +2185,22 @@ def normalize_workspace_path(workspace: str, raw: str) -> str | None:
     return rel.as_posix()
 
 
+def _workspace_path_key(workspace: str, raw: str) -> str:
+    """plan-20261109-rollback-grouped-fix：历史绝对路径与相对路径必须指向同一文件。"""
+    rel = normalize_workspace_path(workspace, raw) if workspace else None
+    if rel is None or not _is_safe_rel_path(rel):
+        return write_path_key(raw)
+    return os.path.normcase(rel).replace("\\", "/")
+
+
+def _workspace_writes(workspace: str, writes: list[RollbackWrite]) -> list[RollbackWrite]:
+    # plan-20261109-rollback-grouped-fix：只投影路径，避免读预览时改动历史 ORM 记录。
+    return [SimpleNamespace(**{
+        **{column.key: getattr(rec, column.key) for column in RollbackWrite.__table__.columns},
+        "path": _workspace_path_key(workspace, rec.path),
+    }) for rec in writes]
+
+
 def _read_file_text(workspace: str, rel: str, max_bytes: int = 0) -> str | None:
     """读取文本文件内容。
 
@@ -2395,12 +2412,12 @@ def _read_disk_text(workspace: str, rel: str) -> tuple[str | None, Any]:
 
 
 # plan-20261019-toolcard-v2：撤销 / 回滚被拒绝时对用户说明的原因。
-_REASON_MODIFIED = "文件在本轮之后被修改过（手动改动或其他程序所致），撤销会覆盖这些改动"
+_REASON_MODIFIED = "文件在本轮结束后被修改过，撤销会覆盖后续改动"
 _REASON_DELETED = "文件在本轮之后已被删除，无法恢复到本轮之前的状态"
 _REASON_RECREATED = "本轮删除了该文件，之后它又被重新创建（或恢复）了，撤销会覆盖现有文件"
-_REASON_CHAIN = "文件在两次 AI 修改之间被改动过，无法安全衔接撤销"
+_REASON_CHAIN = "文件在相邻两轮或同轮修改之间发生变化，无法安全撤销"
 _REASON_NO_BACKUP = "缺少写盘前备份，无法恢复该文件"
-_REASON_UNVERIFIED = "缺少完整修改记录，无法确认文件是否被手动修改，已跳过"
+_REASON_UNVERIFIED = "变更记录不完整，无法校验文件状态"
 
 
 def _state_mismatch_reason(workspace: str, rec: RollbackWrite) -> str | None:
@@ -2623,6 +2640,7 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
     本轮之后有人手动改过它、删过它、或被其他程序改写，就整文件判为冲突并给出原因——
     撤销与回滚默认整体拒绝，不再把用户的手动改动「三路合并」进撤销结果（此前非重叠的手动改动会被静默合并）。
     """
+    writes = _workspace_writes(workspace, writes)
     plan = RollbackPlan(workspace=workspace)
     by_path: dict[str, list[RollbackWrite]] = {}
     for rec in reversed(writes):  # 路径按「最近写入」倒序出现，与此前的步骤顺序一致
@@ -2630,8 +2648,8 @@ def build_plan(workspace: str, writes: list[RollbackWrite],
     for rec in writes:
         by_path[write_path_key(rec.path)].append(rec)
     for rel, recs in by_path.items():
-        if not _is_safe_rel_path(rel):
-            plan.steps.append(_Step(rel, recs[-1].turn_id, "noop", True, "路径不在工作区内，已跳过"))
+        if normalize_workspace_path(workspace, rel) is None or not _is_safe_rel_path(rel):
+            plan.steps.append(_Step(rel, recs[-1].turn_id, "noop", True, "路径不在当前工作区内，无法撤销"))
         elif all(getattr(r, "op", None) is not None for r in recs):
             _plan_path_grouped(plan, workspace, rel, recs, ckpt_for, strict=strict)
         else:
@@ -2735,7 +2753,7 @@ def _apply_plan_sync(plan: RollbackPlan) -> dict:
 def _conflict_list(plan: RollbackPlan) -> list[dict]:
     seen: dict[str, str] = {}
     for s in plan.conflicts:
-        seen.setdefault(s.path, s.reason or "与手动改动冲突")
+        seen.setdefault(s.path, s.reason or "无法校验文件状态")
     return [{"path": p, "reason": r} for p, r in seen.items()]
 
 
@@ -2747,7 +2765,7 @@ async def _rollback_turn_files_precise(workspace: str, writes: list[RollbackWrit
     它会先检查冲突、停止运行中的任务，再应用同一份规划。
     """
     snaps = {snap.turn_id: snap} if snap is not None else {}
-    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
+    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path, workspace))
     applied = _apply_plan_sync(plan)
     conflicts = _conflict_list(plan)
     return {
@@ -2772,7 +2790,7 @@ async def _workspace_for_session(db: AsyncSession, session_id: int) -> str:
 
 
 async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, workspace: str) -> RollbackPlan:
-    writes = await list_turn_writes(db, session_id, turn_id)
+    writes = _workspace_writes(workspace, await list_turn_writes(db, session_id, turn_id))
     res = await db.execute(
         select(TurnSnapshot).where(TurnSnapshot.session_id == session_id, TurnSnapshot.turn_id >= turn_id)
     )
@@ -2783,11 +2801,11 @@ async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, worksp
         by_turn.setdefault(int(w.turn_id), {}).setdefault(write_path_key(w.path), []).append(w)
     drop: set[tuple[int, str]] = set()
     for tid, grouped in by_turn.items():
-        for p in await unrecorded_birth_paths(db, tid, grouped):
+        for p in await unrecorded_birth_paths(db, tid, grouped, workspace):
             drop.add((tid, p))
     if drop:
         writes = [w for w in writes if (int(w.turn_id), write_path_key(w.path)) not in drop]
-    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path))
+    plan = build_plan(workspace, writes, lambda rec: _checkpoint_for_path(snaps.get(rec.turn_id), rec.path, workspace))
     recorded = {(w.turn_id, write_path_key(w.path)) for w in writes}
     reported: set[str] = set()
     # plan-20261107-rollback-audit：只有写前备份不足以识别手改，预览与执行均保守跳过。
@@ -2795,13 +2813,13 @@ async def _plan_for_turn(db: AsyncSession, session_id: int, turn_id: int, worksp
         paths = [item.get("path") for item in (snap.file_list or []) if isinstance(item, dict)]
         paths += list(snap.new_files or [])
         for path in paths:
-            if path and (snap.turn_id, write_path_key(path)) not in recorded:
-                rel = write_path_key(path)
+            if path and (snap.turn_id, _workspace_path_key(workspace, path)) not in recorded:
+                rel = _workspace_path_key(workspace, path)
                 if rel in reported:
                     continue
                 reported.add(rel)
                 plan.finals.pop(rel, None)
-                plan.disk[rel] = _read_file_text(workspace, rel) if _is_safe_rel_path(rel) else None
+                plan.disk[rel] = _read_file_text(workspace, rel) if normalize_workspace_path(workspace, rel) is not None and _is_safe_rel_path(rel) else None
                 plan.steps.append(_Step(rel, snap.turn_id, "noop", True, _REASON_UNVERIFIED))
     return plan
 
@@ -2824,13 +2842,13 @@ async def build_turn_preview(db: AsyncSession, turn_id: int) -> dict:
     return {"files": files, "conflicts": conflicts, "affected": affected}
 
 
-def _checkpoint_for_path(snap: TurnSnapshot | None, rel: str) -> str | None:
+def _checkpoint_for_path(snap: TurnSnapshot | None, rel: str, workspace: str = "") -> str | None:
     """从快照 file_list 反查该 path 的 checkpoint 路径（v26 {ckpt, path} 条目）。"""
     if snap is None:
         return None
-    target = write_path_key(rel)
+    target = _workspace_path_key(workspace, rel)
     for item in snap.file_list or []:
-        if isinstance(item, dict) and write_path_key(str(item.get("path") or "")) == target:
+        if isinstance(item, dict) and _workspace_path_key(workspace, str(item.get("path") or "")) == target:
             return item.get("ckpt") or None
     return None
 
@@ -2896,7 +2914,7 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
             RollbackWrite.turn_id.in_(turn_ids),
         ).order_by(RollbackWrite.id.asc())
     )
-    writes = list(write_res.scalars().all())
+    writes = _workspace_writes(workspace, list(write_res.scalars().all()))
     if not writes:
         return {"ok": False, "code": "no_writes", "reason": "该轮次没有文件改动"}
     # 各轮新建（未登记）又被删除的文件：该轮开始前并不存在，撤销时不能从删除前备份还原
@@ -2906,7 +2924,7 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
             _by_turn.setdefault(int(w.turn_id), {}).setdefault(write_path_key(w.path), []).append(w)
     _bogus: set[str] = set()
     for tid, grouped in _by_turn.items():
-        _bogus |= await unrecorded_birth_paths(db, tid, grouped)
+        _bogus |= await unrecorded_birth_paths(db, tid, grouped, workspace)
     if _bogus:
         writes_for_plan = [w for w in writes if write_path_key(w.path) not in _bogus]
     else:
@@ -2915,7 +2933,7 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
     def _ckpt_for(rec: RollbackWrite) -> str | None:
         # 每条记录的写前备份登记在它所属轮的快照里（整组内各轮各备份一次）
         owner = int(rec.turn_id) if rec.turn_id is not None else turn_ids[0]
-        return _checkpoint_for_path(snaps.get(owner), rec.path)
+        return _checkpoint_for_path(snaps.get(owner), rec.path, workspace)
 
     # 3. 复用三路合并规划：冲突时默认整体拒绝，未改动任何文件
     plan = build_plan(workspace, writes_for_plan, _ckpt_for)
@@ -2925,7 +2943,7 @@ async def revert_turn_files(db: AsyncSession, *, turn_id: int, allow_partial: bo
         return {
             "ok": False,
             "code": "conflict",
-            "reason": f"撤销已取消：{len(conflicts)} 个文件在本轮之后被改动过，为避免覆盖，未修改任何文件",
+            "reason": f"{len(conflicts)} 个文件无法安全撤销，本次未修改任何文件",
             "conflicts": conflicts,
         }
 

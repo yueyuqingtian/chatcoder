@@ -27,6 +27,7 @@ def test_wire_rejects_orphan_and_checks_anthropic_blocks():
     with pytest.raises(HistorySequenceError):
         validate_tool_sequence([{"role":"tool", "tool_call_id":"orphan"}])
     validate_anthropic_wire([
-        {"role":"assistant", "content":[{"type":"tool_use", "id":"a"}, {"type":"tool_use", "id":"b"}]},
+        {"role":"user", "content":[{"type":"text", "text":"读取文件"}]},
+        {"role":"assistant", "content":[{"type":"tool_use", "id":"a", "name":"read", "input":{}}, {"type":"tool_use", "id":"b", "name":"read", "input":{}}]},
         {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"b"}, {"type":"tool_result", "tool_use_id":"a"}]},
     ])

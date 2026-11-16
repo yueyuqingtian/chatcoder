@@ -24,11 +24,11 @@ const PetsPanel = lazy(() => import("./PetsPanel").then((module) => ({ default: 
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
 const DesktopPanel = lazy(() => import("./DesktopPanel").then((module) => ({ default: module.DesktopPanel })));
 import { IconAlertCircle, IconArrowDown, IconCheck, IconCopy, IconRefresh, IconSpinner } from "../icons";
-import { Button, Card, Collapse, PageShell, PageTransition, Switch } from "../ui";
+import { Button, Card, Collapse, PageShell, PageTransition, Switch, Tooltip } from "../ui";
 import { AppLogo } from "../AppLogo";
 import { ReleaseNotesView, UpdateProgress, countReleaseItems } from "../update/ReleaseNotes";
 const PlaygroundPanel = lazy(() => import("./PlaygroundPanel").then((module) => ({ default: module.PlaygroundPanel })));
-import { useUpdaterStore, type UpdateStatus } from "../../store/updater";
+import { useUpdaterStore, type ChannelProbe, type ChannelSnapshot, type UpdateStatus, UPDATE_CHANNEL_IDS } from "../../store/updater";
 import { useI18n } from "../../store/i18n";
 import { IconChevronDown } from "../icons";
 
@@ -107,6 +107,129 @@ function downloadPhaseDesc(s: Extract<UpdateStatus, { state: "downloading" }>): 
   }
 }
 
+/* ── plan-20261024-update-channel：下载通道卡片 ─────────────────────────────── */
+
+/** 字节速率 → 人读文案（与主进程上报的 bytesPerSecond 同单位：字节/秒） */
+function formatSpeed(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "";
+  const mb = bytesPerSecond / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+  return `${Math.max(1, Math.round(bytesPerSecond / 1024))} KB/s`;
+}
+
+/** 单通道测速摘要：`0.18s · 12.4 MB/s`；未测速 / 失败各有单独文案 */
+function channelMetaText(probe: ChannelProbe | undefined): string {
+  if (!probe) return "未测速";
+  if (!probe.ok) return "不可用";
+  const sec = (probe.ms / 1000).toFixed(2);
+  const speed = formatSpeed(probe.bytesPerSecond);
+  return speed ? `${sec}s · ${speed}` : `${sec}s`;
+}
+
+/** 相对时间：`12 秒前`（只用于「上次测速」，超过一天就不再折算） */
+function formatAgo(testedAt: number, now: number): string {
+  const sec = Math.max(0, Math.round((now - testedAt) / 1000));
+  if (sec < 5) return "刚刚";
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hour = Math.round(min / 60);
+  if (hour < 24) return `${hour} 小时前`;
+  return `${Math.round(hour / 24)} 天前`;
+}
+
+function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
+  const measureChannels = useUpdaterStore((s) => s.measureChannels);
+  const setChannel = useUpdaterStore((s) => s.setChannel);
+  const { report, preferred, effective, mode, measuring, labels } = channels;
+  // 「上次测速」是相对时间：状态不会自己变，挂一个秒级心跳让它保持真实
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // 手动指定了非最优线路：给一行「当前线路较慢 + 改用最快」
+  const manualSlower = mode !== "auto" && preferred != null && mode !== preferred;
+  const bestName = preferred ? labels[preferred] : "";
+
+  return (
+    <div className="about-ch">
+      <div className="about-ch-head">
+        <div>
+          <div className="about-ch-title">下载通道</div>
+          <div className="about-ch-desc">检查更新时自动测速，默认使用最快的一条</div>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<IconRefresh size={13} />}
+          loading={measuring}
+          disabled={measuring}
+          onClick={() => void measureChannels()}
+        >
+          重新测速
+        </Button>
+      </div>
+
+      <div className="about-ch-grid" role="radiogroup" aria-label="下载通道">
+        {UPDATE_CHANNEL_IDS.map((id) => {
+          const on = effective === id;
+          const probe = report?.channels?.[id];
+          const tag = mode === "auto" && preferred === id;
+          const metaClass = "about-ch-meta"
+            + (measuring || !probe ? " is-wait" : !probe.ok ? " is-err" : "");
+          return (
+            <Tooltip key={id} content={probe && !probe.ok && probe.reason ? probe.reason : null}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={on}
+                className={"about-ch-item" + (on ? " is-on" : "")}
+                onClick={() => { if (mode !== id) void setChannel(id); }}
+              >
+                <span className="about-ch-top">
+                  <span className="about-ch-name">{labels[id]}</span>
+                  {tag && <span className="about-ch-tag">推荐</span>}
+                  {/* 勾选图标常驻槽位（只切 opacity），切换通道时行内不抖动 */}
+                  <IconCheck size={14} className="about-ch-check" aria-hidden />
+                </span>
+                <span className={metaClass}>
+                  {measuring ? "测速中…" : channelMetaText(probe)}
+                </span>
+              </button>
+            </Tooltip>
+          );
+        })}
+      </div>
+
+      <Collapse open={manualSlower} className="in-gap">
+        <div className="about-ch-tip">
+          <IconAlertCircle size={14} className="about-ch-tip-ic" aria-hidden />
+          <span className="about-ch-tip-text">当前线路较慢</span>
+          <Button variant="secondary" size="sm" onClick={() => void setChannel(preferred ?? "auto")}>
+            改用 {bestName}
+          </Button>
+        </div>
+      </Collapse>
+
+      <div className="about-ch-foot">
+        {report != null && report.testedAt > 0 && (
+          <span>上次测速 {formatAgo(report.testedAt, now)}</span>
+        )}
+        {/* 手动指定后必须留一条回到「按测速自动选」的路，否则一旦点过就再也回不去 */}
+        {mode !== "auto" ? (
+          <button type="button" className="about-ch-auto" onClick={() => void setChannel("auto")}>
+            恢复自动优选
+          </button>
+        ) : (
+          <span>下载中切换会重新开始</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AboutPanel() {
   const status = useUpdaterStore((s) => s.status);
   const appVersion = useUpdaterStore((s) => s.appVersion);
@@ -120,6 +243,7 @@ function AboutPanel() {
   const loadReleaseHistory = useUpdaterStore((s) => s.loadReleaseHistory);
   const autoDownload = useUpdaterStore((s) => s.autoDownload);
   const setAutoDownload = useUpdaterStore((s) => s.setAutoDownload);
+  const channels = useUpdaterStore((s) => s.channels);
   const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set());
   const [historyLimit, setHistoryLimit] = useState(5);
 
@@ -229,6 +353,10 @@ function AboutPanel() {
             )}
           </div>
         )}
+
+        {/* plan-20261024-update-channel：下载通道独立成卡，放在自动下载开关上方
+            （先选线路、再决定要不要自动下） */}
+        {supported && channels && <UpdateChannelCard channels={channels} />}
 
         {/* 修改即保存（项目约定）：开关一拨就写入主进程设置；打开时若已发现新版本会立刻开始下载 */}
         {supported && (

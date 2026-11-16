@@ -4,6 +4,10 @@ from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
+    # plan-20261109-compact-structure：投影依据持久化范围，不能再次按估算裁掉不同历史。
+    source_message_ids: list[int] = Field(default_factory=list, exclude=True)
+    context_kind: str | None = Field(default=None, exclude=True)
+    checkpoint_id: str | None = Field(default=None, exclude=True)
     # plan-20261106-ta3-080：宿主内部快照，协议发送层只展开正文。
     skill_load_snapshots: list[dict[str, Any]] | None = Field(default=None, exclude=True)
     # v6.1: 支持 developer 角色（对齐 codex ContextualUserFragment role="developer"）
@@ -22,6 +26,7 @@ class ChatMessage(BaseModel):
     # reasoning_content 原样回传，否则 400: "The reasoning_content in the
     # thinking mode must be passed back to the API."
     reasoning_content: str | None = None
+    thinking_blocks: list[dict[str, Any]] | None = Field(default=None, exclude=True)
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +73,7 @@ class Usage(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    thinking_blocks: list[dict[str, Any]] | None = Field(default=None, exclude=True)
     content: str | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     finish_reason: str = "stop"

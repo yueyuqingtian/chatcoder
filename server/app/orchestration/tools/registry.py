@@ -20,6 +20,7 @@ from app.orchestration.tools.goal import GoalCompleteTool
 from app.orchestration.tools.grep import GrepTool
 from app.orchestration.tools.memory_search import MemorySearchTool
 from app.orchestration.tools.memory_write import MemoryWriteTool
+from app.orchestration.tools.microapp import ALL_MICROAPP_TOOLS
 from app.orchestration.tools.multi_edit import MultiFileEditTool
 from app.orchestration.tools.read_attachment import ReadAttachmentTool
 from app.orchestration.tools.read_session_context import ReadSessionContextTool
@@ -138,6 +139,10 @@ def _build_default_registry() -> ToolRegistry:
         # plan-334-1661: 电脑操控（内置原生工具，非 MCP——内核常驻，详见 tools/desktop.py）
         # plan-20261019-desktop-precision：去掉 OCR 文字定位与命中测试，新增批量动作
         *ALL_DESKTOP_TOOLS,
+        # plan-693-2868 §7 P0 第 5 条：微应用后端工具面（列表 / 调用 / 校验）。
+        # 与浏览器、桌面同类「驱动外部界面」的能力，注册在相邻位置便于对照；
+        # ta3 通道与只读子代理白名单都从这里取同一份定义。
+        *ALL_MICROAPP_TOOLS,
     ):
         reg.register(tool_cls())
     return reg

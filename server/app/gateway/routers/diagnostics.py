@@ -7,11 +7,19 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.persistence.database import get_db
 from app.services import checkpoint_gc, project_service
 from app.services.rollback_service import _CHECKPOINT_DIR
 
 router = APIRouter(tags=["diagnostics"])
+
+
+@router.get("/diagnostics/context", response_model=dict)
+async def context_structure_snapshot(session_id: int | None = None):
+    """plan-20261109-compact-structure：支持导出最近结构取证，不暴露消息正文或凭据。"""
+    from app.orchestration.history_sequence import context_diagnostics
+    return {"events": context_diagnostics(session_id), "limit": 100}
 
 
 @router.get("/diagnostics/performance", response_model=dict)
@@ -38,13 +46,17 @@ async def diagnostics():
     except Exception as e:
         result["checks"]["git"] = {"ok": False, "detail": str(e)}
 
-    # 后端端口
+    # 后端端口：探测本进程**实际监听**的端口。
+    # 旧实现写死 8000，而默认配置是 12973（见 core/config.py server_port），
+    # 因此诊断每次都报「timed out」——服务本身完全正常（用户反馈）。
     import socket
+    port = settings.server_port
+    host = "127.0.0.1"
     try:
-        with socket.create_connection(("127.0.0.1", 8000), timeout=2):
-            result["checks"]["backend_port"] = {"ok": True, "detail": "8000 端口可连接"}
+        with socket.create_connection((host, port), timeout=2):
+            result["checks"]["backend_port"] = {"ok": True, "detail": f"{host}:{port} 端口可连接"}
     except OSError as e:
-        result["checks"]["backend_port"] = {"ok": False, "detail": f"{e}"}
+        result["checks"]["backend_port"] = {"ok": False, "detail": f"{host}:{port} 连接失败：{e}"}
 
     # 平台/WSL
     result["checks"]["platform"] = {"ok": True, "detail": f"{platform.system()} {platform.release()}"}
@@ -67,28 +79,38 @@ async def diagnostics():
 
 
 async def _checkpoint_stats() -> list[dict]:
-    """汇总所有活跃项目工作区的 checkpoint 目录统计（文件数/大小/孤儿数）。"""
+    """汇总所有活跃项目工作区的 checkpoint 目录统计（文件数/大小/孤儿数）。
+
+    plan-20261115: 引用集只算一次。旧实现对每个工作区各跑一遍 collect_orphans，
+    每次都把 turn_snapshots 全表遍历一遍（本机 915 条快照 × 5 个工作区），
+    诊断接口因此稳定耗时近 4 秒。
+    """
     from app.persistence.database import async_session_factory
     stats: list[dict] = []
     try:
         async with async_session_factory() as db:
             projects = await project_service.list_projects(db)
+        try:
+            async with async_session_factory() as db:
+                refs = await checkpoint_gc._referenced_ckpts(db)
+        except Exception:
+            refs = set()
         for project in projects:
             root = Path(project.path).resolve() / _CHECKPOINT_DIR
             if not root.exists():
                 continue
             files = [p for p in root.rglob("*") if p.is_file()]
             size = sum(p.stat().st_size for p in files)
-            try:
-                async with async_session_factory() as db:
-                    orphan = await checkpoint_gc.collect_orphans(db, project.path)
-            except Exception:
-                orphan = {"orphan_count": 0}
+            orphan_count = 0
+            if refs:
+                key = checkpoint_gc._path_key
+                orphan_count = sum(1 for p in files if key(p) not in refs)
             stats.append({
                 "workspace": project.path,
                 "file_count": len(files),
                 "size_mb": round(size / (1024 * 1024), 2),
-                "orphan_count": orphan.get("orphan_count", 0),
+                "orphan_count": orphan_count,
+                "retention_days": settings.checkpoint_retention_days,
             })
     except Exception:
         return stats
@@ -98,21 +120,37 @@ async def _checkpoint_stats() -> list[dict]:
 @router.post("/diagnostics/checkpoints/cleanup", response_model=dict)
 async def cleanup_checkpoints(workspace: str | None = None,
                               db: AsyncSession = Depends(get_db)):
-    """手动触发 checkpoint 垃圾回收；不传 workspace 时对所有活跃项目工作区执行。"""
-    if workspace:
-        result = await checkpoint_gc.cleanup(db, workspace)
-        await db.commit()
-        return {"ok": True, "results": [result]}
+    """手动触发 checkpoint 垃圾回收；不传 workspace 时对所有活跃项目工作区执行。
+
+    plan-20261115: 即使没有删除任何文件也必须回传 workspace——前端据此区分
+    「清理失败」与「本来就没可删的」。旧实现只在 deleted>0 时才追加结果，
+    服务端明明正常执行完毕却返回 results=[]，界面看上去就是「永远清理不完」。
+    保留期的文件是设计上不删的，一并回传 kept 让前端能解释原因。
+    """
     from app.persistence.database import async_session_factory
-    results: list[dict] = []
+
     async with async_session_factory() as sdb:
-        projects = await project_service.list_projects(sdb)
-        for project in projects:
-            r = await checkpoint_gc.cleanup(sdb, project.path)
-            if r.get("deleted"):
+        # 引用集只算一次（所有工作区共用），避免逐工作区全表扫快照
+        try:
+            refs = await checkpoint_gc._referenced_ckpts(sdb)
+        except Exception as exc:
+            # plan-20261116-review-fixes：引用未知时不能把有效备份当作孤儿删除。
+            raise HTTPException(503, "读取回滚备份引用失败，未执行清理，请稍后重试") from exc
+        results: list[dict] = []
+        if workspace:
+            r = await checkpoint_gc.cleanup(sdb, workspace, refs=refs)
+            results.append({"workspace": workspace, **r})
+        else:
+            projects = await project_service.list_projects(sdb)
+            for project in projects:
+                root = Path(project.path).resolve() / _CHECKPOINT_DIR
+                if not root.exists():
+                    continue
+                r = await checkpoint_gc.cleanup(sdb, project.path, refs=refs)
                 results.append({"workspace": project.path, **r})
         await sdb.commit()
-    return {"ok": True, "results": results}
+    return {"ok": True, "results": results,
+            "retention_days": settings.checkpoint_retention_days}
 
 
 @router.get("/update-check", response_model=dict)

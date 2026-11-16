@@ -142,13 +142,18 @@
 /* ── ② 空态：2×2 工具启动卡（角色色磁贴：闲置灰度，聚焦彩色）──────── */
 /* plan-128-518：参考「打开标签页」样式——整体垂直居中，标题 + 一句说明 + 灰底磁贴；
  * 磁贴只有一层（图标 + 名称），悬停仅底色加深，无位移、无边框、无阴影；
- * 窄面板（<420px）单列竖排，宽面板自动 2~3 列，同一份标记不做布局切换。 */
+ * 窄面板（<420px）单列竖排，宽面板自动 2~3 列，同一份标记不做布局切换。
+ * 例外：「微应用」磁贴是强调卡，常驻角色色（--pc-cyan），**不**遵循上面的闲置灰度。 */
 .rp-launch { container-type: inline-size; height: 100%; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-.rp-launch-inner { width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+/* --collapse-gap 与 gap 等值：微应用列表是这一列的折叠子项，折叠态由 .in-gap 抵消它那一份间距（motion.css） */
+.rp-launch-inner { width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: stretch; gap: 16px; --collapse-gap: 16px; }
 .rp-launch-head { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
 .rp-launch-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-1); }
 .rp-launch-sub { font-size: 12.5px; line-height: 1.5; color: var(--text-3); }
-.rp-launch-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
+/* plan-693-2868：单列轨道用 minmax(0, 1fr)——`1fr` 等于 minmax(auto, 1fr)，磁贴里的名称是 nowrap，
+ * 长文案会把它自己的 min-content 撑成轨道下限，240px 最窄面板里整张卡横向溢出（本该收省略号）。
+ * 与 420px 档的 repeat(2|3, minmax(0, 1fr)) 口径统一。 */
+.rp-launch-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .rp-launch-tile {
   display: flex; align-items: center; gap: 10px;
   height: 40px; padding: 0 14px;
@@ -158,7 +163,9 @@
   transition: background var(--dur-2) var(--ease-standard);
 }
 .rp-launch-tile:hover { background: var(--bg-active); }
-.rp-launch-tile:focus-visible { outline: 2px solid color-mix(in oklab, var(--info) 60%, transparent); outline-offset: -2px; }
+/* 键盘焦点用「背景高亮 + 中性 1px」，不用品牌蓝环：focus.css 已把蓝色焦点框全量清理，
+ * 但本选择器特异性高于 button:focus-visible，不在这里改写就会把蓝环带回来。 */
+.rp-launch-tile:focus-visible { background: var(--bg-active); outline: 1px solid var(--text-3); outline-offset: -1px; }
 .rp-launch-ic { flex: none; display: inline-flex; color: var(--text-2); transition: color var(--dur-2) var(--ease-standard); }
 .rp-launch-tile:hover .rp-launch-ic { color: var(--text-1); }
 .rp-launch-name { font-size: 13px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -168,6 +175,52 @@
   .rp-launch-name { font-size: 12.5px; }
 }
 @container (min-width: 620px) { .rp-launch-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } .rp-launch-inner { max-width: 560px; } }
+
+/* ── ②-b 微应用快捷入口（plan-693-2868 方案 C）────────────────────────
+ * 微应用不是一个固定标签，所以启动卡上多一张「微应用」卡（青色图标 + 名称 + 「N 个可用」小标），
+ * 点它就地展开已装列表，选中才开标签。
+ * 窄面板（240px）是单列行式磁贴：图标与「N 个可用」小标 flex: none（不压缩），名称 min-width: 0
+ * 收省略号，整行 white-space: nowrap——挤到最窄也不会换行或横向溢出。 */
+.rp-launch-tile.is-app .rp-launch-ic { color: var(--pc-cyan); }
+.rp-launch-tile.is-app:hover .rp-launch-ic,
+.rp-launch-tile.is-app.is-open .rp-launch-ic { color: var(--pc-cyan); }
+.rp-launch-tile.is-app.is-open { background: var(--bg-active); }
+/* 小标用 ui/Badge（胶囊 / 高度走 --badge-h-*），这里只把它染成微应用主色；
+   三档选择器压过 .ui-badge.bd-soft.bd-neutral 的中性配色（同为 3 个类，panel.css 在其后） */
+.ui-badge.bd-soft.rp-launch-tag {
+  flex: none; margin-left: auto;
+  background: color-mix(in oklab, var(--pc-cyan) 12%, transparent);
+  color: var(--pc-cyan);
+}
+/* 已装列表（方案 C 就地展开）：整行宽，行结构复用浮层菜单的 .pop-item*
+   （图标固定宽 + 文本列 min-width: 0），长名称收省略号。
+   高度封顶：外层 .rp-launch 是「垂直居中 + overflow-y: auto」——flex 居中遇到溢出会同时
+   裁掉顶部且滚不上去（scrollTop 不能为负）。清单变长时改由本列表自己滚，启动页不被顶出视口；
+   overscroll-behavior 防止滚到底后把滚动接力给外层。 */
+.rp-apps {
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 0; padding: 4px;
+  max-height: min(320px, 44vh);
+  overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+}
+/* 面板 ≤360px 时行内文字不能靠继承行高（标题与版本会挤在一起）：显式写死两行行高 */
+.rp-apps .pop-item-title { line-height: 18px; }
+.rp-apps .pop-item-desc { line-height: 16px; }
+/* 「正在读取已装微应用」一行：与空态同一个内边距与小字，展开瞬间就有内容，不会先空一块 */
+.rp-apps-status { padding: 8px; font-size: 12px; line-height: 18px; color: var(--text-3); }
+
+/* 一个都没装时的空态（两个入口共用）：一句话 + 两个既有出口；
+   窄面板里按钮允许换行，不在 240px 上横向溢出 */
+.rp-apps-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; padding: 8px; font-size: 12px; line-height: 1.7; color: var(--text-3); }
+.rp-apps-empty-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+/* 宽面板（≥420px）磁贴转竖排：图标 / 名称 / 小标三行居中——小标不再靠右，卡片高度随内容放宽一点，
+   否则 68px 定高装不下第三行。写在 ② 的 @container 之后，才能盖住上面的基础声明。 */
+@container (min-width: 420px) {
+  .rp-launch-tile.is-app { height: auto; min-height: 68px; }
+  .ui-badge.bd-soft.rp-launch-tag { margin-left: 0; }
+}
 
 /* ── ③ 摘要索引（plan-20261105-summary-index）───────────────
  * 索引始终留在滚动视口外；正文换行、完成项保持可读，固定状态槽避免更新时挤压。 */

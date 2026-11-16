@@ -14,7 +14,7 @@ import { api, type FileChangeOut } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { useUiStore } from "../../store/ui";
-import { ConfirmDialog } from "../ConfirmDialog";
+import { RollbackFileGroups, type RollbackFileRow } from "./RollbackFileGroups";
 import {
   IconBrandExplorer,
   IconBrandIdea,
@@ -377,37 +377,22 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
         )}
       </Collapse>
 
-      {rejected ? (
-        <Dialog
-          open={confirmOpen}
-          onClose={closeRevert}
-          width={480}
-          title="撤销已取消"
-          footer={<Button variant="secondary" onClick={closeRevert}>知道了</Button>}
-        >
-          <div className="ui-dialog-message">{rejected.message}</div>
-          <ul className="tcc-reject-list">
-            {rejected.conflicts.map((c) => (
-              <li key={c.path} className="tcc-reject-item">
-                <span className="tcc-reject-path">{c.path}</span>
-                {c.reason && <span className="tcc-reject-reason">{c.reason}</span>}
-              </li>
-            ))}
-          </ul>
-        </Dialog>
-      ) : (
-        <ConfirmDialog
-          open={confirmOpen}
-          danger
-          title="撤销本轮文件改动"
-          message={`将把本轮 ${files.length} 个文件恢复到本轮开始前的内容，消息记录不会删除，且不可恢复。若文件在本轮之后又被改动，撤销会整体取消。`}
-          confirmLabel="撤销"
-          busyLabel="撤销中…"
-          busy={reverting}
-          onCancel={closeRevert}
-          onConfirm={() => void confirmRevert()}
-        />
-      )}
+      <Dialog open={confirmOpen} onClose={reverting ? () => {} : closeRevert}
+        width={rejected ? 500 : 560} title={rejected ? "无法撤销" : "撤销文件改动"}
+        footer={rejected ? <Button variant="secondary" onClick={closeRevert}>知道了</Button> : <>
+          <Button variant="secondary" disabled={reverting} onClick={closeRevert}>取消</Button>
+          <Button variant="danger" loading={reverting} onClick={() => void confirmRevert()}>确认撤销</Button>
+        </>}
+      >
+        <p className="rb-impact">{rejected
+          ? `${rejected.conflicts.length} 个文件无法安全撤销，本次未修改任何文件。`
+          : `将撤销本轮 ${files.length} 个文件的改动，保留对话。此操作不可恢复。`}</p>
+        <RollbackFileGroups<RollbackFileRow> key={`${turnId}:${rejected ? "rejected" : "confirm"}`}
+          files={rejected
+            ? rejected.conflicts.map((file) => ({ ...file, conflict: true }))
+            : files.map((file) => ({ path: file.path, conflict: false, action: file.action === "added" ? "delete" : "restore" }))}
+          showAction={!rejected} />
+      </Dialog>
     </div>
   );
 }

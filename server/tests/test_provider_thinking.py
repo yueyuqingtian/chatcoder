@@ -104,8 +104,9 @@ class TestConvertMessages:
             tool_calls=[{"id": "call_1", "name": "fs_read", "arguments": {"path": "a.py"}}],
         )]
         out = p._convert_messages(msgs)
-        assert out[0]["content"] == ""
-        assert out[0]["tool_calls"][0]["function"]["name"] == "fs_read"
+        assistant = next(m for m in out if m.get("tool_calls"))
+        assert assistant["content"] == ""
+        assert assistant["tool_calls"][0]["function"]["name"] == "fs_read"
 
     def test_developer_role_maps_to_system_by_default(self):
         p = _provider()

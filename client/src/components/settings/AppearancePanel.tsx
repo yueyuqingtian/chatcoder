@@ -6,14 +6,14 @@
  *  - 移除「动画效果」配置（固定标准动画，动效统一由 --dur-* / --motion-scale 控制）；
  *  - 移除「面板拖拽排版 / 拖拽自动降级」（按要求固定"实时、不降级"）；
  *  - 移除左/右面板宽度滑杆（改为主界面直接拖拽分隔条，使用合理默认值）。 */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useThemeStore, WORLDS, type Theme, type World } from "../../store/theme";
 import {
   SECTION_LABEL, TOOL_CARD_SECTIONS, hydrateToolCardPrefs, saveToolCardForm, saveToolCardSection,
   useToolCardStore, type ToolCardDefaultForm, type ToolCardSection,
 } from "../../store/toolCard";
 import { useUiStore, UI_FONT_OPTIONS } from "../../store/ui";
-import { isFontInstalled } from "../../utils/fontProbe";
+import { isFontInstalled, revalidateFonts } from "../../utils/fontProbe";
 import { Select, Slider, type SelectOption } from "../ui";
 import { Dada } from "../mascot/Dada";
 import { Row, Sw } from "./shared";
@@ -49,13 +49,18 @@ const TOOL_CARD_SECTION_DESC: Record<ToolCardSection, string> = {
   bgtask: "工具卡展开时默认展开后台任务栏，显示运行中的后台命令（含运行时间与停止按钮）",
 };
 
-/** 需要系统已安装才会生效的界面字体：选项置灰并标注「未安装」；内置与系统自带字体无需探测 */
+/** 需要系统已安装才会生效的界面字体：选项置灰并标注「未安装」；内置与系统自带字体无需探测。
+ *  plan-20261116-bundled-fonts：思源黑体（sourcehan）已随应用内置、HarmonyOS Sans（harmony）
+ *  已从候选移除，两者都不再进探测表。 */
 const UI_FONT_PROBE: Record<string, string> = {
-  harmony: "HarmonyOS Sans SC",
-  sourcehan: "Source Han Sans SC",
   yahei: "Microsoft YaHei UI",
 };
-const isUiFontInstalled = (key: string): boolean => !UI_FONT_PROBE[key] || isFontInstalled(UI_FONT_PROBE[key]);
+/** 随应用打包的界面字体（@font-face 见 styles/fonts.css）：判断可用性时不必探测本机 */
+const BUNDLED_UI_FONTS = new Set(
+  Object.entries(UI_FONT_OPTIONS).filter(([, f]) => f.bundled).map(([key]) => key),
+);
+const isUiFontInstalled = (key: string): boolean =>
+  BUNDLED_UI_FONTS.has(key) || !UI_FONT_PROBE[key] || isFontInstalled(UI_FONT_PROBE[key]);
 
 /** S5：玻璃强度三档（0 轻柔 / 1 标准 / 2 深邃）——不透明度由 tokens.css 的
  *  --frost-left-alpha 声明式驱动（深邃透出最多、轻柔最实）。 */
@@ -72,8 +77,29 @@ export function AppearancePanel() {
   const toolCardSections = useToolCardStore((s) => s.sectionDefaults);
   // 设置页可能先于工具卡挂载：补读一次后端全局默认（内部只读一次）
   useEffect(() => { hydrateToolCardPrefs(); }, []);
+  // 每次进入设置页重新探测一次字体可用性：字体可能在使用期间装上 / 卸载，
+  // 探测缓存（isFontInstalled）里只留正向结果，这里清掉并重渲染，避免「明明装了还显示未安装」。
+  const [probeVersion, bumpProbe] = useState(0);
+  useEffect(() => { revalidateFonts(); bumpProbe((n) => n + 1); }, []);
   // 选中时让该卡片里的嗒嗒眨一下眼；key 递增保证重复点击也会触发
   const [wink, setWink] = useState(0);
+  // 内置字体（Inter / 思源黑体）恒可用，不提示「未安装」；「未安装」只针对候选表里存在、
+  // 且本机探测确实没有的系统字体（历史配置里已移除的 harmony 之类不算，直接按默认字体展示）。
+  const selectedUiFont = UI_FONT_OPTIONS[ui.uiFontFamily] ?? UI_FONT_OPTIONS.inter;
+  /* plan-723-3029 R3：字体可用性探测要跑 canvas 测宽，且只缓存正向结果（未安装的系统字体每次都要重测）。
+   * 选项表原先在 render 里现算，拖「对话字号」滑块时每变一个值就重测一轮；现在按
+   * 「探测版本（revalidateFonts 后递增）+ 当前所选字体」缓存，字号/行距/宽度滑动不再触发探测。 */
+  const uiFontOptions = useMemo<SelectOption[]>(
+    () => Object.entries(UI_FONT_OPTIONS).map(([value, f]) => {
+      // 内置字体恒可用：不置灰、不带「未安装」标注
+      const ok = isUiFontInstalled(value);
+      return { value, label: f.label, disabled: !ok, hint: ok ? undefined : "未安装" };
+    }),
+    // probeVersion 只在重新探测后变化；uiFontFamily 变化需要更新「未安装」提示
+    [probeVersion, ui.uiFontFamily],
+  );
+  const selectedUiFontMissing = !!UI_FONT_OPTIONS[ui.uiFontFamily]
+    && (uiFontOptions.find((o) => o.value === ui.uiFontFamily)?.disabled ?? false);
 
   return (
     <div className="settings-card-stack">
@@ -153,17 +179,14 @@ export function AppearancePanel() {
         <Row
           title="界面字体"
           desc={
-            (UI_FONT_OPTIONS[ui.uiFontFamily] ?? UI_FONT_OPTIONS.inter).desc
-            + (isUiFontInstalled(ui.uiFontFamily) ? "" : "（所选字体未安装，当前已回退为默认字体）")
+            selectedUiFont.desc
+            + (selectedUiFontMissing ? "（所选字体未安装，当前已回退为默认字体）" : "")
           }
         >
           <Select
             value={UI_FONT_OPTIONS[ui.uiFontFamily] ? ui.uiFontFamily : "inter"}
             onChange={(v) => ui.setPrefs({ uiFontFamily: v })}
-            options={Object.entries(UI_FONT_OPTIONS).map(([value, f]): SelectOption => {
-              const ok = isUiFontInstalled(value);
-              return { value, label: f.label, disabled: !ok, hint: ok ? undefined : "未安装" };
-            })}
+            options={uiFontOptions}
             aria-label="界面字体"
           />
         </Row>

@@ -41,6 +41,37 @@ async def test_terminal_failing_command(workspace):
 
 
 @pytest.mark.asyncio
+async def test_terminal_benign_exit_one_semantics(workspace):
+    """plan-flow-redesign: 搜索/对比命令退出码 1 按正常空结果处理，非搜索命令退出码 1 仍报失败。"""
+    from app.orchestration.tools.shell_hints import benign_exit_one_note
+
+    assert benign_exit_one_note('rg "missing_symbol" client/src', 1, "", "") == "无匹配（退出码 1）"
+    assert benign_exit_one_note("git diff --exit-code", 1, "", "") == "存在差异（退出码 1）"
+    assert benign_exit_one_note('rg --bad-flag "x"', 1, "rg: unrecognized flag --bad-flag", "") == ""
+    assert benign_exit_one_note("pytest server/tests", 1, "", "") == ""
+
+    tool = TerminalExecTool()
+    # 普通命令 exit 1 仍为失败
+    r_fail = await tool.run({"command": "exit 1"}, _ctx(workspace))
+    assert r_fail.ok is False
+    assert r_fail.data["returncode"] == 1
+    assert "exit_note" not in r_fail.data
+
+    # 搜索文件无匹配（跨平台：写入临时文件后用 findstr/grep 或 rg 测试，若无 rg 则退回 python 单测验证）
+    sample = workspace / "sample.txt"
+    sample.write_text("hello world\n", encoding="utf-8")
+    import shutil
+    search_cmd = 'rg "non_existent_token_xyz" sample.txt' if shutil.which("rg") else (
+        'findstr "non_existent_token_xyz" sample.txt' if shutil.which("findstr") else 'grep "non_existent_token_xyz" sample.txt'
+    )
+    r_search = await tool.run({"command": search_cmd}, _ctx(workspace))
+    assert r_search.ok is True
+    assert r_search.data["returncode"] == 1
+    assert r_search.data.get("exit_note") == "无匹配（退出码 1）"
+    assert r_search.error == ""
+
+
+@pytest.mark.asyncio
 async def test_terminal_empty_command_rejected(workspace):
     tool = TerminalExecTool()
     r = await tool.run({"command": ""}, _ctx(workspace))

@@ -108,6 +108,7 @@ class ContextBundle:
     system: str
     developer_parts: list[str] = field(default_factory=list)
     history: list[ChatMessage] = field(default_factory=list)
+    checkpoints: list[ChatMessage] = field(default_factory=list)
     instruction: str = ""
     # v15: 多模态指令内容块（图片附件直接以 image_url 注入当前用户消息）
     instruction_blocks: list[dict] | None = None
@@ -162,11 +163,12 @@ class ContextBundle:
             messages.append(ChatMessage(role="system", content=self.task_boundary))
         if self.instruction or self.instruction_blocks:
             messages.append(ChatMessage(
-                role="user", content=self.instruction,
+                role="user", content=self.instruction, context_kind="current_task",
                 content_blocks=self.instruction_blocks,
                 skill_load_snapshots=self.instruction_skill_snapshots,
             ))
-        return messages
+        from app.orchestration.checkpoint_projection import project_checkpoints
+        return project_checkpoints(messages, self.checkpoints) if self.checkpoints else messages
 
     def _to_messages_merged(self) -> list[ChatMessage]:
         """ta3 专用：规则段与 developer 段全部并入首条 system（plan-598-2482）。
@@ -185,11 +187,12 @@ class ContextBundle:
         messages.extend(self.history)
         if self.instruction or self.instruction_blocks:
             messages.append(ChatMessage(
-                role="user", content=self.instruction,
+                role="user", content=self.instruction, context_kind="current_task",
                 content_blocks=self.instruction_blocks,
                 skill_load_snapshots=self.instruction_skill_snapshots,
             ))
-        return messages
+        from app.orchestration.checkpoint_projection import project_checkpoints
+        return project_checkpoints(messages, self.checkpoints) if self.checkpoints else messages
 
 
 # 注入 prompt 的技能清单上限（旧值 10 会静默截断更多技能；
@@ -1942,89 +1945,20 @@ async def build_main_context(
             _sum_title = ("## Session Summary（较早对话已压缩）" if _reply_lang == "zh"
                           else "## Session Summary (earlier conversation compressed)")
             bundle.developer_parts.append(f"{_sum_title}\n{_summary[:4000]}")
-        # v30: 注入压缩 checkpoint（context_compressor 落库的 SUMMARY 消息摘要）。
-        # 与 shared_context.summary（context_memory 后台渐进摘要）不同，checkpoint 是
-        # 按 token 预算选定范围的压缩产物，按压缩发生顺序注入，且只注入一次
-        # （已注入的 compaction_id 记录在 _injected_compactions，跨轮不重复）。
-        # plan-19-82: ①标题按本轮语言生成（中文会话用中文标题，避免英文标题污染回复语言）；
-        #             ②追加「按需回看」指引（含块 index/compaction_id），让 AI 知道可按需检索；
-        #             ③跳过 merged（已滚动合并）的块——其内容已并入较新 checkpoint，
-        #               原文仍可经 compaction_view 按需回看，不重复注入以防固定开销膨胀。
+        # plan-20261109-compact-structure：完整请求必须每次承载有效摘要，不能用跨轮标志跳过。
+        # plan-20261115-checkpoint-degrade：检查点读取只降级、不抛错——这里一旦抛异常，该会话
+        # 每一轮请求都会失败且用户无法自救（详见 load_checkpoints 的说明）。
+        from app.orchestration.checkpoint_projection import load_checkpoints
+        _missing_cp: list[str] = []
         try:
-            from app.persistence.models.message import Message as _Msg
-            _compactions = _ctx.get("compactions") or []
-            _injected = set(_ctx.get("injected_compactions") or [])
-            _checkpoint_parts: list[str] = []
-            _new_injected: list[str] = []
-            _index_lines: list[str] = []
-            for _cmp in _compactions:
-                _cid = str(_cmp.get("compaction_id") or "")
-                # v33: 已还原的压缩块不再注入 checkpoint（原文已回到上下文，重复注入冗余）
-                if not _cid or _cid in _injected or _cmp.get("restored") or _cmp.get("merged"):
-                    continue
-                _msg_id = _cmp.get("summary_message_id")
-                if not _msg_id:
-                    continue
-                _m = await db.get(_Msg, _msg_id)
-                if _m is None or _m.deleted or not isinstance(_m.content, dict):
-                    continue
-                _text = (_m.content.get("text") or "").strip()
-                if not _text:
-                    continue
-                _checkpoint_parts.append(_text[:3000])
-                _new_injected.append(_cid)
-                _ci = _cmp.get("index") or "-"
-                _index_lines.append(f"#{_ci} (compaction_id={_cid})")
-            if _checkpoint_parts:
-                if _reply_lang == "zh":
-                    _title = "## Conversation Checkpoints（已压缩的历史片段）"
-                    _howto = (
-                        "以上检查点只是压缩摘要。若需要其中被压缩段落的细节，**按需**回看："
-                        "先调用 `compaction_index` 列出压缩块，再用 `compaction_view` 传入 index 或 "
-                        "compaction_id（可带 keyword / offset / limit，单条全文用 full=true），"
-                        "或用 `memory_search` 检索压缩源。**严禁一次性全量拉取压缩前历史**——"
-                        "那会重新撑爆上下文。可用块：" + "、".join(_index_lines)
-                    )
-                else:
-                    _title = "## Conversation Checkpoints (compacted spans)"
-                    _howto = (
-                        "The checkpoints above are summaries only. For details inside a compacted "
-                        "span, recover **on demand**: call `compaction_index` to list blocks, then "
-                        "`compaction_view` with `index` or `compaction_id` (optionally `keyword` / "
-                        "`offset` / `limit`; single full text via `full=true`), or use `memory_search` "
-                        "against the compaction source. **Never bulk-load the pre-compaction "
-                        "history** — that defeats compaction. Available blocks: "
-                        + ", ".join(_index_lines)
-                    )
-                _cp_text = _title + "\n" + "\n\n".join(_checkpoint_parts) + "\n\n" + _howto
-                if ta3_meta is None:
-                    bundle.developer_parts.append(_cp_text)
-                else:
-                    # plan-601-2495：压缩检查点是功能必需（被压缩历史的唯一载体），
-                    # ta3 下放当轮 user 消息的 <system-reminder>，并改用模型可见工具名
-                    _ta3_reminders.append(_ta3_rewrite_tool_names(
-                        _cp_text, ("compaction_index", "compaction_view", "memory_search"),
-                    ))
-                if _new_injected:
-                    _ctx = dict(_ctx)
-                    _ctx["injected_compactions"] = list(_injected) + _new_injected
-                    # checkpoint 注入状态经写引擎单写线程提交（不持有 async 写事务）
-                    from app.persistence.database import run_write_locked
-
-                    def _p(s):
-                        from app.persistence.models.message import Session as _Sess
-                        row = s.get(_Sess, session.id)
-                        if row is not None:
-                            row.shared_context = _ctx
-                        s.commit()
-
-                    await run_write_locked(_p, label="context.inject_checkpoint")
-                    logger.info(
-                        "[context] session=%s 注入压缩 checkpoint %d 条并标记已注入",
-                        session.id, len(_new_injected),
-                    )
+            bundle.checkpoints = await load_checkpoints(db, _ctx, missing=_missing_cp)
         except Exception:
-            logger.debug("[context] 压缩 checkpoint 注入失败(非阻塞)", exc_info=True)
+            logger.warning("[ctx] session=%s 压缩检查点读取失败，本轮按无检查点继续",
+                           getattr(session, "id", None), exc_info=True)
+            bundle.checkpoints = []
+        if _missing_cp:
+            logger.warning("[ctx] session=%s 压缩检查点缺失已跳过：%s",
+                           getattr(session, "id", None), _missing_cp)
 
     # v6.4: 注入历史消息窗口 —— 修复上下文丢失问题
     # 根因：build_main_context 原本只注入 turn 摘要，不注入历史消息，
@@ -2095,6 +2029,7 @@ async def build_main_context(
             # 用 95% 上限预留 5% 给它。
             _est_fixed = rough_token_estimate(bundle.system) + sum(
                 rough_token_estimate(p) for p in bundle.developer_parts)
+            _est_fixed += sum(rough_token_estimate(m.content or "") for m in bundle.checkpoints)
             if ta3_meta is not None:
                 # plan-601-2495：ta3 的官方段与 user 侧提醒不在 developer_parts 里，同样占窗口
                 _est_fixed += sum(rough_token_estimate(p) for p in _ta3_sys.values() if p)
@@ -2154,6 +2089,8 @@ async def build_main_context(
         # 网关报 "An assistant message with 'tool_calls' must be followed by tool messages"。
         # 因此将紧随 tool_call 之前的 agent 文本合并进同一条 assistant(tool_calls) 消息。
         _pending_agent_text = ""
+        _pending_source_ids: list[int] = []
+        _pending_signed_thinking: list[dict] = []
         # v1.2: 暂存紧随 tool_call 之前的思考内容，回传为 assistant 的 reasoning_content
         # （thinking 模式网关要求，缺失会 400）
         _pending_thinking = ""
@@ -2181,14 +2118,17 @@ async def build_main_context(
 
         def _flush_agent_text() -> None:
             """把暂存的 agent 文本（及其思考内容）落为 assistant 消息并清空暂存。"""
-            nonlocal _pending_agent_text, _pending_thinking
+            nonlocal _pending_agent_text, _pending_thinking, _pending_source_ids, _pending_signed_thinking
             if _pending_agent_text:
-                _cm = _CM(role="assistant", content=_pending_agent_text)
+                _cm = _CM(role="assistant", content=_pending_agent_text, source_message_ids=list(_pending_source_ids),
+                          thinking_blocks=list(_pending_signed_thinking) or None)
                 if _pending_thinking:
                     _cm.reasoning_content = _pending_thinking
                 bundle.history.append(_cm)
             _pending_agent_text = ""
             _pending_thinking = ""
+            _pending_source_ids = []
+            _pending_signed_thinking = []
 
         if getattr(session, "fork_info", None):
             _fork_note = "继承历史来自会话分支快照，其中的任务、子代理、后台进程和工作流均为只读记录，不代表当前仍可操作的执行实例；需要继续时请根据当前指令创建新的执行。"
@@ -2208,6 +2148,8 @@ async def build_main_context(
                 _th_text = m.content.get("text")
                 if isinstance(_th_text, str) and _th_text.strip():
                     _pending_thinking = "\n\n".join(x for x in (_pending_thinking, _th_text) if x)
+                _pending_source_ids.append(m.id)
+                _pending_signed_thinking.extend(m.content.get("thinking_blocks") or [])
                 continue
             if m.msg_type == _MsgType.TEXT.value:
                 text = m.content.get("text") or m.content.get("note") or ""
@@ -2239,7 +2181,7 @@ async def build_main_context(
                     # 先 flush 暂存的 agent 文本，避免它与紧随其后的 tool_call 错位合并。
                     _flush_agent_text()
                     if text:
-                        bundle.history.append(_CM(role="user", content=text))
+                        bundle.history.append(_CM(role="user", content=text, source_message_ids=[m.id]))
                     continue
                 if _role == HISTORY_ROLE_DISPLAY_ONLY:
                     # plan-565-2323 G16：纯展示行（子代理完成通知）不进模型上下文。
@@ -2261,7 +2203,7 @@ async def build_main_context(
                             _img_blocks = None
                     text = f"{text}\n{att_note}" if att_note else text
                     _flush_agent_text()
-                    _cm = _CM(role="user", content=text)
+                    _cm = _CM(role="user", content=text, source_message_ids=[m.id])
                     if ta3_meta is not None:
                         from app.orchestration.ta3_skill_snapshots import normalize
                         _cm.skill_load_snapshots = normalize(m.content.get("skill_load_snapshots"))
@@ -2271,6 +2213,7 @@ async def build_main_context(
                 else:
                     # 暂存 agent 文本，等待下一个 tool_call 合并
                     _pending_agent_text = "\n\n".join(x for x in (_pending_agent_text, text) if x)
+                    _pending_source_ids.append(m.id)
             elif m.msg_type == _MsgType.TOOL_CALL.value:
                 # 工具调用作为 assistant 消息（带 tool_calls），合并暂存的 agent 文本
                 tool_name = m.content.get("tool", "")
@@ -2283,6 +2226,8 @@ async def build_main_context(
                     except Exception:
                         args = {"_raw": args}
                 _tool_message = _CM(
+                    source_message_ids=[*_pending_source_ids, m.id],
+                    thinking_blocks=list(_pending_signed_thinking) or None,
                     role="assistant",
                     content=_pending_agent_text or None,
                     tool_calls=[{
@@ -2297,12 +2242,16 @@ async def build_main_context(
                 _prev = bundle.history[-1] if bundle.history else None
                 if _prev and _prev.role == "assistant" and _prev.tool_calls:
                     _prev.tool_calls.extend(_tool_message.tool_calls)
+                    _prev.source_message_ids.extend(_tool_message.source_message_ids)
+                    _prev.thinking_blocks = (_prev.thinking_blocks or []) + (_tool_message.thinking_blocks or []) or None
                     _prev.content = "\n\n".join(x for x in (_prev.content, _tool_message.content) if x) or None
                     _prev.reasoning_content = "\n\n".join(x for x in (_prev.reasoning_content, _tool_message.reasoning_content) if x) or None
                 else:
                     bundle.history.append(_tool_message)
                 _pending_agent_text = ""
                 _pending_thinking = ""
+                _pending_source_ids = []
+                _pending_signed_thinking = []
             elif m.msg_type == _MsgType.TOOL_RESULT.value:
                 # 工具结果作为 tool 角色消息
                 _flush_agent_text()
@@ -2323,6 +2272,7 @@ async def build_main_context(
                 )
                 bundle.history.append(_CM(
                     role="tool",
+                    source_message_ids=[m.id],
                     content=result_text,
                     name=tool_name,
                     tool_call_id=call_key,

@@ -17,7 +17,8 @@ import { globalWsClient } from "../api/ws";
 import { notify } from "../store/toast";
 import { healParkedFrame } from "./parkGuard";
 import { IDLE_AGENT, normalizeUrl, sessionKey, useBrowserStore, type BrowserTabState } from "../store/browser";
-import { bucketKeyOf, usePanelStore } from "../store/panel";
+import { bucketKeyOf, panelTabKey, usePanelStore } from "../store/panel";
+import { microappHost } from "./microappHost";
 import {
   findFrameByWcId, getFrame, hostSleep, waitFrameReady, waitNavigationSettled, type FrameRecord,
 } from "./frames";
@@ -660,12 +661,106 @@ function loadErrorText(raw: string, url: string): string {
   return raw.slice(0, 200);
 }
 
+// ── 微应用方法调用（plan-693-2868 P0-4 / 回归修复：界面没打开时自动挂载） ──────────────
+/** 界面就绪预算：webview 挂上之后 app.js 才注册桥，正常几百毫秒，冷启动首次加载可能上千毫秒；
+ *  超过 5 秒就不是「等一下就好」，而是真的有问题，交给服务端按 hint 报给模型。 */
+const MICROAPP_READY_BUDGET_MS = 5000;
+const MICROAPP_READY_INTERVAL_MS = 120;
+const MICROAPP_READY_MAX_TRIES = 40;
+/** 只有「界面 / 桥还没准备好」这一类错误可以重试。方法缺失、方法抛错、方法超时都**已经动过界面状态**，
+ *  重试等于把同一个副作用做两遍——必须立刻抛出（见下面 microappCallOp）。 */
+const MICROAPP_RETRYABLE = /^microapp-(?:guest-missing|guest-loading|bridge-missing)\b/;
+/** 参数形状不对（appId / version 非法）时重试也不会好：直接抛出，别耗满 5 秒预算。 */
+const MICROAPP_FATAL_ARG = /非法/;
+const MICROAPP_ERR_LOADING = "microapp-guest-loading";
+
+/** 只读探针（主进程 microappProbe）：null = 界面已可调用；否则返回错误文本（用于超时后归述原因）。
+ *
+ *  主进程没有这个 op 时（旧版本会落到 panelGuest 判「目标网页已关闭」）不拦调用——
+ *  返回 null 让 microappCall 自己撞出真实原因，重试与否仍由错误前缀决定。
+ */
+async function microappReadyProbe(appId: string, version: string, uid: string): Promise<string | null> {
+  try {
+    await mainExec(null, "microappProbe", { appId, version, uid });
+    return null;
+  } catch (e) {
+    const msg = errText(e);
+    return MICROAPP_RETRYABLE.test(msg) ? msg : null;
+  }
+}
+
+/** 微应用方法调用：先挂标签（不展开面板）→ 探针等到界面就绪 → 执行一次真实调用。
+ *
+ *  为什么要自动挂标签：guest 的唯一来源是右侧面板里的 `<webview src="app://microapp/…">`，
+ *  它只在面板存在该 microapp 标签时才挂上。此前这条通道只「找」不「造」，
+ *  用户没手动打开过界面时调用必然失败（报「没有找到 xxx 的界面」）。
+ *  只挂不展开：打开面板的权力在用户手上（docs/app1/README.md 四条界面约定），
+ *  AI 需要的只是界面在后台活着——容器常驻挂载，折叠状态下 webview 照样加载。
+ */
+async function microappCallOp(sid: string, a: Record<string, any>): Promise<Record<string, unknown>> {
+  const appId = String(a.appId || "");
+  const version = String(a.version || "");
+  // autoOpen === false 是模型显式要求「界面必须已经开着」：不动面板，直接按原路径调用
+  if (a.autoOpen !== false && appId && version) {
+    // 每次请求只挂一次：标签已存在时只刷新 meta，不会重复开标签
+    usePanelStore.getState().ensureMicroAppTab(
+      numericSid(sid), appId, version, typeof a.entry === "string" ? a.entry : undefined,
+    );
+  }
+  // plan-20261116-review-fixes：应用和版本不是实例身份，否则后台会话会调用到前台项目。
+  const sessionId = numericSid(sid);
+  const tab = usePanelStore.getState().buckets[bucketKeyOf(sessionId)]?.tabs.find((item) =>
+    item.id === "microapp" && item.meta?.appId === appId && item.meta.version === version && !item.meta.externalUrl);
+  const uid = tab ? panelTabKey(tab) : microappHost.instanceFor(sessionId, appId, version)?.uid;
+  if (!uid) throw new Error(`microapp-guest-missing: 当前会话没有 ${appId} 的界面实例`);
+  const payload = {
+    appId, version, uid,
+    method: String(a.method || ""),
+    args: a.args && typeof a.args === "object" ? a.args : {},
+  };
+  const deadline = Date.now() + MICROAPP_READY_BUDGET_MS;
+  let lastErr = "";
+  for (let i = 0; i < MICROAPP_READY_MAX_TRIES; i += 1) {
+    const notReady = await microappReadyProbe(appId, version, uid);
+    if (notReady == null) {
+      try {
+        return await mainExec(null, "microappCall", payload);
+      } catch (e) {
+        lastErr = errText(e);
+        // 探针说就绪、调用却报「界面没了」（用户正好关掉标签 / 界面在重载）：预算内继续等
+        if (!MICROAPP_RETRYABLE.test(lastErr)) throw e;
+      }
+    } else {
+      lastErr = notReady;
+      if (MICROAPP_FATAL_ARG.test(notReady)) throw new Error(notReady);
+    }
+    if (Date.now() >= deadline) break;
+    // 睡眠必须走主进程计时：面板折叠 / 窗口被遮挡时渲染层定时器会被节流到秒级
+    await sleep(MICROAPP_READY_INTERVAL_MS);
+  }
+  // 超时统一归一化成 guest-loading：bridge-missing 的 hint 会把模型误导成「app.js 写错了」
+  throw new Error(
+    `${MICROAPP_ERR_LOADING}: 微应用 ${appId}${version ? ` v${version}` : ""} 的界面在 `
+    + `${MICROAPP_READY_BUDGET_MS / 1000} 秒内没有就绪（最后一次：${lastErr || "界面仍未挂上"}）`,
+  );
+}
+
 async function dispatch(sid: string, op: string, a: Record<string, any>): Promise<Record<string, unknown>> {
   const store = useBrowserStore.getState();
   if (op === "tabs.list") return listTabs(sid);
   if (op === "clipboard") return mainExec(null, "clipboard", a);
   // plan-20261018-operator-boost：下载记录由主进程维护（保存到设置的下载目录），与标签无关
   if (op === "downloads") return mainExec(null, "downloads", a);
+  // plan-20261116-review-fixes：微应用不走浏览器标签解析，由所属会话的 UID 精确定位 guest。
+  // 返回值由主进程 JSON 化后再过来（返回值的类型收敛发生在页面侧，见 microappCall 的脚本），
+  // 这里只需原样透传；失败文案由主进程给出，mainExec 会把它抛成 browser.response 的 error。
+  // 回归修复：界面没打开时先自动挂标签并等就绪（见 microappCallOp），不再要求用户先手动打开。
+  if (op === "microappCall") return microappCallOp(sid, a);
+  if (op === "microappExternalCall") {
+    const call = window.chatcoderAPI?.microappsExtCall;
+    if (!call) throw new Error("当前桌面端不支持外置微应用调用，请升级并重启应用");
+    return { ...await call(String(a.appId || ""), String(a.method || ""), a.args ?? {}) };
+  }
   if (op === "tabs.open") {
     begin(sid, "", a.label || "新建标签", true);
     const tab = openAgentTab(sid, a.url ? normalizeUrl(String(a.url)) : "");

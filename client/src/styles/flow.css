@@ -48,8 +48,6 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 
 /* ── 工具调用行：保持平铺（不做胶囊），展开区为编辑器式面板 ── */
 .tc-row .tc-icon { color: var(--text-3); }
-.tc-row.has-output:hover .tc-verb,
-.tc-row.has-output:hover .tc-icon { color: var(--text-1); }
 .tc-output {
   margin: 4px 0 8px; padding: 0; border-radius: var(--r-md);
   background: var(--surface-inset); border: 1px solid var(--surface-inset-border);
@@ -70,12 +68,10 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 .tc-output > .tc-empty svg { flex-shrink: 0; color: var(--text-3); }
 .tc-output > .tc-empty[data-state="fail"] svg { color: var(--error); }
 
-/* plan-20261016-ux（问题 8）：「已工作 N 秒」整行 + 下方浅色分隔线（对齐参考图 4），
-   把工作过程与最终汇报分出层次；可点击区域仍只是左侧文字（.turn-worktime 保持 inline-flex） */
+/* plan-flow-redesign：工作时长收尾栏置于轮次末尾，去掉生硬底线，保留呼吸留白 */
 .turn-worktime-bar {
   display: flex; align-items: center;
-  padding-bottom: 4px;
-  border-bottom: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  padding-top: 2px;
 }
 
 /* 编辑器式代码视图（读文件 / 写文件 diff 共用） */
@@ -179,8 +175,6 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 [data-tool-state="running"] svg.tg .tg-pulse { animation: breath 1s var(--ease-in-out) infinite; }
 [data-tool-state="running"] svg.tg .tg-flow { stroke-dasharray: 3 3; animation: tg-flow 0.8s linear infinite; }
 [data-tool-state="running"] svg.tg .tg-draw { stroke-dasharray: 30; animation: tg-draw 1.4s var(--ease-in-out) infinite; }
-.tc-row.has-output:hover svg.tg .tg-hop,
-.tc-row.has-output:hover svg.tg .tg-pen { transform: translateY(-1px); transition: transform var(--dur-spring) var(--spring-bouncy); }
 @keyframes tg-scan { 0%, 100% { transform: translateY(-2px); opacity: 0.4; } 50% { transform: translateY(2px); opacity: 1; } }
 @keyframes tg-pen { to { transform: translate(-1.5px, 1.5px); } }
 @keyframes tg-orbit { from { transform: rotate(0deg) translateX(1.2px) rotate(0deg); } to { transform: rotate(360deg) translateX(1.2px) rotate(-360deg); } }
@@ -507,7 +501,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 
 /* 消息层次：用户消息（气泡）> AI 正文（主色）> 工作过程（工具 / 思考，次级色、略小） */
-.turn-flow .turn-process-container .tc-row { font-size: calc(var(--fs-md, 13px) - 0.5px); }
+.turn-flow .turn-process-container .tc-row { font-size: var(--fs-md, 13px); }
 
 /* plan-156-620：Markdown 组件给所有 code 都挂了 md-inline-code（含代码块里的），
    各容器的行内代码样式优先级参差，代码块会被染成「每行一块底色」。这里统一清掉块内的行内外观。 */
@@ -595,3 +589,154 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   color: var(--error);
 }
 .turn-item-error .err-actions .btn[aria-expanded="true"] { background: color-mix(in srgb, var(--error) 8%, transparent); }
+
+/* ══ plan-flow-redesign：搜索按文件分组、底部小嗒嗒加载行（对齐中心基线）与子代理轻量平铺行 ══ */
+/* 搜索按文件分组列表 */
+.tc-grep-groups { display: flex; flex-direction: column; }
+.tc-grep-group + .tc-grep-group { border-top: 1px solid var(--surface-inset-border); }
+.tc-grep-file {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 12px;
+  background: color-mix(in oklab, var(--surface-inset) 92%, var(--text-1) 4%);
+  border-bottom: 1px solid var(--surface-inset-border);
+  font-size: 11.5px; line-height: 18px; color: var(--text-2);
+}
+.tc-grep-file-path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-weight: 500;
+}
+.tc-grep-file-count { font-size: 11px; color: var(--text-3); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.tc-grep-hit {
+  display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; width: 100%;
+  padding: 3px 12px; border: none; background: transparent; text-align: left; cursor: pointer;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+  transition: background var(--dur-fast);
+}
+.tc-grep-hit:hover { background: var(--bg-hover); }
+.tc-grep-ln { color: var(--text-3); text-align: right; user-select: none; font-variant-numeric: tabular-nums; }
+.tc-grep-text { color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 底部小嗒嗒轻跃加载行 + 工作时长（精确对齐行内文字中心） */
+.bottom-loader-line {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0; max-width: 100%; min-height: 24px; padding-top: 2px;
+  font-size: 12.5px; line-height: 20px; color: var(--text-3);
+}
+.bottom-loader-line .thinking-block-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bottom-loader-line .loader-worktime { flex-shrink: 0; white-space: nowrap; }
+.dada-loader-figure.is-mini {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--dl-size, 18px);
+  height: var(--dl-size, 18px);
+}
+.dada-loader-figure.is-mini .dada-loader-hop {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  width: var(--dl-size, 18px);
+  height: var(--dl-size, 18px);
+  animation: dada-mini-hop var(--dur-hop, 900ms) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.dada-loader-figure.is-mini .dada-loader-shadow {
+  left: 20%;
+  right: 20%;
+  bottom: -2px;
+  height: 2.5px;
+}
+@keyframes dada-mini-hop {
+  0%, 100% { transform: translateY(0.5px) scale(1.06, 0.92); }
+  48% { transform: translateY(-3px) scale(0.95, 1.05); }
+}
+.loader-worktime {
+  font-size: 12px; line-height: 20px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 子代理轻量平铺行与 Q 版头像（紧凑靠左流式排布，状态与箭头紧跟信息，不甩到最右） ── */
+.subagent-row {
+  display: inline-flex; align-items: flex-start; gap: var(--flow-icon-gap, 8px);
+  width: fit-content; max-width: 100%;
+  margin: 0; padding: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+}
+.subagent-row.clickable { cursor: pointer; }
+.subagent-row.clickable:hover { background: transparent; }
+
+.sa-avatar {
+  width: var(--flow-icon, 16px); height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); border-radius: var(--r-md);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.sa-avatar svg { flex-shrink: 0; width: var(--flow-icon, 16px); height: var(--flow-icon, 16px); }
+.sa-avatar.is-running svg { animation: sa-dada-bob var(--dur-load) ease-in-out infinite; }
+@keyframes sa-dada-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+
+.sa-main { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: calc(var(--flow-gap) * 0.25); }
+.sa-line1 { display: flex; align-items: center; gap: var(--flow-item-gap, 6px); min-width: 0; min-height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); }
+.sa-title {
+  font-size: var(--fs-md, 13px); font-weight: 500; line-height: var(--chat-line-height, 2.2); color: var(--text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sa-role-text { font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3); flex-shrink: 0; }
+.sa-line2 {
+  font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sa-line2.is-error { color: var(--error); }
+
+.sa-state {
+  flex-shrink: 0;
+  font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.sa-state.is-ok { color: var(--success); }
+.sa-state.is-run { color: var(--color-brand, var(--accent)); }
+.sa-state.is-fail { color: var(--error); }
+.sa-open-hint {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  color: var(--text-3); opacity: 0;
+  height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2));
+  transition: opacity var(--dur-fast);
+}
+.subagent-row.clickable:hover .sa-open-hint,
+.subagent-row.clickable:focus-visible .sa-open-hint { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sa-avatar.is-running svg { animation: none; }
+}
+
+/* plan-20261114-message-flow：层级线按用户要求仅描绘展开树，贯穿整个内容区，不表达运行状态。 */
+.tc-process-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--flow-gap);
+  min-width: 0;
+  margin-inline-start: calc(var(--flow-icon, 16px) / 2);
+  padding: var(--flow-gap) 0 var(--flow-gap) calc(var(--flow-icon, 16px) / 2 + var(--flow-icon-gap, 8px));
+  border-inline-start: 1px solid var(--border);
+}
+.tc-process-preview { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-process-head .thinking-ticker-wrap,
+.thinking-row .thinking-ticker-wrap { flex: 1 1 auto; }
+.tc-process-head svg.tg *,
+.tc-row[data-tool-state="running"] svg.tg * { animation: none; }
+.tc-row { --flow-row-height: max(var(--flow-icon, 16px), calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2))); min-width: 0; min-height: var(--flow-row-height); }
+.tc-row .thinking-ticker-wrap, .tc-row .tc-verb-roll { max-height: var(--flow-row-height); }
+.tc-row .thinking-ticker, .tc-row .thinking-ticker-line { height: var(--flow-row-height); line-height: var(--flow-row-height); }
+.tc-row .thinking-ticker-line { font-size: calc(var(--fs-md, 13px) - 1px); }
+.tc-row.has-output:hover { background: transparent; }
+.tc-chevron { margin-inline-start: 0; }
+.tc-explore-detail { gap: var(--flow-gap); }
+.tc-explore-detail .tc-row { padding: 0; font-size: var(--fs-md, 13px); }
+.tc-output { margin-block: calc(var(--flow-gap) * 0.5) var(--flow-gap); }
+.turn-worktime { gap: var(--flow-item-gap, 6px); font-size: calc(var(--fs-md, 13px) - 1px); }
+@media (hover: none) {
+  .tc-row.has-output .tc-chevron, .turn-worktime.clickable .turn-worktime-arrow, .sa-open-hint { opacity: 1; }
+}

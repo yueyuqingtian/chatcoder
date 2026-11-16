@@ -14,7 +14,7 @@ import { useId } from "react";
 import type { MarketKind } from "../../api/client";
 
 /* ── 调色 ─────────────────────────────────────────────────── */
-type Hue = "amber" | "violet" | "teal" | "sky" | "green";
+type Hue = "amber" | "violet" | "teal" | "sky" | "green" | "cyan";
 /** top 高光面 / base 主色 / deep 暗面 / edge 挤出的底边 */
 const HUES: Record<Hue, { top: string; base: string; deep: string; edge: string }> = {
   amber: { top: "#FFD66B", base: "#FFB627", deep: "#EE9308", edge: "#B96A06" },
@@ -22,6 +22,14 @@ const HUES: Record<Hue, { top: string; base: string; deep: string; edge: string 
   teal: { top: "#6BE8D5", base: "#26C8B2", deep: "#12A092", edge: "#0B746A" },
   sky: { top: "#86D0FF", base: "#3DA9F6", deep: "#2084DC", edge: "#165FA6" },
   green: { top: "#86E8A2", base: "#3CC96E", deep: "#22A458", edge: "#157C3F" },
+  /* plan-693-2868：微应用的品类色取自引用 chip 的 `--pc-cyan`（oklch 215 色相），
+     四层沿着同一色相做明度梯度，和另外三个品类摆在一起不抢眼。 */
+  cyan: {
+    top: "oklch(84% 0.09 215)",
+    base: "oklch(68% 0.12 215)",
+    deep: "oklch(56% 0.11 215)",
+    edge: "oklch(42% 0.09 215)",
+  },
 };
 
 /* ── 拼图块轮廓 ───────────────────────────────────────────── */
@@ -74,10 +82,25 @@ export function jigsawPath(S: number, rr: number, e: JigsawEdges, knob: { R: num
 const SPARK = "M0-7C1-2 2-1 7 0 2 1 1 2 0 7-1 2-2 1-7 0-2-1-1-2 0-7Z";
 
 /* ── 标题旁的小标 ─────────────────────────────────────────── */
-const MARK_HUE: Record<MarketKind, Hue> = { plugin: "amber", skill: "green", connector: "teal" };
+/** 三品类的标题小标色相。plan-693-2868：加 microapp——
+ *  它不属于市场三类（MarketKind 是后端枚举，不能改），但展示上要与其他三栏同语言，
+ *  所以在这里把类型放宽到 `MarketKind | "microapp"`。 */
+const MARK_HUE: Record<MarketKind | "microapp", Hue> = {
+  plugin: "amber", skill: "green", connector: "teal", microapp: "cyan",
+};
 
 /** 24×24 字形（白色；描边类用 currentColor 以便统一） */
-function Glyph({ kind }: { kind: MarketKind }) {
+function Glyph({ kind }: { kind: MarketKind | "microapp" }) {
+  if (kind === "microapp") {
+    // 微应用：一块「面板」——外框里左侧内容块、右侧说明行，示意「带界面的外设」
+    return (
+      <>
+        <rect x="3.4" y="4.6" width="17.2" height="14.8" rx="3.2" fill="none" stroke="currentColor" strokeWidth="1.9" />
+        <rect x="6.6" y="8" width="5" height="7.8" rx="1.4" fill="currentColor" />
+        <path d="M14.2 9.4h4.4M14.2 12.5h4.4M14.2 15.6h2.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      </>
+    );
+  }
   if (kind === "plugin") {
     // 一块拼图：上、右各一个凸起，左侧一个凹口
     const d = jigsawPath(12.4, 3, { t: 1, r: 1, b: 0, l: -1 }, { R: 2.7, k: 1.65 }, 0);
@@ -96,7 +119,7 @@ function Glyph({ kind }: { kind: MarketKind }) {
 }
 
 /** 标题旁的小标：渐变圆角方块 + 白色字形；悬停整体轻轻转一下（动画见 market.css） */
-export function KindMark({ kind, size = 32 }: { kind: MarketKind; size?: number }) {
+export function KindMark({ kind, size = 32 }: { kind: MarketKind | "microapp"; size?: number }) {
   const hue = HUES[MARK_HUE[kind]];
   return (
     <span

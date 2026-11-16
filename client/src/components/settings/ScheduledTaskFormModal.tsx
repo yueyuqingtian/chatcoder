@@ -197,9 +197,14 @@ export function ScheduledTaskFormModal({
 
   const builtCron = useMemo(() => buildCron(form), [form]);
 
-  // 打开时初始化表单
+  // 打开时初始化表单；只响应 open 的「关闭→打开」沿——
+  // 弹窗打开期间 chat store 的 sessions/currentSessionId 会随会话活动重建引用（轮询/patch），
+  // 若据此重新执行初始化，会把用户正在输入的表单整体重置，输入内容凭空消失
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) { wasOpenRef.current = false; return; }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
     setErr(null);
     if (editing) {
       setForm({

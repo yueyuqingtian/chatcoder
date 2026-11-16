@@ -3,9 +3,11 @@
 plan-206-975：写操作经 WriteEngine 单写线程（无锁单写者）；读保留 async 会话。
 写函数返回标量（id/title/status 等），不返回跨层 ORM 对象。
 """
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -23,7 +25,18 @@ AUTO_TITLE_FALLBACK_CHARS = 30
 # 附件目录名（`uploads/{file_id}/...`）的合法取值：8~32 位十六进制。
 # 只认这种形状，避免把消息里形似的字符串当成目录名去删盘。
 _FILE_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
-_CHUNK = 400
+# 每批 id 数：SQLite 单条语句的变量上限是 999，900 留出余量又比原先的 400 少一半往返。
+_CHUNK = 900
+# 文件系统清理的并发上限：删目录 / 删文件是阻塞调用，放进线程池并发做；
+# 限制在 8 个以内，避免句柄与线程开销随批量线性增长。
+_IO_CONCURRENCY = 8
+# 附件引用探测每批 file_id 数：每个 LIKE 都等于一次全表扫，合并进一条 SQL 后只扫一次。
+_UPLOAD_REF_CHUNK = 64
+# 备份文件删完后向上收口空目录的层数：checkpoints/session-{sid}/{turn_id}/ 最多两级，
+# 再多就会碰到 checkpoints 根（见 _prune_empty_dirs 的 root 保护）。
+_CHECKPOINT_PRUNE_LEVELS = 2
+# 「未结束」的工作流程序状态：与 runtime.cancel_session_programs 的取值保持一致（设计 §5.3）。
+_OPEN_WORKFLOW_STATUSES = ("draft", "running", "waiting_human", "paused")
 
 
 def _chunks(ids: list[int]) -> list[list[int]]:
@@ -410,9 +423,9 @@ def purge_session_children(s, session_ids: list[int]) -> dict:
         res = s.execute(_delete(model).where(*criteria))
         counts[model.__tablename__] = counts.get(model.__tablename__, 0) + int(res.rowcount or 0)
 
-    # 分批：每批会话 id 数远低于 SQLite 参数上限
-    for start in range(0, len(ids), 400):
-        chunk = ids[start:start + 400]
+    # 分批：每批会话 id 数远低于 SQLite 参数上限（_CHUNK=900 < 999；每条语句只带一批参数）
+    for start in range(0, len(ids), _CHUNK):
+        chunk = ids[start:start + _CHUNK]
         turns_q = _select(Turn.id).where(Turn.session_id.in_(chunk))
         tasks_q = _select(Task.id).where(Task.session_id.in_(chunk))
         runs_q = _select(WorkflowRun.id).where(WorkflowRun.session_id.in_(chunk))
@@ -498,9 +511,16 @@ async def prepare_session_removal(session_ids: list[int]) -> None:
     （会话 id 被复用后，新会话的 `covers()` 会直接放行别人的读记录）。
 
     每项各自兜底：单项失败只记日志，不阻断其余项，也不阻断调用方的删除。
+
+    性能：工作流取消原先每个会话都要查一次 `workflow_runs`（N 次查询）；批量删除几百个会话时
+    绝大多数根本没有工作流。改为**先一次 IN 查询筛出真正有未结束程序的会话**，只对它们走取消；
+    执行停止 / 后台命令终止依赖的是内存态，不产生 DB 往返。
     """
-    for raw in session_ids:
-        sid = int(raw)
+    ids = sorted({int(x) for x in session_ids})
+    if not ids:
+        return
+    wf_sessions = await _sessions_with_open_workflow(ids)
+    for sid in ids:
         # 运行中的主代理轮次 / 子代理：不取消的话删除后它们仍会往已删的行写
         try:
             # 延迟导入：orchestration 反向依赖 services，顶层导入会成环
@@ -510,12 +530,13 @@ async def prepare_session_removal(session_ids: list[int]) -> None:
                 await engine.stop_session_execution(sid)
         except Exception:  # noqa: BLE001
             logger.warning("[session] 删除前停止执行失败 sid=%s", sid, exc_info=True)
-        try:
-            from app.orchestration.workflow import service as workflow_service
+        if sid in wf_sessions:
+            try:
+                from app.orchestration.workflow import service as workflow_service
 
-            await workflow_service.on_session_deleted(sid)
-        except Exception:  # noqa: BLE001
-            logger.warning("[session] 取消会话工作流失败 sid=%s", sid, exc_info=True)
+                await workflow_service.on_session_deleted(sid)
+            except Exception:  # noqa: BLE001
+                logger.warning("[session] 取消会话工作流失败 sid=%s", sid, exc_info=True)
         try:
             from app.orchestration.tools.bg_process import bg_process_registry
 
@@ -535,6 +556,33 @@ async def prepare_session_removal(session_ids: list[int]) -> None:
             read_cache.clear_cache_for_session(sid)
         except Exception:  # noqa: BLE001
             logger.warning("[session] 清理 fs_read 缓存失败 sid=%s", sid, exc_info=True)
+
+
+async def _sessions_with_open_workflow(session_ids: list[int]) -> set[int]:
+    """这些会话里还有未结束（draft/running/waiting_human/paused）工作流程序的会话 id。
+
+    一次 IN 查询替代每会话一次查询；查询失败时**退回全量**——宁可多调几次取消
+    （`cancel_session_programs` 对无程序的会话是空转），也不能漏取消留下悬空运行时。
+    """
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.workflow import WorkflowRun
+
+    found: set[int] = set()
+    try:
+        async with async_session_factory() as db:
+            for chunk in _chunks(session_ids):
+                rows = await db.execute(
+                    select(WorkflowRun.session_id).where(
+                        WorkflowRun.session_id.in_(chunk),
+                        WorkflowRun.kind == "program",
+                        WorkflowRun.status.in_(list(_OPEN_WORKFLOW_STATUSES)),
+                    )
+                )
+                found.update(int(x) for x in rows.scalars().all() if x is not None)
+    except Exception:  # noqa: BLE001 — 查询失败时保守地按「全有工作流」处理
+        logger.warning("[session] 查询未结束工作流失败，改为逐会话尝试取消", exc_info=True)
+        return set(int(x) for x in session_ids)
+    return found
 
 
 async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | None:
@@ -557,9 +605,10 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
     try:
         attachments = await collect_session_attachments([session_id])
         checkpoints = await collect_session_checkpoints([session_id])
+        plan_docs = await collect_session_plan_docs([session_id])
     except Exception:  # noqa: BLE001
         logger.warning("[session] 收集会话附件/快照失败，跳过磁盘清理 sid=%s", session_id, exc_info=True)
-        attachments, checkpoints = set(), set()
+        attachments, checkpoints, plan_docs = set(), set(), []
 
     def patch(s):
         session = s.get(Session, session_id)
@@ -573,7 +622,7 @@ async def delete_session_permanent(db: AsyncSession, session_id: int) -> dict | 
     result = await run_write_locked(patch, label=f"session.delete_permanent.{session_id}")
     if result is not None:
         await purge_session_tool_outputs(session_id)
-        result["files_removed"] = await _remove_session_assets(attachments, checkpoints)
+        result["files_removed"] = await _remove_session_assets(attachments, checkpoints, plan_docs)
     return result
 
 
@@ -584,48 +633,99 @@ async def purge_session_tool_outputs(session_id: int) -> None:
     `delete_session_permanent` 直接调 `purge_session_children`，于是 `uploads/_tool_outputs/{sid}`
     无人清理、按已删会话 id 一直累积。它们跨模块调用，走这个公开入口而不是私有函数。
     """
-    await _purge_tool_outputs(session_id)
-    # plan-20261103-fork：最后一个分支删除时回收此前因引用保留的输出目录。
-    from pathlib import Path
-    from app.core.config import settings
-    from app.orchestration.output_paging import SPILL_DIRNAME
-    from app.persistence.database import async_session_factory
-    root = Path(settings.uploads_dir).resolve() / SPILL_DIRNAME
-    if not root.is_dir():
-        return
-    async with async_session_factory() as db:
-        live = set((await db.scalars(select(Session.id))).all())
-        infos = (await db.scalars(select(Session.fork_info).where(Session.fork_info.is_not(None)))).all()
-    referenced = {sid for info in infos for sid in (info or {}).get("output_sources", [])}
-    for folder in root.iterdir():
-        if folder.is_dir() and folder.name.isdigit() and int(folder.name) not in live | referenced:
-            await _purge_tool_outputs(int(folder.name))
+    await purge_session_tool_outputs_many([session_id])
 
 
-async def _purge_tool_outputs(session_id: int) -> None:
-    """plan-156-621：删除会话时清理它的长工具输出落盘目录。
+async def purge_session_tool_outputs_many(session_ids: list[int]) -> int:
+    """批量清理这些会话的长工具输出落盘目录，并顺手回收已无主的目录；返回删掉的会话目录数。
 
-    落盘文件名带 uuid，无法按会话内消息反查；不跟随会话删除会一直累积
-    （每次超预算输出最多 2MB）。清理失败只记日志，不影响删除结果。
+    单会话入口原先的每个会话要：一次 fork_info 全表查（判断是否被分支引用）+ 一次会话全表查
+    （判定孤儿）+ 一次目录遍历，批量删除 N 个会话就是 2N 次扫描 + N 次 iterdir。这里改为
+    **整批只查一次、只列一次目录**，再用 `asyncio.gather` 并发删除（并发度 _IO_CONCURRENCY）。
+
+    保护集合与单会话版一致：仍被分支会话 `output_sources` 引用的源目录不删；
+    孤儿目录（既不是现存会话、也没被引用）一并回收，但不计入返回值——
+    口径与之前相同（调用方按会话目录数统计）。
     """
-    import shutil
+    ids = sorted({int(x) for x in session_ids})
+    if not ids:
+        return 0
+    root = _tool_output_root()
+    if root is None:
+        return 0
+    try:
+        live, protected = await _tool_output_owners()
+    except Exception:  # noqa: BLE001 — 引用集拿不到时宁可少删，不能误删分支还要用的目录
+        logger.debug("[session] 查询工具输出目录引用失败，跳过清理", exc_info=True)
+        return 0
+    try:
+        folders = {int(p.name): p for p in root.iterdir() if p.name.isdigit() and p.is_dir()}
+    except OSError:
+        logger.debug("[session] 列出工具输出目录失败", exc_info=True)
+        return 0
+
+    wanted = set(ids)
+    # 1) 目标会话自己的目录：只排除仍被分支引用的
+    targets = [sid for sid in folders if sid in wanted and sid not in protected]
+    # 2) 孤儿目录：既不在现存会话里、也没被分支引用（plan-20261103-fork 的回收口径）
+    targets += [sid for sid in folders if sid not in wanted and sid not in live and sid not in protected]
+    if not targets:
+        return 0
+
+    sem = asyncio.Semaphore(_IO_CONCURRENCY)
+
+    async def _one(sid: int) -> bool:
+        async with sem:
+            return await asyncio.to_thread(_rmtree_dir, folders[sid])
+
+    results = await asyncio.gather(*(_one(sid) for sid in targets), return_exceptions=True)
+    removed = 0
+    for sid, res in zip(targets, results):
+        if res is True and sid in wanted:
+            removed += 1
+    return removed
+
+
+def _tool_output_root():
+    """长工具输出的落盘根目录；拿不到配置或目录名时返回 None。"""
     from pathlib import Path
 
     try:
         from app.core.config import settings
         from app.orchestration.output_paging import SPILL_DIRNAME
+    except Exception:  # noqa: BLE001 — 取不到目录名时跳过清理，不影响删除结果
+        logger.debug("[session] 取工具输出目录名失败", exc_info=True)
+        return None
+    return Path(settings.uploads_dir).resolve() / SPILL_DIRNAME
 
-        # plan-20261103-fork：源会话删除后分支仍需按原路径续读长输出。
-        from app.persistence.database import async_session_factory
-        async with async_session_factory() as read_db:
-            infos = (await read_db.scalars(select(Session.fork_info).where(Session.fork_info.is_not(None)))).all()
-            if any(session_id in (info or {}).get("output_sources", []) for info in infos):
-                return
-        folder = Path(settings.uploads_dir).resolve() / SPILL_DIRNAME / str(session_id)
-        if folder.is_dir():
-            shutil.rmtree(folder, ignore_errors=True)
-    except Exception:  # noqa: BLE001 — 清理失败不影响会话删除
-        logger.debug("清理工具输出落盘失败 sid=%s", session_id, exc_info=True)
+
+async def _tool_output_owners() -> tuple[set[int], set[int]]:
+    """(现存会话 id, 被分支会话 output_sources 引用的源会话 id)——一次查询拿全。"""
+    from app.persistence.database import async_session_factory
+
+    async with async_session_factory() as db:
+        live = {int(x) for x in (await db.scalars(select(Session.id))).all()}
+        infos = (
+            await db.scalars(select(Session.fork_info).where(Session.fork_info.is_not(None)))
+        ).all()
+    protected: set[int] = set()
+    for info in infos:
+        for sid in (info or {}).get("output_sources", []) or []:
+            try:
+                protected.add(int(sid))
+            except (TypeError, ValueError):
+                continue
+    return live, protected
+
+
+def _rmtree_dir(path) -> bool:
+    """删除目录（阻塞调用，由调用方放进线程池）；返回是否确实删掉了。"""
+    import shutil
+
+    if not path.is_dir():
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
 
 
 def _attachment_ids(content: Any) -> set[str]:
@@ -693,10 +793,170 @@ async def collect_session_checkpoints(session_ids: list[int]) -> set[str]:
     return found
 
 
+async def _session_workspaces(db: AsyncSession, session_ids) -> dict[int, str]:
+    """会话 → 工作区绝对路径（口径同 rollback_service.resolve_turn_workspace）。
+
+    plan-20261020-archive-plan-doc：登记在 `turns.plan_doc_path` 里的是**相对工作区**路径，
+    要按该会话自己的工作区解析——git 工作树优先（`sessions.worktree_path`），没有则回退
+    项目路径（`projects.path`）。解析不出工作区的会话不进入结果，其计划文档一律不删。
+    """
+    from app.persistence.models.project import Project
+
+    ids = sorted({int(x) for x in session_ids})
+    if not ids:
+        return {}
+    raw: dict[int, tuple[str | None, int | None]] = {}
+    project_ids: set[int] = set()
+    for chunk in _chunks(ids):
+        rows = await db.execute(
+            select(Session.id, Session.worktree_path, Session.project_id)
+            .where(Session.id.in_(chunk))
+        )
+        for sid, worktree_path, project_id in rows.all():
+            pid = int(project_id) if project_id else None
+            raw[int(sid)] = (worktree_path, pid)
+            if pid is not None:
+                project_ids.add(pid)
+    project_paths: dict[int, str] = {}
+    for chunk in _chunks(sorted(project_ids)):
+        rows = await db.execute(select(Project.id, Project.path).where(Project.id.in_(chunk)))
+        for pid, path in rows.all():
+            project_paths[int(pid)] = str(path or "")
+    out: dict[int, str] = {}
+    for sid, (worktree_path, pid) in raw.items():
+        workspace = worktree_path or (project_paths.get(pid) if pid is not None else None) or ""
+        if workspace:
+            out[sid] = workspace
+    return out
+
+
+def _plan_doc_target(workspace: str, raw: str) -> Path | None:
+    """把登记的方案文档路径解析成绝对路径，并做「ai/ 目录 + chatcoder-plan*.md」白名单校验。
+
+    plan-20261020-archive-plan-doc：整个删除链上**唯一**的路径校验点，口径与
+    `engine._stamp_plan_doc` 一致——解析后必须落在该工作区内、直接位于 `ai/` 目录、
+    文件名以 `chatcoder-plan` 开头、后缀 `.md`。越界 / 解析失败 / 不符合命名约定
+    一律返回 None，调用方跳过，绝不抛异常影响删除结果。
+    """
+    if not workspace or not raw:
+        return None
+    try:
+        root = Path(workspace).resolve()
+        candidate = Path(raw)
+        target = (candidate if candidate.is_absolute() else root / raw).resolve()
+    except (OSError, ValueError):
+        return None
+    if root not in target.parents:
+        return None
+    if target.parent.name != "ai":
+        return None
+    if not target.name.startswith("chatcoder-plan"):
+        return None
+    if target.suffix.lower() != ".md":
+        return None
+    return target
+
+
+async def collect_session_plan_docs(session_ids: list[int]) -> list[dict]:
+    """这些会话产生的计划文档候选（`[{"session_id", "workspace", "path"}]`）。
+
+    plan-20261020-archive-plan-doc：永久删除会话此前只删库行，`{workspace}/ai/chatcoder-plan-*.md`
+    永久残留（用户点名要清理的文件之一）。**必须在删除写事务之前调用**：`turns` 行与
+    `rollback_writes` 写盘记录随后都会被删掉，提交后再查就再也拿不到这些路径。
+
+    来源两条：
+      1. `turns.plan_doc_path`——计划轮登记的实际文档路径；
+      2. `rollback_writes.path`——兜底模型自己改名的情形（工程上文档仍由本会话写出，
+         但计划轮可能没来得及登记路径）。
+    两者都只做「解析 + 白名单」校验，不访问磁盘、不判断文件是否存在——那是删除阶段的事，
+    这样收集阶段保持纯读且不受磁盘状态影响。
+    """
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.rollback import RollbackWrite
+    from app.services.checkpoint_gc import _path_key
+
+    ids = sorted({int(x) for x in session_ids})
+    if not ids:
+        return []
+    async with async_session_factory() as db:
+        workspaces = await _session_workspaces(db, ids)
+        rels: dict[int, set[str]] = {}
+        for chunk in _chunks(ids):
+            rows = await db.execute(
+                select(Turn.session_id, Turn.plan_doc_path).where(
+                    Turn.session_id.in_(chunk), Turn.plan_doc_path.is_not(None)
+                )
+            )
+            for sid, rel in rows.all():
+                if rel:
+                    rels.setdefault(int(sid), set()).add(str(rel))
+            # 只捞名字里带 chatcoder-plan 的写盘记录：其它写盘路径与计划文档无关，
+            # 不筛的话大工作区一次会拉出几万行。
+            rows = await db.execute(
+                select(RollbackWrite.session_id, RollbackWrite.path).where(
+                    RollbackWrite.session_id.in_(chunk),
+                    RollbackWrite.path.like("%chatcoder-plan%"),
+                )
+            )
+            for sid, rel in rows.all():
+                if rel:
+                    rels.setdefault(int(sid), set()).add(str(rel))
+
+    found: dict[str, dict] = {}
+    for sid, items in rels.items():
+        workspace = workspaces.get(sid) or ""
+        for rel in sorted(items):
+            target = _plan_doc_target(workspace, rel)
+            if target is None:
+                continue
+            # 同一份文档可能被多个会话登记（模型沿用了历史文件名），只留一条候选
+            found.setdefault(_path_key(target), {
+                "session_id": sid, "workspace": workspace, "path": str(target),
+            })
+    return list(found.values())
+
+
 def _in_checkpoint_dir(path) -> bool:
     """路径是否位于工作区的 .chatcoder/checkpoints 目录内（只动应用自己生成的文件）。"""
     parts = [p.lower() for p in path.parts]
     return any(parts[i] == ".chatcoder" and parts[i + 1] == "checkpoints" for i in range(len(parts) - 1))
+
+
+def _checkpoint_root(path) -> Path | None:
+    """路径所属的 `.chatcoder/checkpoints` 目录（不在该目录下返回 None）。
+
+    plan-20261020-archive-plan-doc：删除空目录要逐级确认「没有越过 checkpoints 根」，
+    根目录本身绝不能被 rmdir（工作区里这个目录是要长期存在的）。
+    """
+    parts = list(path.parts)
+    for i in range(len(parts) - 1):
+        if parts[i].lower() == ".chatcoder" and parts[i + 1].lower() == "checkpoints":
+            return Path(*parts[:i + 2])
+    return None
+
+
+def _prune_empty_dirs(start_dir, root, levels: int = 2) -> int:
+    """从 start_dir 起向上删除空目录（最多 levels 级，止于 root）；返回删除的目录数。
+
+    用 `rmdir` 天然实现「非空目录不动」——目录里还有别的快照时它会抛 OSError，直接停手。
+    `root` 自己（checkpoints 目录）不删，最多删到它的直接子目录。
+    """
+    cur = Path(start_dir)
+    removed = 0
+    for _ in range(max(0, int(levels))):
+        try:
+            rel = cur.relative_to(root)
+        except ValueError:
+            break
+        if not rel.parts:  # 已到 checkpoints 根，到此为止
+            break
+        try:
+            cur.rmdir()
+        except OSError:
+            break  # 目录非空或无权删除：保留，不影响已完成的文件清理
+        removed += 1
+        cur = cur.parent
+    return removed
 
 
 async def remove_orphan_uploads(file_ids: set[str]) -> int:
@@ -704,43 +964,76 @@ async def remove_orphan_uploads(file_ids: set[str]) -> int:
 
     **必须在删除写事务提交之后调用**：事务内不做磁盘 IO，且「是否还有引用」
     要按删完之后的库判断（分支会话复制过去的消息仍引用时保留该目录）。
+
+    性能：原实现对每个 file_id 各做一次 `LIKE '%fid%'` 全表扫（messages 十万行级时，
+    几百个附件就是几百次全表扫，是批量删除慢的主因）。现在先按 _UPLOAD_REF_CHUNK 用
+    一条 OR 查询判整批「是否还有任何引用」——删除后绝大多数批次零命中，一次扫描过一批；
+    只有命中批次才逐条复核，引用检查的口径与原先完全相同。
     """
     if not file_ids:
         return 0
-    import shutil
     from pathlib import Path
 
     from sqlalchemy import String, cast
+    from sqlalchemy import or_ as _or
 
     from app.core.config import settings
     from app.persistence.database import async_session_factory
 
     root = Path(settings.uploads_dir).resolve()
-    removed = 0
+    keep: set[str] = set()
+    fids = sorted(file_ids)
     async with async_session_factory() as db:
-        for fid in sorted(file_ids):
-            still_used = (
-                await db.execute(
-                    select(Message.id).where(cast(Message.content, String).like(f"%{fid}%")).limit(1)
-                )
-            ).first()
-            if still_used is not None:
-                continue
-            target = (root / fid).resolve()
-            try:
-                target.relative_to(root)  # 防越界：file_id 只允许指向 uploads 下的直接子目录
-            except ValueError:
-                continue
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
-                removed += 0 if target.exists() else 1
-    return removed
+        for start in range(0, len(fids), _UPLOAD_REF_CHUNK):
+            chunk = fids[start:start + _UPLOAD_REF_CHUNK]
+            probe = _or(*[cast(Message.content, String).like(f"%{fid}%") for fid in chunk])
+            if (await db.execute(select(Message.id).where(probe).limit(1))).first() is None:
+                continue  # 整批都无引用：省掉逐条查询
+            for fid in chunk:
+                still_used = (
+                    await db.execute(
+                        select(Message.id).where(
+                            cast(Message.content, String).like(f"%{fid}%")
+                        ).limit(1)
+                    )
+                ).first()
+                if still_used is not None:
+                    keep.add(fid)
+
+    targets = []
+    for fid in fids:
+        if fid in keep:
+            continue
+        target = (root / fid).resolve()
+        try:
+            target.relative_to(root)  # 防越界：file_id 只允许指向 uploads 下的直接子目录
+        except ValueError:
+            continue
+        targets.append(target)
+    if not targets:
+        return 0
+
+    sem = asyncio.Semaphore(_IO_CONCURRENCY)
+
+    async def _one(target) -> bool:
+        async with sem:
+            return await asyncio.to_thread(_rmtree_dir, target)
+
+    results = await asyncio.gather(*(_one(t) for t in targets), return_exceptions=True)
+    return sum(1 for r in results if r is True)
 
 
 async def remove_orphan_checkpoints(paths: set[str]) -> int:
     """删除已无任何快照引用的备份文件；只动 .chatcoder/checkpoints 目录内的文件。
 
     **必须在删除写事务提交之后调用**（引用集合要按删完之后的库计算）。
+    引用集一次查全；`resolve` / `is_file` / `unlink` 是阻塞文件 IO，按 _IO_CONCURRENCY 并发执行。
+
+    plan-20261020-archive-plan-doc：删完文件后把随之为空的父目录一并收口
+    （`session-{sid}/{turn_id}/` 与 `session-{sid}/`，最多向上两级，止于 checkpoints 根）。
+    旧实现只 unlink 文件，几百个会话删完会在工作区里留下一整片空目录树。
+    非空目录 `rmdir` 会失败，直接停手——目录里还有别的快照时绝不触碰。
+    返回值口径不变（仍只算删掉的备份文件数），空目录收口属于清理副作用。
     """
     if not paths:
         return 0
@@ -751,26 +1044,134 @@ async def remove_orphan_checkpoints(paths: set[str]) -> int:
 
     async with async_session_factory() as db:
         refs = await _referenced_ckpts(db)
-    removed = 0
-    for raw in sorted(paths):
+
+    def _delete_one(raw: str) -> bool:
         try:
             target = Path(raw).resolve()
         except (OSError, ValueError):
-            continue
+            return False
         if _path_key(target) in refs or not _in_checkpoint_dir(target) or not target.is_file():
-            continue
+            return False
         try:
             target.unlink()
-            removed += 1
         except OSError:
             logger.debug("[session] 删除备份文件失败 %s", target, exc_info=True)
-    return removed
+            return False
+        root = _checkpoint_root(target)
+        if root is not None:
+            try:
+                _prune_empty_dirs(target.parent, root, levels=_CHECKPOINT_PRUNE_LEVELS)
+            except Exception:  # noqa: BLE001 — 收口空目录失败不影响文件已删的事实
+                logger.debug("[session] 收口备份空目录失败 %s", target, exc_info=True)
+        return True
+
+    sem = asyncio.Semaphore(_IO_CONCURRENCY)
+
+    async def _one(raw: str) -> bool:
+        async with sem:
+            return await asyncio.to_thread(_delete_one, raw)
+
+    results = await asyncio.gather(*(_one(raw) for raw in sorted(paths)), return_exceptions=True)
+    return sum(1 for r in results if r is True)
 
 
-async def _remove_session_assets(attachments: set[str], checkpoints: set[str]) -> int:
-    """删除写事务提交后清理附件目录与孤儿备份文件，返回删除的文件/目录数。
+async def remove_orphan_plan_docs(candidates: list[dict]) -> int:
+    """删除已无任何 turn 引用的计划文档，返回删掉的文件数。
 
-    两段各自 try：附件清理抛错不该连带跳过备份清理。失败只记日志——
+    plan-20261020-archive-plan-doc：**必须在删除写事务提交之后调用**——引用检查要按
+    删完之后的库判断：分支会话会继承 `turn_written`，其 `turns.plan_doc_path` 可能仍指向
+    同一份文档，这时必须保留（否则分支会话的计划卡与「执行」入口会指向不存在的文件）。
+
+    两道校验缺一不可：
+      1. 引用检查：把候选路径换算成工作区相对路径，再按「其它 turn 是否也登记了它」复核。
+         相对路径换算是必要的——`turns.plan_doc_path` 存的是相对路径，直接比绝对值永远不等。
+      2. 二次白名单：候选在收集阶段已校验过，这里按落盘值重新校验一次（候选可能来自
+         调用方传入的外部数据），不满足就跳过，绝不删工作区外的文件。
+    单条失败只跳过该条，不抛异常影响删除结果。
+    """
+    if not candidates:
+        return 0
+    from app.persistence.database import async_session_factory
+    from app.persistence.models.rollback import RollbackWrite
+    from app.services.rollback_service import write_path_key
+
+    # 先按工作区规整出「待检候选」：绝对路径 + 该路径的工作区相对写法（用于比对登记值）
+    wanted: list[dict] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        workspace = str(item.get("workspace") or "")
+        raw = str(item.get("path") or "")
+        target = _plan_doc_target(workspace, raw)
+        if target is None:
+            continue
+        try:
+            rel = write_path_key(str(target.relative_to(Path(workspace).resolve())))
+        except (OSError, ValueError):
+            continue
+        wanted.append({"target": target, "workspace": workspace, "rel": rel})
+    if not wanted:
+        return 0
+
+    # 引用检查：还有其它 turn 登记同一份文档（相对路径比对，两种斜杠写法都算）就保留。
+    # 一次查全部登记值，按批 IN——比逐条 LIKE 全表扫可靠，且不误命中前缀相同的别的文件名。
+    still_used: set[str] = set()
+    rels = sorted({w["rel"] for w in wanted})
+    async with async_session_factory() as db:
+        for chunk in _chunks(rels):
+            variants: set[str] = set()
+            for rel in chunk:
+                variants.add(rel)
+                variants.add(rel.replace("/", "\\"))
+            rows = await db.execute(
+                select(Turn.plan_doc_path).where(Turn.plan_doc_path.in_(sorted(variants)))
+            )
+            for rel in rows.scalars().all():
+                if rel:
+                    still_used.add(write_path_key(str(rel)))
+        # 写盘记录同样可以兜底：模型自改名后路径只写在 rollback_writes 里，
+        # 若该记录仍存在（分支会话继承了 turn_written）则说明还有会话引用它。
+        if still_used != set(rels):
+            for chunk in _chunks(rels):
+                variants = set()
+                for rel in chunk:
+                    variants.add(rel)
+                    variants.add(rel.replace("/", "\\"))
+                rows = await db.execute(
+                    select(RollbackWrite.path).where(RollbackWrite.path.in_(sorted(variants)))
+                )
+                for rel in rows.scalars().all():
+                    if rel:
+                        still_used.add(write_path_key(str(rel)))
+
+    def _delete_one(item: dict) -> bool:
+        target: Path = item["target"]
+        if write_path_key(item["rel"]) in still_used:
+            return False
+        if not target.is_file():
+            return False
+        try:
+            target.unlink()
+            return True
+        except OSError:
+            logger.debug("[session] 删除计划文档失败 %s", target, exc_info=True)
+            return False
+
+    sem = asyncio.Semaphore(_IO_CONCURRENCY)
+
+    async def _one(item: dict) -> bool:
+        async with sem:
+            return await asyncio.to_thread(_delete_one, item)
+
+    results = await asyncio.gather(*(_one(item) for item in wanted), return_exceptions=True)
+    return sum(1 for r in results if r is True)
+
+
+async def _remove_session_assets(attachments: set[str], checkpoints: set[str],
+                                 plan_docs: list[dict] | None = None) -> int:
+    """删除写事务提交后清理附件目录、孤儿备份文件与计划文档，返回删除的文件/目录数。
+
+    三段各自 try：任何一段抛错都不该连带跳过其余清理。失败只记日志——
     库里的行已经删掉，磁盘残留属于可事后清理的问题，不能反过来报删除失败。
     """
     removed = 0
@@ -782,6 +1183,11 @@ async def _remove_session_assets(attachments: set[str], checkpoints: set[str]) -
         removed += await remove_orphan_checkpoints(checkpoints)
     except Exception:  # noqa: BLE001
         logger.warning("[session] 清理回滚备份文件失败（不影响删除结果）", exc_info=True)
+    if plan_docs:
+        try:
+            removed += await remove_orphan_plan_docs(plan_docs)
+        except Exception:  # noqa: BLE001
+            logger.warning("[session] 清理计划文档失败（不影响删除结果）", exc_info=True)
     return removed
 
 
@@ -796,13 +1202,17 @@ async def fork_session(db: AsyncSession, session_id: int, title: str | None = No
         lambda s: copy_snapshot(s, session_id, title, request_id), label="session.fork")
 
 
-async def create_system_message(db: AsyncSession, *, session_id: int, content: dict) -> int:
+async def create_system_message(db: AsyncSession, *, session_id: int, content: dict,
+                                turn_id: int | None = None) -> int:
     """v2.2 (对齐 zcode 3.11): 写一条系统消息（模型切换 divider 等，写引擎单写线程）。
 
     plan-41-229: 旧实现只落库不广播，前端要等到下一次消息刷新（发送消息时触发）
     才把它拉进消息列表——用户反馈「切换模型后必须再发一条消息才提示切换了模型」。
     改走 message_service.create_message：同一条写引擎路径，落库后广播 message.created，
     切换模型当场即出提示；广播失败仍只影响实时性，不影响落库。
+
+    turn_id: 归属轮次。模型切换提示必须落在「新发送的用户消息之后、AI 执行之前」，
+    仅靠 id 序无法保证（无 turn_id 的消息会被时间线并入上一个 turn），故显式归属。
     """
     from app.core.enums import MsgType, SenderType
     from app.services.message_service import create_message
@@ -811,6 +1221,7 @@ async def create_system_message(db: AsyncSession, *, session_id: int, content: d
         db, session_id=session_id,
         sender_type=SenderType.SYSTEM.value, sender_id=None,
         msg_type=MsgType.SYSTEM.value, content=content,
+        turn_id=turn_id,
     )
     return int(msg.id or 0)
 

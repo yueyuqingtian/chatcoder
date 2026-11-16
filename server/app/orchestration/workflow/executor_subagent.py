@@ -181,6 +181,7 @@ def _to_result(handle: Any, agent_id: int) -> NodeResult:
             status="interrupted",
             error=error,
             transient=_is_transient_failure_text(error),
+            retry_handled=getattr(handle, "retry_handled", False),
             agent_id=agent_id,
         )
     error = handle.error or "子代理执行失败"
@@ -188,6 +189,7 @@ def _to_result(handle: Any, agent_id: int) -> NodeResult:
         status="failed",
         error=error,
         transient=_is_transient_failure_text(error),
+        retry_handled=getattr(handle, "retry_handled", False),
         agent_id=agent_id,
     )
 

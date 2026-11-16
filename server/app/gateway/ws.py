@@ -225,17 +225,22 @@ async def ws_global_endpoint(ws: WebSocket) -> None:
     会话级通道只给聚焦会话派发事件，后台会话结束后侧栏无从得知，
     运行标记只能靠整表刷新修正。本通道转发白名单内的状态类事件
     （session.completed / session.updated / turn.* / message.created），
-    payload 统一注入 session_id；不接收任何业务指令，仅维持心跳。
+    payload 统一注入 session_id；除浏览器宿主协议（plan-20261015-browser-agent）
+    与微应用宿主桥上行（plan-693-2868）外不接收任何业务指令，仅维持心跳。
     """
     await ws.accept()
     manager.connect_global(ws)
+    from app.orchestration import microapp_host
     from app.orchestration.browser.bridge import bridge as browser_bridge
+    # plan-693-2868（docs/app1/11-host-bridge-protocol.md §7）：微应用宿主桥的上行也走全局通道。
+    # 下面这句粗过滤是**字符串**判断，必须同时放行 microapp. 前缀——漏改这里会表现为
+    # 「页面请求发出去了，但后端永远收不到」：消息被 continue 静默丢掉，没有任何日志可查。
     try:
         while True:
             raw = await ws.receive_text()
             # plan-20261015-browser-agent：桌面端经全局通道登记为内置浏览器宿主并回传执行结果
             # （全局通道常驻，后台会话里的 AI 也能用浏览器）；其余消息仍只是心跳。
-            if "browser." not in raw:
+            if "browser." not in raw and "microapp." not in raw:
                 continue
             try:
                 data = json.loads(raw)
@@ -249,6 +254,11 @@ async def ws_global_endpoint(ws: WebSocket) -> None:
                 await browser_bridge.register(ws, payload)
             elif event == "browser.host.bye":
                 browser_bridge.unregister(ws)
+            elif event == microapp_host.EVENT_REQUEST:
+                # 页面发起的宿主操作：不阻塞接收循环（exec.start 要起进程、fs.read 要读盘），
+                # 回执与流式推送都写回**发起请求的这条连接**（按 reqId 配对，契约 §4 / §5）。
+                microapp_host.spawn_request(payload, lambda ev, _ws=ws: manager.send(_ws, ev))
+
     except WebSocketDisconnect:
         manager.disconnect_global(ws)
         browser_bridge.unregister(ws)

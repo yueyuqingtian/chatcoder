@@ -18,10 +18,24 @@
 //   ② 面板网页的下载一律保存到「浏览器下载目录」（设置可改，默认安装目录下的 downloads，不存在自动创建），
 //      不再弹系统保存框（常被主窗口挡住，用户与 AI 都不知道文件去哪了）；进度与结果作为页面事件回报给 AI。
 //
+// plan-693-2868 P0-4：微应用方法调用（op = microappCall）
+//   微应用界面是右侧面板里另一个 <webview>（partition = persist:microapp），没有「浏览器标签」概念，
+//   因此这条 op 不走 panelGuest(wcId)，而是按 appId + version 在 persist:microapp 分区里找它的 guest，
+//   在 guest 里执行 window.__MICROAPP_METHODS__[method](args) 并把返回值 JSON 化后带回。
+//   之所以放在这个模块：它和浏览器面板共用同一条「渲染层 → 主进程」的 IPC 与同一套 guest 校验口径，
+//   另起一条通道只会多一处「谁有权限操作 guest」的分叉。
+//
 // 只接受「宿主是主窗口」的 webview guest，任何其它 webContents 一律拒绝。
-const { app, ipcMain, webContents, clipboard, nativeImage, shell } = require("electron");
+//
+// plan-693-2868 · docs/app1/11-host-bridge-protocol.md（宿主桥 v2）：
+//   微应用页面里的 window.microapp.invoke 走「页面 preload →（sendToHost）主进程 → 渲染层 → 后端」
+//   三跳。本模块负责中间那一跳：记录 uid → guest 映射（§6 的实例寻址）、把上行请求转给渲染层、
+//   把下行事件（含 stream.log 的 100 ms / 200 行聚批，§5）按 uid 投递给正确的 guest。
+//   渲染层只需要认识三个 IPC 频道（见下方 MICROAPP_REQ/REPLY/PUSH），别的都是主进程内部的事。
+const { app, ipcMain, webContents, session, clipboard, nativeImage, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const NET_MAX = 400;
 // 动作结果里回报的接口：只看页面脚本发起的请求（图片、样式等资源的失败不算业务报错）
@@ -43,15 +57,73 @@ function clampInt(v, lo, hi, dflt) {
 
 // AI 动作窗口：最后一次动作之后多久恢复主窗口节流
 const AGENT_IDLE_MS = 20000;
+
+// 微应用 webview 的独立分区（与 main.cjs 的 MICROAPP_PARTITION 同值，见 main.cjs 的 app:// 协议注册处）。
+// 不过滤这一条会连浏览器面板的 webview 一起扫进来——它们同样挂在主窗口上、同样是 webview。
+const MICROAPP_PARTITION = "persist:microapp";
+
+// ── 宿主桥 v2 的频道与常量（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6）──
+// 渲染层只认下面三个频道；多一个都要同步改前端与协议文档，所以名字集中在这里。
+const MICROAPP_REQ_CHANNEL = "microapp:hostRequest"; // 主进程 → 渲染层：上行请求
+const MICROAPP_REPLY_CHANNEL = "microapp:hostReply"; // 渲染层 → 主进程：上行结果
+const MICROAPP_PUSH_CHANNEL = "microapp:hostPush";   // 渲染层/后端 → 主进程：下行推送
+// 以下两条只在「主进程 ↔ guest preload」之间走，渲染层不参与（与协议 §4/§5 报文一一对应）。
+// 名字必须与 electron/microapp-preload.cjs 里的常量一致。
+const MICROAPP_INVOKE_CHANNEL = "microapp:invoke";       // guest preload → 主进程（sendToHost）
+const MICROAPP_GUEST_REPLY_CHANNEL = "microapp:reply";   // 主进程 → guest preload（回包）
+const MICROAPP_GUEST_EVENT_CHANNEL = "microapp:event";   // 主进程 → guest preload（下行事件）
+// 上行请求在宿主的等待上限：与 preload 的 30 s 对齐。超时只负责回收 pending 并给页面一条明确失败，
+// 不中断已经发到后端的工作。
+const MICROAPP_HOST_TIMEOUT_MS = 30000;
+// 下行 stream.log 的聚批（协议 §5）：100 ms 或 200 行，先到者发。
+const MICROAPP_BATCH_MS = 100;
+const MICROAPP_BATCH_LINES = 200;
+// op 名形状（exec.start / fs.read / workspace.info）：只做格式校验，具体 op 由渲染层与后端决定。
+// 页面是无审核来源，这条是挡「乱传字段 / 超长字符串」的粗筛，不是权限控制（协议 §2：能力完全放开）。
+const MICROAPP_OP_RE = /^[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*$/;
+// 宿主桥 op 的参数错误前缀。只在本进程内的调用方（渲染层 / AI 工具）看到，
+// 不进 MICROAPP_ERR：那套前缀与 server/app/orchestration/tools/microapp.py 的 _BRIDGE_ERROR_HINTS
+// 一一对应，新增前缀需要两边同步上线，这里刻意不扩。
+const MICROAPP_PUSH_ERR = "microapp-host-push-invalid";
+// 单次方法调用的等待上限：一次往返正常 < 20 ms，余量全部留给方法自己的计算（画布渲染 / 大表格排序）。
+// 超时只放弃等待，**不中断**页面里已经开始的方法，所以超时后界面状态未知，文案要求调用方先核对再重试。
+const MICROAPP_CALL_TIMEOUT_MS = 15000;
+// 方法名 / appId / version 的合法性在这里再挡一次：它们会被拼进 executeJavaScript 的源码，
+// 字符串拼接一旦失控就是注入面。前端（服务端工具）已按同样口径校验过，这里是最后一道。
+const MICROAPP_ID_RE = /^[a-z0-9][a-z0-9._-]{1,62}$/;
+const MICROAPP_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const MICROAPP_METHOD_RE = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+// 失败原因前缀：服务端（server/app/orchestration/tools/microapp.py 的 _BRIDGE_ERROR_HINTS）按前缀
+// 给出可执行的 hint，改名字必须两边一起改，否则错误会退化成「未归类失败」。
+// 传成「错误串 + 冒号 + 细节」，冒号后的细节会原样进模型看到的 error。
+const MICROAPP_ERR = {
+  GUEST_MISSING: "microapp-guest-missing",
+  GUEST_LOADING: "microapp-guest-loading",
+  BRIDGE_MISSING: "microapp-bridge-missing",
+  METHOD_MISSING: "microapp-method-missing",
+  METHOD_INVALID: "microapp-method-invalid",
+  NOT_SERIALIZABLE: "microapp-not-serializable",
+  THREW: "microapp-threw",
+  TIMEOUT: "microapp-timeout",
+};
+/** uid 白名单：渲染层的标签 uid 形如 "microapp#3"（client/src/store/panel.ts 的 nextUid）。
+ *  它会被当作 Map 的 key 上级地址，只放行这些字符并限长；不合法就当没给（空串）。 */
+const MICROAPP_UID_RE = /^[A-Za-z0-9._:#-]{1,80}$/;
+function sanitizeUid(v) {
+  const s = String(v === undefined || v === null ? "" : v).trim();
+  return MICROAPP_UID_RE.test(s) ? s : "";
+}
+
 // 不算「AI 在操作网页」的原语：设置页读写下载目录、剪贴板、纯等待、读下载记录
 const PASSIVE_OPS = new Set(["downloadDir", "downloads", "clipboard", "sleep"]);
 const DOWNLOAD_PREF_FILE = () => path.join(app.getPath("userData"), "browser-download-pref.json");
 const DOWNLOADS_MAX = 50;
 
-/** 默认下载目录：安装目录（exe 所在目录）下的 downloads；开发态没有安装目录，用用户数据目录。 */
+/** 默认下载目录：用户目录下（plan-693-2868 D23）。
+ *  此前打包态落在安装目录，升级时随 $INSTDIR 一起被删；与宠物同一处缺陷，同一轮修掉。
+ */
 function defaultDownloadDir() {
-  if (app.isPackaged) return path.join(path.dirname(app.getPath("exe")), "downloads");
-  return path.join(app.getPath("userData"), "downloads");
+  return path.join(os.homedir(), ".chatcoder", "downloads");
 }
 
 function writableDir(dir) {
@@ -211,6 +283,612 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     const host = wc.hostWebContents;
     if (!host || host.id !== mw.webContents.id) return null;
     return wc;
+  }
+
+  // ══ 宿主桥 v2（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6）══
+  //
+  // 三跳链路（渲染层只参与中间一跳，且只认三个频道）：
+  //   上行：页面 window.microapp.invoke → preload(sendToHost "microapp:invoke") → 本模块
+  //         →("microapp:hostRequest") 渲染层 → 后端 →("microapp:hostReply") 本模块
+  //         → guest("microapp:reply") → preload 按 reqId resolve
+  //   下行：渲染层/后端 →("microapp:hostPush") 本模块 → guest("microapp:event") → 页面 on()
+  //
+  // 为什么寻址要靠 uid：同 appId 可以开多个标签（协议 §6），只按 appId+version 取第一个会在
+  // 多标签时把请求/输出打到别的界面上去。uid 由渲染层写进 webview src 的 query，页面 preload 读到后
+  // 随每个上行请求带上；attach 时也从 URL 解析一次，用于「页面还没调过 invoke 就收到下行推送」的场景。
+
+  /** uid → { wc, uid, appId, version, src, lastActiveAt } */
+  const microappGuests = new Map();
+  /** wc.id → 同一份实例记录（老客户端没带 uid / 只给 wcId 时兜底） */
+  const microappByWc = new Map();
+  /** `${uid}|${reqId}` → { rec, uid, reqId, timer, startedAt }，等渲染层回包的上行请求 */
+  const hostPending = new Map();
+  /** `${wc.id}|${streamId}` → 已发出的最大 seq（协议 §5：同一 streamId 内单调递增） */
+  const streamSeq = new Map();
+  /** `${wc.id}|${streamId}|${stream}` → { lines, timer, … }，等聚批的 stream.log */
+  const microappBatches = new Map();
+  /** 已挂过 did-attach-webview 的主窗口 webContents.id（幂等用） */
+  let hookedMainWcId = 0;
+  /** 已挂过 did-attach-webview 的宿主 webContents.id（主窗口 + 微应用独立窗口，幂等用） */
+  const hookedHostWcIds = new Set();
+  /** 微应用**独立窗口**的渲染层 webContents.id（main.cjs 建窗时登记）。
+   *
+   *  为什么需要这份名单：微应用界面除了挂在主窗口的右侧面板里，还可以在独立窗口里打开
+   *  （拓展页 / 右侧面板「在新窗口打开」）。这些窗口里的 webview 同样是微应用 guest，
+   *  但 `hostWebContents` 指向的是那个独立窗口而不是主窗口——下面的扫描/定位若只认主窗口，
+   *  AI 的 microapp_call / microappProbe 就会报「界面没打开」。
+   *  注意：上行请求仍然回**主窗口**渲染层（`microappHost` 单例在那边持有 uid → sessionId 绑定），
+   *  所以这里只放宽「guest 的宿主是谁」的判定，不改转发目标。 */
+  const microappHostWcIds = new Set();
+
+  /** 与 main.cjs 的 will-attach-webview 判定**必须逐字一致**：只认 app://microapp/ 前缀，区分大小写。 */
+  function isMicroappSrc(src) {
+    return String(src || "").startsWith("app://microapp/");
+  }
+
+  /** 从 app://microapp/<appId>/<version>/<path...>?uid=… 里取身份；取不到就给空串（不猜）。 */
+  function parseMicroappSrc(src) {
+    const out = { appId: "", version: "", uid: "" };
+    let u;
+    try { u = new URL(String(src || "")); } catch { return out; }
+    const seg = String(u.pathname || "").split("/").filter(Boolean);
+    if (seg.length >= 1 && MICROAPP_ID_RE.test(seg[0])) out.appId = seg[0];
+    if (seg.length >= 2 && MICROAPP_VERSION_RE.test(seg[1])) out.version = seg[1];
+    try { out.uid = sanitizeUid(u.searchParams.get("uid")); } catch { out.uid = ""; }
+    // 客户端 uid 形如 "microapp#3"：渲染层若忘了 encodeURIComponent，"#" 会变成 fragment 起点，
+    // uid 被截断成 "microapp"，同一 appId 的多个标签在宿主侧就撞成一个。把裸的 "#数字" 补回去
+    // （与 electron/microapp-preload.cjs 的 readInstance 同一条规则）。
+    const hash = String(u.hash || "");
+    if (out.uid && out.uid.indexOf("#") === -1 && /^#\d{1,6}$/.test(hash)) out.uid = sanitizeUid(out.uid + hash);
+    return out;
+  }
+
+  /** 把 uid 绑到某条实例记录上（uid 可能来自 URL，也可能来自页面自己的上行请求）。 */
+  function bindMicroappUid(rec, uid) {
+    const u = sanitizeUid(uid);
+    if (!rec || !u) return;
+    if (rec.uid && rec.uid !== u && microappGuests.get(rec.uid) === rec) microappGuests.delete(rec.uid);
+    rec.uid = u;
+    microappGuests.set(u, rec);
+  }
+
+  /** 向 guest 页面投递一条 IPC（webContents.send 是异步投递，不等页面渲染完成）。 */
+  function sendToGuest(rec, channel, payload) {
+    const wc = rec && rec.wc;
+    if (!wc || wc.isDestroyed()) return false;
+    try { wc.send(channel, payload); return true; }
+    catch (err) {
+      logErr("[microapp-host] 向微应用投递失败(" + channel + "):", (err && err.message) || err);
+      return false;
+    }
+  }
+
+  /** 记录一条微应用 guest（幂等）。非 app://microapp/ 的 guest 一律不碰——浏览器面板不经过这里。 */
+  function registerMicroappGuest(guestWc, params) {
+    if (!guestWc || guestWc.isDestroyed()) return null;
+    const src = String((params && params.src) || "");
+    const prev = microappByWc.get(guestWc.id);
+    if (prev) {
+      // 重复登记（例如补挂）：只更新身份，不重复挂监听，否则一次上行会被转发两遍
+      const again = parseMicroappSrc(src || prev.src || "");
+      if (again.appId) prev.appId = again.appId;
+      if (again.version) prev.version = again.version;
+      if (again.uid) bindMicroappUid(prev, again.uid);
+      if (src) prev.src = src;
+      return prev;
+    }
+    if (!isMicroappSrc(src)) return null;
+
+    const meta = parseMicroappSrc(src);
+    const rec = { wc: guestWc, uid: "", appId: meta.appId, version: meta.version, src, lastActiveAt: Date.now() };
+    microappByWc.set(guestWc.id, rec);
+    bindMicroappUid(rec, meta.uid);
+
+    // 上行第一跳：preload 的 ipcRenderer.sendToHost 会落到 guest 的 ipc-message
+    guestWc.on("ipc-message", (_event, channel, ...args) => {
+      if (channel !== MICROAPP_INVOKE_CHANNEL) return;
+      rec.lastActiveAt = Date.now();
+      onMicroappGuestInvoke(rec, args.length ? args[0] : null);
+    });
+    // 身份跟着 URL 走：webview 内部导航后重解析，避免 uid 绑到错的实例上
+    guestWc.on("did-navigate", (_event, url) => {
+      rec.lastActiveAt = Date.now();
+      if (!isMicroappSrc(url)) return;
+      const again = parseMicroappSrc(url);
+      rec.src = String(url);
+      if (again.appId) rec.appId = again.appId;
+      if (again.version) rec.version = again.version;
+      if (again.uid) bindMicroappUid(rec, again.uid);
+    });
+    // 微应用只允许在 app://microapp/ 内导航：条件注入 preload 之后，若页面把自己导航到 http(s)，
+    // 那个 preload 会跟着 webview 留在新文档里（webPreferences 属于 webview，不随导航重置）。
+    // 这里直接掐断。只作用于微应用 guest——浏览器面板的 webview 根本进不了这条分支。
+    guestWc.on("will-navigate", (event, url) => {
+      if (isMicroappSrc(url)) return;
+      try { event.preventDefault(); } catch { /* 事件对象不可用时忽略 */ }
+      logErr("[microapp-host] 拒绝微应用导航到非 app://microapp/ 地址:", String(url || "").slice(0, 200));
+    });
+    guestWc.once("destroyed", () => forgetMicroappGuest(rec));
+    return rec;
+  }
+
+  /** attach 时 src 还是 about:blank（React 先建元素后设 src）：只对 persist:microapp 分区的 guest
+   *  留一个「导航后补登记」。浏览器面板的 guest 落在默认分区，连监听都不会挂上。 */
+  function deferTrackMicroappGuest(guestWc) {
+    if (!guestWc || guestWc.isDestroyed()) return;
+    let samePartition = false;
+    try { samePartition = guestWc.session === session.fromPartition(MICROAPP_PARTITION); } catch { samePartition = false; }
+    if (!samePartition) return;
+    const onNavigate = () => {
+      const url = String(guestWc.getURL() || "");
+      if (!isMicroappSrc(url)) return;
+      guestWc.removeListener("did-navigate", onNavigate);
+      registerMicroappGuest(guestWc, { src: url });
+    };
+    guestWc.on("did-navigate", onNavigate);
+    guestWc.once("destroyed", () => guestWc.removeListener("did-navigate", onNavigate));
+  }
+
+  /** guest 被关掉：清 uid 绑定、它名下的等待请求、聚批残留与 seq 计数（防 webContents.id 复用时串台）。 */
+  function forgetMicroappGuest(rec) {
+    if (!rec) return;
+    if (rec.wc && microappByWc.get(rec.wc.id) === rec) microappByWc.delete(rec.wc.id);
+    if (rec.uid && microappGuests.get(rec.uid) === rec) microappGuests.delete(rec.uid);
+    for (const [key, entry] of Array.from(hostPending)) {
+      if (entry.rec !== rec) continue;
+      if (entry.timer) clearTimeout(entry.timer);
+      hostPending.delete(key);
+    }
+    for (const [key, b] of Array.from(microappBatches)) {
+      if (b.rec !== rec) continue;
+      if (b.timer) clearTimeout(b.timer);
+      microappBatches.delete(key);
+    }
+    if (rec.wc) {
+      const prefix = rec.wc.id + "|";
+      for (const key of Array.from(streamSeq.keys())) if (key.startsWith(prefix)) streamSeq.delete(key);
+    }
+  }
+
+  /**
+   * 在一个宿主 webContents 上挂 did-attach-webview，记录 uid → guest（协议 §6 / §9-1）。
+   * 幂等（按 webContents.id 去重）；宿主窗口重建后由 main.cjs 在建窗时重新调用。
+   * 只注册监听，不改变 webview 的任何行为——preload 注入在 main.cjs 的 will-attach-webview 里。
+   */
+  function hookHostWc(wc) {
+    if (!wc || wc.isDestroyed()) return false;
+    if (hookedHostWcIds.has(wc.id)) return true;
+    hookedHostWcIds.add(wc.id);
+    wc.on("did-attach-webview", (_event, guestWc, params) => {
+      try {
+        const rec = registerMicroappGuest(guestWc, params);
+        if (!rec) deferTrackMicroappGuest(guestWc);
+      } catch (err) {
+        logErr("[microapp-host] 记录微应用 guest 失败:", (err && err.message) || err);
+      }
+    });
+    wc.once("destroyed", () => {
+      hookedHostWcIds.delete(wc.id);
+      // 独立窗口关掉后把登记也摘掉，避免 webContents.id 复用后把新窗口误判成微应用宿主
+      microappHostWcIds.delete(wc.id);
+      if (hookedMainWcId === wc.id) hookedMainWcId = 0;
+      flushAllMicroappBatches(); // 宿主没了，聚批里的日志没有收件人
+    });
+    return true;
+  }
+
+  /** 主窗口：除挂监听外还记下它的 id（`scanMicroappByUid` 等仍以它为「默认宿主」）。 */
+  function hookMainWindow(wc) {
+    if (!wc || wc.isDestroyed()) return false;
+    if (hookedMainWcId === wc.id) return true;
+    hookedMainWcId = wc.id;
+    return hookHostWc(wc);
+  }
+
+  /** 微应用**独立窗口**：登记为宿主（它的 webview 也算微应用 guest），并挂 did-attach-webview。 */
+  function hookMicroappHostWindow(wc) {
+    if (!wc || wc.isDestroyed()) return false;
+    microappHostWcIds.add(wc.id);
+    return hookHostWc(wc);
+  }
+
+  /** 这个 webContents 是不是「可以承载微应用 guest 的宿主」（主窗口或独立微应用窗口）。 */
+  function isMicroappHostWc(wc) {
+    if (!wc || wc.isDestroyed()) return false;
+    const mw = getMainWindow();
+    if (mw && !mw.isDestroyed() && wc.id === mw.webContents.id) return true;
+    return microappHostWcIds.has(wc.id);
+  }
+
+  /** 主窗口已存在就把钩子补上（正常路径是 main.cjs 建窗后显式调用 hookMainWindow）。 */
+  function ensureMainHooked() {
+    const mw = getMainWindow();
+    if (!mw || mw.isDestroyed()) return false;
+    return hookMainWindow(mw.webContents);
+  }
+
+  /** map 未命中时按 URL 扫一遍（hook 挂晚 / 主窗口重建后仍能定位到实例）。 */
+  function scanMicroappByUid(uid) {
+    const mw = getMainWindow();
+    if (!mw || mw.isDestroyed()) return null;
+    let microSession;
+    try { microSession = session.fromPartition(MICROAPP_PARTITION); } catch { return null; }
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || wc.getType() !== "webview") continue;
+      // 宿主可以是主窗口，也可以是微应用独立窗口（见 hookMicroappHostWindow）
+      if (!isMicroappHostWc(wc.hostWebContents)) continue;
+      if (wc.session !== microSession) continue;
+      const url = String(wc.getURL() || "");
+      if (!isMicroappSrc(url)) continue;
+      if (parseMicroappSrc(url).uid !== uid) continue;
+      return microappByWc.get(wc.id) || registerMicroappGuest(wc, { src: url });
+    }
+    return null;
+  }
+
+  /** 按 uid（优先）或 wcId 找实例记录；找不到返回 null。 */
+  function findMicroappInstance(uid, wcId) {
+    const wantUid = sanitizeUid(uid);
+    let rec = wantUid ? microappGuests.get(wantUid) : null;
+    if (rec && (!rec.wc || rec.wc.isDestroyed())) { forgetMicroappGuest(rec); rec = null; }
+    if (!rec && wcId) {
+      const byWc = microappByWc.get(Number(wcId));
+      if (byWc && byWc.wc && !byWc.wc.isDestroyed()) rec = byWc;
+    }
+    if (!rec && wantUid) rec = scanMicroappByUid(wantUid);
+    return rec || null;
+  }
+
+  /** 上行第二跳：把 guest 的请求转给渲染层（协议 §4）。 */
+  function onMicroappGuestInvoke(rec, msg) {
+    const wc = rec && rec.wc;
+    if (!wc || wc.isDestroyed()) return;
+    const m = msg && typeof msg === "object" ? msg : {};
+    const reqId = String(m.reqId || "");
+    const op = String(m.op || "");
+    const args = m.args && typeof m.args === "object" ? m.args : {};
+
+    // 页面自带的身份最可信（协议 §6：发起方自己带 uid），空则回落到 attach 时从 URL 解析的
+    if (m.uid) bindMicroappUid(rec, m.uid);
+    if (m.appId && !rec.appId && MICROAPP_ID_RE.test(String(m.appId))) rec.appId = String(m.appId);
+    if (m.version && !rec.version && MICROAPP_VERSION_RE.test(String(m.version))) rec.version = String(m.version);
+
+    const fail = (reason, message) => sendToGuest(rec, MICROAPP_GUEST_REPLY_CHANNEL, { kind: "reply", reqId, ok: false, reason, message });
+
+    // 只接受当前 URL 仍在 app://microapp/ 的页面：防「微应用把自己导航到 http 后残留的 preload」越权
+    if (!isMicroappSrc(wc.getURL())) { fail("origin-rejected", "宿主只接受 app://microapp/ 页面发起的请求"); return; }
+    if (!reqId || reqId.length > 128) { fail("req-invalid", "reqId 缺失或过长"); return; }
+    if (!MICROAPP_OP_RE.test(op)) { fail("op-invalid", "op 必须是形如 exec.start 的操作名（收到：" + op.slice(0, 40) + "）"); return; }
+
+    const mw = getMainWindow();
+    if (!mw || mw.isDestroyed()) { fail("host-unavailable", "宿主窗口不可用"); return; }
+
+    const key = rec.uid + "|" + reqId;
+    if (hostPending.has(key)) { fail("duplicate-request", "同一个 reqId 已经有一个请求在等宿主回包"); return; }
+
+    const entry = { rec, uid: rec.uid, reqId, startedAt: Date.now(), timer: null };
+    // 30 s 兜底：preload 自己在 30 s 也会 reject；这里同时回收 pending，
+    // 并给页面一条明确的失败（而不是让它等到自己超时，排查时看不出是宿主没回）
+    entry.timer = setTimeout(() => {
+      hostPending.delete(key);
+      sendToGuest(rec, MICROAPP_GUEST_REPLY_CHANNEL, { kind: "reply", reqId, ok: false, reason: "host-timeout", message: "宿主 30 秒内没有返回结果" });
+    }, MICROAPP_HOST_TIMEOUT_MS);
+    hostPending.set(key, entry);
+
+    try {
+      mw.webContents.send(MICROAPP_REQ_CHANNEL, {
+        uid: rec.uid,
+        appId: rec.appId,
+        version: rec.version,
+        wcId: wc.id,
+        reqId,
+        op,
+        args,
+      });
+    } catch (err) {
+      clearTimeout(entry.timer);
+      hostPending.delete(key);
+      fail("host-unavailable", "请求转发到渲染层失败：" + ((err && err.message) || err));
+    }
+  }
+
+  /** 上行第三跳：渲染层把结果交回主进程，原样回给发起方页面（协议 §4）。 */
+  function microappHostReply(payload, senderWc) {
+    const mw = getMainWindow();
+    if (!mw || mw.isDestroyed()) return { ok: false, error: "主窗口不可用" };
+    // 只认主窗口渲染层：微应用 guest 发不出这条（它没有 ipcRenderer，宿主也不是它）
+    if (senderWc && senderWc.id !== mw.webContents.id) return { ok: false, error: "只有主窗口渲染层可以回包" };
+    const p = payload && typeof payload === "object" ? payload : {};
+    const reqId = String(p.reqId || "");
+    if (!reqId) return { ok: false, error: "缺少 reqId" };
+
+    const uid = sanitizeUid(p.uid);
+    let key = uid ? uid + "|" + reqId : "";
+    let entry = key ? hostPending.get(key) : null;
+    if (!entry) {
+      // 渲染层没带 uid（或带错了）：按 reqId 唯一匹配。preload 的 reqId 含自增+随机后缀，
+      // 跨实例撞车概率可忽略；真撞了也会先在 onMicroappGuestInvoke 里被 duplicate-request 挡住。
+      for (const [k, v] of hostPending) {
+        if (k.slice(k.lastIndexOf("|") + 1) === reqId) { key = k; entry = v; break; }
+      }
+    }
+    if (!entry) return { ok: false, error: "没有等待回包的请求（可能已超时，或 uid+reqId 不匹配）" };
+
+    hostPending.delete(key);
+    if (entry.timer) clearTimeout(entry.timer);
+    const body = p.ok
+      ? { kind: "reply", reqId: entry.reqId, ok: true, result: p.result === undefined ? null : p.result }
+      : { kind: "reply", reqId: entry.reqId, ok: false, reason: String(p.reason || "failed"), message: String(p.message || "") };
+    const delivered = sendToGuest(entry.rec, MICROAPP_GUEST_REPLY_CHANNEL, body);
+    return {
+      ok: true,
+      delivered,
+      uid: entry.uid,
+      appId: entry.rec ? entry.rec.appId : "",
+      version: entry.rec ? entry.rec.version : "",
+    };
+  }
+
+  function microappBatchKey(rec, streamId, stream) {
+    return rec.wc.id + "|" + streamId + "|" + stream;
+  }
+
+  function ensureMicroappBatch(rec, streamId, stream) {
+    const key = microappBatchKey(rec, streamId, stream);
+    let b = microappBatches.get(key);
+    if (!b) { b = { key, rec, streamId, stream, lines: [], timer: null }; microappBatches.set(key, b); }
+    return b;
+  }
+
+  /** 协议 §5：100 ms 或 200 行（先到者）聚成一批。seq 由主进程按批重编号，保证同 streamId 单调递增。 */
+  function enqueueMicroappLogBatch(rec, payload) {
+    const streamId = String(payload.streamId || "");
+    const stream = String(payload.stream || "stdout");
+    const incoming = Array.isArray(payload.lines)
+      ? payload.lines
+      : (payload.line === undefined || payload.line === null ? [] : [payload.line]);
+    let flushed = 0;
+    for (const line of incoming) {
+      const b0 = ensureMicroappBatch(rec, streamId, stream);
+      b0.lines.push(String(line));
+      if (b0.lines.length >= MICROAPP_BATCH_LINES) { flushMicroappBatch(b0.key); flushed++; }
+    }
+    const b = ensureMicroappBatch(rec, streamId, stream);
+    if (!b.lines.length) {
+      microappBatches.delete(b.key); // 刚好在 200 行整触发：不要留下空批次占内存
+      return { ok: true, batched: true, flushed, uid: rec.uid, appId: rec.appId, version: rec.version, buffered: 0 };
+    }
+    if (!b.timer) b.timer = setTimeout(() => flushMicroappBatch(b.key), MICROAPP_BATCH_MS);
+    rec.lastActiveAt = Date.now();
+    return { ok: true, batched: true, flushed, uid: rec.uid, appId: rec.appId, version: rec.version, buffered: b.lines.length };
+  }
+
+  function flushMicroappBatch(key) {
+    const b = microappBatches.get(key);
+    if (!b) return;
+    microappBatches.delete(key);
+    if (b.timer) { clearTimeout(b.timer); b.timer = null; }
+    const rec = b.rec;
+    if (!rec || !rec.wc || rec.wc.isDestroyed() || !b.lines.length) return;
+    const seqKey = rec.wc.id + "|" + b.streamId;
+    const seq = (streamSeq.get(seqKey) || 0) + 1;
+    streamSeq.set(seqKey, seq);
+    sendToGuest(rec, MICROAPP_GUEST_EVENT_CHANNEL, {
+      kind: "stream", event: "stream.log", streamId: b.streamId, seq, stream: b.stream, lines: b.lines, uid: rec.uid,
+    });
+  }
+
+  function flushAllMicroappBatches() {
+    for (const key of Array.from(microappBatches.keys())) flushMicroappBatch(key);
+  }
+
+  /** 下行入口：渲染层/后端 → 主进程 → 目标 guest（协议 §5）。
+   *  投递后立即返回（webContents.send 是异步的，不等页面渲染）；stream.log 走聚批。 */
+  function microappHostPush(a) {
+    const args = a && typeof a === "object" ? a : {};
+    const uid = sanitizeUid(args.uid);
+    const wcId = Number(args.wcId || args.wc_id || 0);
+    const event = String(args.event || "");
+    const payload = args.payload && typeof args.payload === "object" ? args.payload : {};
+
+    if (!event) throw new Error(MICROAPP_PUSH_ERR + ": 缺少 event（如 stream.log / stream.state）");
+    if (!uid && !wcId) throw new Error(MICROAPP_PUSH_ERR + ": 需要 uid（优先）或 wcId 才能定位微应用实例");
+
+    const rec = findMicroappInstance(uid, wcId);
+    if (!rec) {
+      throw new Error(MICROAPP_ERR.GUEST_MISSING + ": 没有找到" + (uid ? " uid=" + uid : " wcId=" + wcId) + " 的微应用界面");
+    }
+    if (!isMicroappSrc(rec.wc.getURL())) {
+      throw new Error(MICROAPP_ERR.GUEST_LOADING + ": 目标界面当前不在 app://microapp/ 内，不能下发");
+    }
+
+    if (event === "stream.log") return enqueueMicroappLogBatch(rec, payload);
+
+    // 非日志事件（stream.state / 自定义事件）立即下发
+    const delivered = sendToGuest(rec, MICROAPP_GUEST_EVENT_CHANNEL, Object.assign({ kind: "stream" }, payload, { event, uid: rec.uid }));
+    return { ok: true, delivered, batched: false, uid: rec.uid, appId: rec.appId, version: rec.version };
+  }
+
+  /** 诊断用：当前记录到的微应用实例（uid / appId / version / wcId），排查「打到别的标签」时先看它。 */
+  function microappInstances() {
+    return Array.from(microappByWc.values()).map((r) => ({
+      wcId: r.wc ? r.wc.id : 0,
+      uid: r.uid,
+      appId: r.appId,
+      version: r.version,
+      url: r.wc && !r.wc.isDestroyed() ? String(r.wc.getURL() || "") : "",
+    }));
+  }
+
+  /** 找微应用的 guest webview（plan-693-2868 P0-4；v2 起支持 uid 精确寻址，见协议 §6）。
+   *
+   *  判定顺序：
+   *    ① 给了 uid：直接查 uid → guest 映射（map 未命中时按 URL 扫一遍兜底），命中即返回；
+   *    ② 没给 uid：按 appId(+version) 在 persist:microapp 分区里扫，多个命中时取**最近活跃**的
+   *       那个（lastActiveAt = 最近一次上行请求 / 导航），并回报命中数与 uid，便于排查串台；
+   *    ③ 扫描口径不变：类型 webview + 宿主是主窗口 + session 同一性比较 + URL 在 app://microapp/ 内。
+   *
+   *  getURL() 在首次 did-finish-load 之前可能是 "" 或 about:blank：那说明界面已经挂上但还没加载完，
+   *  单独回报「还没加载完」，而不是笼统说「界面没打开」（后者会让模型以为用户没点开面板）。
+   *
+   *  返回值统一带 uid（空串 = 这台 guest 还没上报过身份），调用方把它带进结果里。
+   */
+  function microappGuest(appId, version, uid) {
+    const mw = getMainWindow();
+    if (!mw || mw.isDestroyed()) {
+      return { error: MICROAPP_ERR.GUEST_MISSING, detail: "主窗口不可用，微应用界面无从操作" };
+    }
+    const wantUid = sanitizeUid(uid);
+    if (wantUid) {
+      const rec = findMicroappInstance(wantUid, 0);
+      if (!rec) {
+        return { error: MICROAPP_ERR.GUEST_MISSING, detail: "没有找到 uid=" + wantUid + " 的微应用界面（标签可能已关闭或还没加载）" };
+      }
+      if (appId && rec.appId && rec.appId !== appId) {
+        return { error: MICROAPP_ERR.GUEST_MISSING, detail: "uid=" + wantUid + " 对应的界面是 " + rec.appId + "，不是 " + appId };
+      }
+      return { wc: rec.wc, uid: rec.uid, appId: rec.appId || appId, version: rec.version || version, matches: 1 };
+    }
+
+    let target;
+    try {
+      target = session.fromPartition(MICROAPP_PARTITION);
+    } catch (err) {
+      return { error: MICROAPP_ERR.GUEST_MISSING, detail: "微应用分区不可用：" + ((err && err.message) || err) };
+    }
+    // appId / version 已由调用方按正则校验；这里再拼前缀，尾随斜杠保证 demo 不会误中 demo-app
+    const prefix = version
+      ? "app://microapp/" + appId + "/" + version + "/"
+      : "app://microapp/" + appId + "/";
+    let sawLoading = false;
+    const hits = [];
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || wc.getType() !== "webview") continue;
+      // 宿主可以是主窗口，也可以是微应用独立窗口（见 hookMicroappHostWindow）
+      if (!isMicroappHostWc(wc.hostWebContents)) continue;
+      if (wc.session !== target) continue;
+      const url = String(wc.getURL() || "");
+      if (!url.startsWith(prefix)) {
+        if (!url || url === "about:blank") sawLoading = true;
+        continue;
+      }
+      const rec = microappByWc.get(wc.id) || registerMicroappGuest(wc, { src: url });
+      hits.push({
+        wc,
+        uid: rec ? rec.uid : "",
+        appId: (rec && rec.appId) || appId,
+        version: (rec && rec.version) || version,
+        at: (rec && rec.lastActiveAt) || 0,
+      });
+    }
+    if (hits.length) {
+      // 多实例：取最近活跃的那个；都没有活动记录时保持「第一个」（与历史行为一致）
+      hits.sort((x, y) => y.at - x.at);
+      const best = hits[0];
+      return { wc: best.wc, uid: best.uid, appId: best.appId, version: best.version, matches: hits.length };
+    }
+    if (sawLoading) {
+      return {
+        error: MICROAPP_ERR.GUEST_LOADING,
+        detail: "微应用 " + appId + " 的界面已挂上但还没加载完（webview 仍是空白页）",
+      };
+    }
+    return {
+      error: MICROAPP_ERR.GUEST_MISSING,
+      detail: "没有找到 " + appId + (version ? " v" + version : "") + " 的界面（右侧面板里没打开这个微应用）",
+    };
+  }
+
+  /** 就绪探针（本轮回归修复）：只回报「界面挂上了、桥也注册了」，**不调用任何方法**（无副作用）。
+   *
+   *  为什么需要：界面刚挂上时 webview 还在加载，盲重试 microappCall 等于在不确定就绪的情况下
+   *  反复执行方法；有探针就能「先问就绪、就绪后再调一次」。
+   *  返回 { appId, version, ready: true, uid }；不满足时抛与 microappCall 同一套前缀的错误
+   *  （guest-missing / guest-loading / bridge-missing），宿主按前缀决定继续等还是立刻失败。
+   *  （uid 是 v2 新增：同 appId 多标签时靠它确认「探的是哪一个界面」，见协议 §6）
+   */
+  async function microappProbe(a) {
+    const appId = String(a.appId || "");
+    const version = String(a.version || "");
+    if (!MICROAPP_ID_RE.test(appId)) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": appId 非法（" + appId.slice(0, 40) + "）");
+    if (version && !MICROAPP_VERSION_RE.test(version)) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": version 非法（" + version.slice(0, 40) + "）");
+
+    const found = microappGuest(appId, version, a.uid);
+    if (found.error) throw new Error(found.error + ": " + found.detail);
+
+    // 桥由 app.js 在顶层注册：页面还没执行到这里时取到 undefined，即「还没就绪」而不是「写错了」
+    let bridged;
+    try {
+      bridged = await withTimeout(
+        found.wc.executeJavaScript(
+          "!!(window.__MICROAPP_METHODS__ && typeof window.__MICROAPP_METHODS__ === 'object')", false,
+        ),
+        2000,
+        MICROAPP_ERR.GUEST_LOADING + ": 微应用界面 2 秒内没有响应探针（可能仍在加载）",
+      );
+    } catch (err) {
+      if (found.wc.isDestroyed()) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": 微应用界面在探针期间被关闭");
+      throw err instanceof Error ? err : new Error((err && err.message) || String(err));
+    }
+    if (!bridged) throw new Error(MICROAPP_ERR.BRIDGE_MISSING + ": 界面已加载，但 window.__MICROAPP_METHODS__ 还没注册");
+    return { appId, version, ready: true, uid: found.uid || "" };
+  }
+
+  /** 调用微应用界面里的方法（plan-693-2868 P0-4）。
+   *
+   *  耗时：一次调用 = 一次 executeJavaScript 往返（正常 < 20 ms）+ 方法自身的耗时，上限
+   *  MICROAPP_CALL_TIMEOUT_MS（15 s）。executeJavaScript 会 await 方法返回的 Promise，
+   *  因此异步方法也能拿到真实结果；超时只是不再等，页面里的方法仍会跑完（界面状态未知）。
+   *
+   *  安全：方法名按严格的正则白名单取值，参数用 JSON.stringify 嵌入源码——不做字符串拼接，
+   *  避免参数里的引号 / 换行把脚本改写成别的代码。
+   */
+  async function microappCall(a) {
+    const appId = String(a.appId || "");
+    const version = String(a.version || "");
+    const method = String(a.method || "");
+    if (!MICROAPP_ID_RE.test(appId)) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": appId 非法（" + appId.slice(0, 40) + "）");
+    if (version && !MICROAPP_VERSION_RE.test(version)) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": version 非法（" + version.slice(0, 40) + "）");
+    if (!MICROAPP_METHOD_RE.test(method)) throw new Error(MICROAPP_ERR.METHOD_INVALID + ": 方法名不是合法的 JavaScript 标识符（" + method.slice(0, 40) + "）");
+
+    // a.uid 可选：给了就精确命中那一个标签实例（协议 §6），没给仍按 appId(+version) 扫
+    const found = microappGuest(appId, version, a.uid);
+    if (found.error) throw new Error(found.error + ": " + found.detail);
+
+    const callArgs = a.args && typeof a.args === "object" ? a.args : {};
+    // 页面侧只做「取方法 → 调用 → JSON 化结果」三件事，任何异常都在页面里收成结构化 code，
+    // 不让 Promise reject 穿到 executeJavaScript（那样只能拿到一句英文 Script failed to execute）。
+    // 注意：下面 code 是**字符串字面量**而不是 MICROAPP_ERR 常量——这段源码在页面上下文里执行，
+    // 引用不到主进程变量；改前缀要同步改这里的字面量与 Python 的 _BRIDGE_ERROR_HINTS。
+    const expr = "(async () => {"
+      + " const m = window.__MICROAPP_METHODS__;"
+      + " if (!m || typeof m !== 'object') return { code: 'microapp-bridge-missing' };"
+      + " const fn = m[" + JSON.stringify(method) + "];"
+      + " if (typeof fn !== 'function') return { code: 'microapp-method-missing' };"
+      + " let v;"
+      + " try { v = await fn(" + JSON.stringify(callArgs) + "); }"
+      + " catch (e) { return { code: 'microapp-threw', detail: String((e && e.message) || e) }; }"
+      + " try { return { ok: true, value: JSON.parse(JSON.stringify(v === undefined ? null : v)) }; }"
+      + " catch (e) { return { code: 'microapp-not-serializable', detail: String((e && e.message) || e) }; }"
+      + "})()";
+    let r;
+    try {
+      r = await withTimeout(
+        found.wc.executeJavaScript(expr, false),
+        MICROAPP_CALL_TIMEOUT_MS,
+        MICROAPP_ERR.TIMEOUT + ": 微应用方法 " + method + " 在 " + (MICROAPP_CALL_TIMEOUT_MS / 1000) + " 秒内没有返回",
+      );
+    } catch (err) {
+      const msg = (err && err.message) || String(err);
+      // 界面刚好在调用途中被关闭 / 重载：按「界面没打开」回报，比抛一句 guest 崩溃更容易恢复
+      if (found.wc.isDestroyed()) throw new Error(MICROAPP_ERR.GUEST_MISSING + ": 微应用界面在调用过程中被关闭");
+      throw err instanceof Error ? err : new Error(msg);
+    }
+    if (!r || typeof r !== "object") {
+      throw new Error(MICROAPP_ERR.THREW + ": 微应用页面返回了无法识别的结果（界面可能正在重载）");
+    }
+    if (r.ok) return { appId, version, method, result: r.value === undefined ? null : r.value, uid: found.uid || "" };
+    throw new Error(String(r.code || MICROAPP_ERR.THREW) + (r.detail ? ": " + r.detail : ""));
   }
 
   function cdp(st, method, params) {
@@ -596,6 +1274,14 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     }
     if (op === "downloadDir") return downloadDirOp(a);
     if (op === "downloads") return listDownloads(a);
+    // plan-693-2868 P0-4：微应用方法调用没有 wcId（界面不由浏览器面板的标签承载），
+    // 必须在 panelGuest(wcId) 之前分支，否则会被判成「目标网页已关闭」；
+    // microappProbe 是它的只读前置探针（判断界面与桥是否已经就绪），同样不走 panelGuest。
+    if (op === "microappProbe") return microappProbe(a);
+    if (op === "microappCall") return microappCall(a);
+    // plan-693-2868 · docs/app1/11-host-bridge-protocol.md §5：下行推送（渲染层/后端 → guest）。
+    // 与上面两条一样不带 wcId，必须在 panelGuest(wcId) 之前分支；按 uid 精确定位实例。
+    if (op === "microappHostPush") return microappHostPush(a);
     const wc = panelGuest(wcId);
     if (!wc) throw new Error("目标网页已关闭或不属于浏览器面板");
     const st = guests.get(wc.id) || (prepare(wc.id).ok ? guests.get(wc.id) : null);
@@ -698,4 +1384,34 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
   });
+
+  // ── 宿主桥的三条渲染层频道（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6）──
+  // 渲染层只认这三个名字；上行结果走 hostReply（ipcMain.on，不回值），下行推送走 hostPush（handle）。
+  ipcMain.handle(MICROAPP_PUSH_CHANNEL, (_event, payload) => {
+    try { return { ok: true, result: microappHostPush(payload || {}) }; }
+    catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+  });
+  ipcMain.on(MICROAPP_REPLY_CHANNEL, (event, payload) => {
+    try {
+      const r = microappHostReply(payload || {}, event && event.sender);
+      if (!r.ok) logErr("[microapp-host] hostReply 未投递:", r.error);
+    } catch (err) {
+      logErr("[microapp-host] hostReply 处理异常:", (err && err.message) || err);
+    }
+  });
+
+  // 主窗口已存在就立刻挂 did-attach-webview（正常路径是 main.cjs 建窗后调用 hookMainWindow；
+  // 这里兜住「main.cjs 尚未改到 / 窗口在模块加载前就已建好」的顺序差异）
+  ensureMainHooked();
+
+  return {
+    /** 由 main.cjs 在建窗后调用：挂 did-attach-webview，记录 uid → guest（协议 §6） */
+    hookMainWindow,
+    /** 由 main.cjs 在创建微应用独立窗口后调用：把它登记为宿主，里面的 webview 也算微应用 guest */
+    hookMicroappHostWindow,
+    /** 下行推送（与 op = microappHostPush 同一实现），供主进程内部/测试直接调用 */
+    microappHostPush,
+    /** 诊断：当前记录到的微应用实例列表 */
+    microappInstances,
+  };
 };

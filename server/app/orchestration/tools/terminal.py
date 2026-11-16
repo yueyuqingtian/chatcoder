@@ -149,6 +149,20 @@ async def detach_to_background(
 class TerminalExecTool(Tool):
     name = "terminal_exec"
     risk_level = "high"
+
+    def __init__(self, *, stdin_pipe: bool = False) -> None:
+        """`stdin_pipe=True` 时给子进程保留 stdin 管道（plan-693-2868 协议 v3 `exec.stdin`）。
+
+        默认 `False` 保持既有行为：**不传 stdin**，子进程继承服务进程的 stdin 且
+        `proc.stdin is None`。这个默认值不能改——AI 的后台命令（`terminal_exec`
+        `waitForCompletion=false`）一旦改成 PIPE，等待输入的命令会从「立刻读到 EOF 自行退出」
+        变成「永久挂起占着后台任务栏」，是明确的回归。
+
+        只有宿主桥（`microapp_host._op_exec_start`）起页面请求的进程时传 `True`：
+        页面要能用 `exec.stdin` 往进程里写数据，必须拿得到写端句柄。
+        """
+        self.stdin_pipe = stdin_pipe
+
     description = (
         "在工作区目录内执行 shell 命令(默认超时 120s,可用 timeout 参数延长)。\n"
         "当前 shell 见系统提示的「Shell 环境」——Windows 上通常是 PowerShell 或 cmd.exe，不是 bash，\n"
@@ -294,12 +308,18 @@ class TerminalExecTool(Tool):
             not wait_for_completion, timeout_sec,
         )
         try:
+            # plan-693-2868 v3：只有宿主桥要求时才保留 stdin 管道；默认不传（键都不出现），
+            # 保证 terminal_exec（AI 后台命令）的行为一个字节都没变。
+            _stdin_kwargs: dict[str, Any] = {}
+            if self.stdin_pipe:
+                _stdin_kwargs["stdin"] = asyncio.subprocess.PIPE
             if kind in ("pwsh", "powershell"):
                 proc = await asyncio.create_subprocess_exec(
                     shell, "-NoProfile", "-NonInteractive", "-Command", command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=resolved_cwd,
+                    **_stdin_kwargs,
                 )
             elif kind == "git-bash":
                 proc = await asyncio.create_subprocess_exec(
@@ -307,6 +327,7 @@ class TerminalExecTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=resolved_cwd,
+                    **_stdin_kwargs,
                 )
             else:
                 proc = await asyncio.create_subprocess_shell(
@@ -314,6 +335,7 @@ class TerminalExecTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=resolved_cwd,
+                    **_stdin_kwargs,
                 )
         except OSError as e:
             # v36: 启动失败多因 shell 路径不存在或打包环境缺依赖，
@@ -464,6 +486,19 @@ class TerminalExecTool(Tool):
             data["outside_access"] = True
         # plan-20261020-pts：失败时识别常见的 shell 误用（PowerShell 里写 head / grep、Select-String -Recurse、
         # cmd 里写 PowerShell 命令、非 git 目录……），把正确写法直接附在错误后面
+        # plan-flow-redesign：搜索/对比类命令返回退出码 1 时按正常语义结果处理，不标红失败
+        from app.orchestration.tools.shell_hints import benign_exit_one_note
+
+        exit_note = benign_exit_one_note(command, rc, err, combined)
+        if exit_note:
+            data["exit_note"] = exit_note
+            default_out = "未找到匹配项（退出码 1）" if "无匹配" in exit_note else "检测到文件差异（退出码 1）"
+            return ToolResult(
+                ok=True,
+                output=combined or default_out,
+                data=data,
+                error="",
+            )
         hint = "" if rc == 0 else failure_hint(command, combined, kind)
         return ToolResult(
             ok=rc == 0,

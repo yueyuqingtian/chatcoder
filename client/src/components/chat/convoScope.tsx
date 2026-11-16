@@ -19,7 +19,7 @@ export function ConvoScopeProvider({ sessionId, children }: { sessionId: number;
 /** 作用域内需要覆盖的字段（与主仓库同名）。未列出的字段一律读主仓库。 */
 const SCOPED_KEYS = new Set<string>([
   "currentSessionId",
-  "messages", "turns", "streamingBuffers", "thinkingBuffers", "runningTurnId", "isRunning", "turnStatus",
+  "messages", "turns", "streamingBuffers", "thinkingBuffers", "runningTurnId", "isRunning", "runtimeHintTurnId", "turnStatus",
   "pendingApproval", "approvalQueue", "respondApproval",
   "flowError", "clearFlowError", "isCompacting", "subagentMeta", "pendingSubagents", "pendingPlan",
   "plansByTurn", "hiddenTurnErrors", "dismissTurnError", "debugState",
@@ -80,6 +80,8 @@ function sideField(c: SideConvo | undefined, sid: number, key: string): unknown 
     case "thinkingBuffers": return c?.thinkingBuffers ?? EMPTY_OBJ;
     case "runningTurnId": return c?.runningTurnId ?? null;
     case "isRunning": return c?.isRunning ?? false;
+    /* plan-723-3029：runtimeHintTurnId 只是主仓库「切会话缓存快照」的临时提示，侧边会话没有该语义，恒为 null */
+    case "runtimeHintTurnId": return null;
     case "turnStatus": return c?.turnStatus ?? null;
     case "pendingApproval": return c?.pendingApproval ?? null;
     case "approvalQueue": return c?.approvalQueue ?? EMPTY_ARR;

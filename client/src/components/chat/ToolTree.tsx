@@ -15,7 +15,7 @@ function parseGrepLines(output: string): Array<{ path: string; line: number; res
   }
   return out;
 }
-import { memo, useEffect, useMemo, useState } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useState } from "react";
 import { ViewportBlock } from "../ui/ViewportBlock";
 import { useRunningTicker } from "./useRunningTicker";
 import type { ToolLeaf, ToolNode } from "./timeline";
@@ -32,11 +32,27 @@ import { ChatCollapse } from "./ChatCollapse";
 import { SubsessionQuestionRow } from "./SubsessionQuestionRow";
 import { SUBSESSION_NOTICE_TOOLS, SUBAGENT_NOTICE_TOOLS } from "../../utils/subsessionQuestion";
 import { toolLabel } from "./toolLabels";
+import { MicroAppCallView } from "./toolcard/MicroAppCallView";
 import { ClampBlock } from "./ClampBlock";
 import { Tooltip } from "../ui/Tooltip";
 import {
-  IconSpinner, IconX, IconChevronRight, IconCheck, IconCopy, IconInfo,
+  IconX, IconChevronRight, IconCheck, IconCopy, IconInfo,
 } from "../icons";
+
+/** plan-20261116-flow-shine：工具行是否处于「本轮真在运行」态。
+ *
+ * 为什么需要：`leaf.ok === null` 只表示「没拿到 tool_result」，历史消息里同样会出现
+ * （消息分页窗口尚未补齐、旧数据缺结果），此前一律按运行中渲染——进入会话时整轮历史工具行
+ * 都带扫光（text-shine）与 1.2s 轮播。只有本轮确实在跑时才允许亮起运行态。
+ *
+ * 注意（plan-723-3029 R2）：本门控只覆盖「工具行」这一条路径，**不等于**进会话整屏扫光已根治。
+ * 其余几条上游同样会亮，属另外几个改动点，不要再把注释写成「整屏扫光已解决」：
+ *   · TurnGroup 的活动组把 `active` 硬编码为 true（「正在思考」扫光）；
+ *   · ProcessGroup 的本地 queue 预览在 active 翻假后多亮一帧；
+ *   · 缓存命中的快照把上次离开会话的 runningTurnId / isRunning 当视图真值恢复（共同根因）；
+ *   · 消息流底部「等待响应…」（StreamingTail）同样吃这个陈旧 isRunning。
+ * 本文件此处只做「live 由上游 roundActive 传入，缺省不亮」这一件事。 */
+const ToolLiveContext = createContext(false);
 
 /** plan-20261016-ux（问题 4）：命令类工具——完成后即使没有输出也可展开，展开区给出「没有输出」提示卡 */
 const COMMAND_TOOLS = new Set([...RUN_TOOLS, "git", "terminal_bg_status", "terminal_bg_kill", "bg_command_done", "bg_command_stopped"]);
@@ -116,6 +132,14 @@ function leafSummary(leaf: ToolLeaf): string {
     return qs[0]?.question?.split("\n")[0] || "向用户发起询问";
   }
   if (leaf.tool.startsWith("browser_")) return browserSummary(leaf);
+  // plan-693-2868（P1）：微应用调用——行内直接给「appId · method」，
+  // 用户扫一眼就知道 AI 动的是哪个应用的哪个方法（展开区见 MicroAppCallView）。
+  if (leaf.tool === "microapp_call") {
+    const a = (leaf.args ?? {}) as Record<string, unknown>;
+    const appId = typeof a.appId === "string" ? a.appId : typeof a.app_id === "string" ? a.app_id : "";
+    const method = typeof a.method === "string" ? a.method : "";
+    if (appId || method) return [appId, method].filter(Boolean).join(" · ");
+  }
   const cmd = leaf.args?.command ?? leaf.args?.cmd;
   if (typeof cmd === "string" && cmd) return cmd.split("\n")[0];
   const q = leaf.args?.query ?? leaf.args?.pattern ?? leaf.args?.url;
@@ -385,22 +409,12 @@ function InlineDiff({ turnId, path, callKey, fallbackLines, onStat }: {
   }, [turnId, path, callKey, fallbackLines]);
   if (state.kind === "loading") return <pre className="tc-plain">加载变更…</pre>;
   if (state.kind === "error") return <pre className="tc-plain">变更加载失败：{state.msg}</pre>;
-  const hasStat = state.additions > 0 || state.deletions > 0;
   return (
     <div className="tc-diff-wrap cv">
-      {/* plan-91-393：与读文件代码视图同一编辑器外观——文件头 + 符号槽 + 等宽内容 */}
-      {(hasStat || state.note || path) && (
+      {/* plan-flow-redesign：去掉与外层工具行重复的文件名和 +N -M 头部，仅在有特殊口径说明时保留一行提示 */}
+      {state.note && (
         <div className="tc-diff-head cv-head">
-          <FileIcon name={path} size={14} />
-          <Tooltip content={path} side="top"><span className="cv-name">{splitFilePath(path).name}</span></Tooltip>
-          {hasStat && (
-            <span className="tc-diff-stat">
-              {state.singleEdit ? "本次变更" : "该轮累计"}
-              <span className="tc-add">+{state.additions}</span>
-              <span className="tc-del">-{state.deletions}</span>
-            </span>
-          )}
-          {state.note && <Tooltip content={state.note} side="top"><span className="tc-diff-note">{state.note}</span></Tooltip>}
+          <Tooltip content={state.note} side="top"><span className="tc-diff-note">{state.note}</span></Tooltip>
         </div>
       )}
       {state.lines.length > 0 ? (
@@ -606,7 +620,10 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   // 展开状态按调用身份记忆：新消息使它被并入聚合行、或换段重挂载后，仍保持用户刚展开的样子
   const [expanded, setExpanded] = useFlowExpand(leaf.callKey);
   const path = leafPath(leaf);
-  const ok = leaf.ok;
+  const live = useContext(ToolLiveContext);
+  const ok = leaf.ok ?? liveResult?.ok ?? null;
+  /** 结果缺失（ok===null）只有在本轮真在运行时才算「执行中」，见 ToolLiveContext 说明 */
+  const running = ok === null && live;
   // plan-474-2105 组 C：先算打断标记——它必须比 ok===false 的失败态更早生效，
   // 否则「已让出等待」（ok=false）会被渲染成红色失败。
   const interruptTag: string | null = interruptTagOf(leaf);
@@ -632,29 +649,52 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   const isCommand = COMMAND_TOOLS.has(leaf.tool);
   // v7(B): 运行中（ok===null）恒可展开——即使 output 尚未落库，也能看实时输出
   // plan-20261016-ux（问题 4）：命令类工具完成后无输出也可展开，展开区显示「没有输出」提示卡
-  const expandable = hasOutput || isWrite || leaf.ok === null || isCommand;
-  const grepHits = leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : [];
+  // plan-693-2868（P1）：微应用调用即使无输出也要能展开——「查看界面」按钮在展开区里
+  const expandable = hasOutput || isWrite || running || isCommand || leaf.tool === "microapp_call";
+  const exitNote = leaf.exitNote ?? liveResult?.exit_note ?? null;
+  const grepHits = useMemo(
+    () => (leaf.tool === "fs_grep" && leaf.output ? parseGrepLines(leaf.output) : []),
+    [leaf.tool, leaf.output],
+  );
+  const grepGroups = useMemo(() => {
+    if (grepHits.length === 0) return [];
+    const map = new Map<string, Array<{ line: number; rest: string }>>();
+    for (const h of grepHits.slice(0, 30)) {
+      const list = map.get(h.path) ?? [];
+      list.push({ line: h.line, rest: h.rest });
+      map.set(h.path, list);
+    }
+    return Array.from(map.entries()).map(([filePath, hits]) => ({ path: filePath, hits }));
+  }, [grepHits]);
   const summary = path ? "" : leafSummary(leaf);
   const label = toolLabel(leaf.tool);
   // 补充说明：只在没有对象（文件 / 命令 / 查询词）时出现；连接器 / 未知工具的名称本身是信息，始终显示
   const noun = !path && label.noun && (label.alwaysNoun || !summary) ? label.noun : "";
-  const meta = leafMeta(leaf);
+  const grepSummaryMeta = grepHits.length > 0
+    ? `${grepGroups.length} 个文件 · ${grepHits.length} 处匹配`
+    : "";
+  const meta = exitNote || grepSummaryMeta || leafMeta(leaf);
   /** 命令类工具展开区的命令头：行内只放得下首行，完整命令在展开卡片顶部给出（可复制） */
   const cmdText = isCommand ? String(leaf.args?.command ?? leaf.args?.cmd ?? "").trim() : "";
-  const showsLive = leaf.ok === null && liveOutput != null && liveOutput.length > 0;
+  const showsLive = running && liveOutput != null && liveOutput.length > 0;
+  const isBenignEmptyOut = !!exitNote && (!leaf.output || leaf.output === "未找到匹配项（退出码 1）" || leaf.output === "检测到文件差异（退出码 1）");
   /** 展开区是否有任何实际内容；没有时渲染提示卡（此前只剩 .tc-output 上下边框贴成的一根细线） */
   const hasBody = showsLive || grepHits.length > 0 || leaf.tool.startsWith("db_") || leaf.tool === "ask_user_question"
-    || !!leaf.output || !!leaf.error || (isWrite && path == null && !!liveResult?.change_stat);
+    || leaf.tool === "microapp_call" || (!!leaf.output && !isBenignEmptyOut) || !!leaf.error || (isWrite && path == null && !!liveResult?.change_stat);
   // plan-474-2105 组 C：打断标记优先于失败文案，空态不能说成「执行失败」
-  const emptyText = interruptTag === "已转后台"
-    ? "命令已转后台继续运行，可用 terminal_bg_status 查看日志"
-    : interruptTag === "已让出等待"
-      ? "本次等待已让出，可按需重新调用该工具"
-      : leaf.ok === null
-        ? (isCommand ? "命令执行中，暂时还没有输出" : "正在执行，暂时还没有返回内容")
-        : leaf.ok === false
-          ? "执行失败，没有返回错误信息"
-          : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
+  const emptyText = exitNote
+    ? (exitNote.includes("无匹配")
+        ? "命令退出码为 1（未找到匹配项，已按正常空结果处理）"
+        : "命令退出码为 1（检测到差异，已按正常结果处理）")
+    : interruptTag === "已转后台"
+      ? "命令已转后台继续运行，可用 terminal_bg_status 查看日志"
+      : interruptTag === "已让出等待"
+        ? "本次等待已让出，可按需重新调用该工具"
+        : running
+          ? (isCommand ? "命令执行中，暂时还没有输出" : "正在执行，暂时还没有返回内容")
+          : ok === false
+            ? "执行失败，没有返回错误信息"
+            : (isCommand ? "命令已执行完成，没有输出" : "执行完成，没有返回内容");
 
   // plan-20261103-attachment-preview：相对工具路径以该调用的工作目录解析。
   const toolPath = (p: string) => {
@@ -691,38 +731,30 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
   return (
     <div className="tc-node">
       <div className={"tc-row" + (expandable ? " has-output" : "") + (expanded ? " expanded" : "") + (isWrite ? " tc-write" : "")}
-          data-tool-state={ok === null ? "running" : interruptTag ? "noted" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}>
+          data-tool-state={running ? "running" : interruptTag ? "noted" : ok === false ? "fail" : "done"} onClick={() => expandable && setExpanded(!expanded)}
+          role={expandable ? "button" : undefined} tabIndex={expandable ? 0 : undefined} aria-expanded={expandable ? expanded : undefined}
+          onKeyDown={(e) => { if (expandable && e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setExpanded(!expanded); } }}>
         <span className="tc-icon">{toolIcon(leaf.tool)}</span>
-        {/* plan-20261025-shell（需求 1）：两字动作词，运行中与完成态同一个词（运行态 = 流光 + 行尾转圈） */}
-        <span className={"tc-verb" + (ok === null ? " text-shine" : "")}>{label.verb}</span>
+        {/* plan-flow-redesign：运行态工具的动作词与核心对象统一启用文字流动效果 */}
+        <span className={"tc-verb" + (running ? " text-shine" : "")}>{label.verb}</span>
         {path && (
           <Tooltip content={`${path}（点击查看${isWrite ? "变更" : "文件或目录"}）`}>
             <span className="tc-filelink" onClick={(e) => void openFilePreview(e, path)}>
               <FileIcon name={path} size={16} />
-              <span className="tc-filename">{name}</span>
+              <span className={"tc-filename" + (running ? " text-shine" : "")}>{name}</span>
             </span>
           </Tooltip>
         )}
         {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
-        {noun && <span className="tc-tool-name">{noun}</span>}
-        {!path && summary && <Tooltip content={summary}><span className="tc-query">{summary}</span></Tooltip>}
-        {meta && <span className="tc-meta">{meta}</span>}
-        {/* v7(H): 写操作运行中 changeStat 未落库时回退到实时结果；
-            plan-89-387: 历史消息缺统计时，展开后按「本次变更」回填行数 */}
+        {noun && <span className={"tc-tool-name" + (running ? " text-shine" : "")}>{noun}</span>}
+        {!path && summary && <Tooltip content={summary}><span className={"tc-query" + (running ? " text-shine" : "")}>{summary}</span></Tooltip>}
+        {meta && <span className="tc-meta">· {meta}</span>}
         {(() => {
-          // plan-20261019-diff: 0/0 一律不展示（旧记录缺统计时继续向后找兜底），
-          // 避免出现「+0 -0」这种与实际展开内容矛盾的摘要。
           const stat = [leaf.changeStat, liveResult?.change_stat, loadedStat, fallbackStat]
             .find((s) => s && (s.additions > 0 || s.deletions > 0)) ?? null;
-          return stat
-            ? <ChangeStat additions={stat.additions} deletions={stat.deletions} />
-            : null;
+          return stat ? <ChangeStat additions={stat.additions} deletions={stat.deletions} /> : null;
         })()}
-        {/* plan-474-2105 组 C：行尾状态槽只有一个——运行中仍是 spinner；打断标记用中性徽标，
-            不再与红色失败图标叠加 */}
-        {ok === null ? (
-          <span className="tc-status wait"><IconSpinner size={11} /></span>
-        ) : interruptTag ? (
+        {interruptTag ? (
           <span className="tc-state-tag">{interruptTag}</span>
         ) : ok === false ? (
           <span className="tc-status fail"><IconX size={11} /></span>
@@ -734,7 +766,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
       {expandable ? (
         <ChatCollapse open={expanded}>
           <div className="tc-output">
-            {isWrite && path && leaf.ok !== false ? (
+            {isWrite && path && ok !== false ? (
             <InlineDiff
               turnId={leaf.turnId}
               path={path}
@@ -758,21 +790,26 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
               )}
               {/* plan-20261016-ux（问题 4）：没有任何内容时的提示卡（运行中 / 完成 / 失败三态文案） */}
               {!hasBody && (
-                <div className="tc-empty" data-state={leaf.ok === null ? "running" : interruptTag ? "noted" : leaf.ok === false ? "fail" : "done"}>
-                  {leaf.ok === null ? <IconSpinner size={12} /> : <IconInfo size={14} />}
-                  <span>{emptyText}</span>
+                <div className="tc-empty" data-state={running ? "running" : interruptTag ? "noted" : ok === false ? "fail" : "done"}>
+                  <IconInfo size={14} />
+                  <span className={running ? "text-shine" : undefined}>{emptyText}</span>
                 </div>
               )}
-              {grepHits.length > 0 && (
-                <div className="tc-grep-hits">
-                  {grepHits.slice(0, 20).map((hit, i) => (
-                    <Tooltip key={i} content={hit.path}>
-                      <button className="tc-grep-hit" onClick={(e) => openGrepHit(e, hit)}>
-                        <span className="tc-grep-path">{hit.path.split(/[\\/]/).pop()}</span>
-                        <span className="tc-grep-ln">:{hit.line}</span>
-                        <span className="tc-grep-text">{hit.rest.slice(0, 60)}</span>
-                      </button>
-                    </Tooltip>
+              {grepGroups.length > 0 && (
+                <div className="tc-grep-groups">
+                  {grepGroups.map((grp) => (
+                    <div key={grp.path} className="tc-grep-group">
+                      <div className="tc-grep-file">
+                        <span className="tc-grep-file-path">{grp.path}</span>
+                        <span className="tc-grep-file-count">{grp.hits.length} 处</span>
+                      </div>
+                      {grp.hits.map((hit, i) => (
+                        <button key={i} type="button" className="tc-grep-hit" onClick={(e) => openGrepHit(e, { path: grp.path, line: hit.line })}>
+                          <span className="tc-grep-ln">{hit.line}</span>
+                          <span className="tc-grep-text">{hit.rest}</span>
+                        </button>
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}
@@ -781,6 +818,11 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   语句从 args.sql 取（调用参数），结果从工具结果的结构化数据取。 */}
               {leaf.tool.startsWith("db_") && (
                 <SqlResultView tool={leaf.tool} args={leaf.args ?? {}} output={leaf.output} />
+              )}
+              {/* plan-693-2868（P1）：微应用调用——appId + method + 参数回显 + 「查看界面」入口。
+                  卡片自己不打开面板：只有用户点按钮才 openMicroApp（同 appId 去重）。 */}
+              {leaf.tool === "microapp_call" && (
+                <MicroAppCallView args={leaf.args ?? {}} output={leaf.output} ok={ok} />
               )}
               {/* 对齐图四、图五：ask_user_question 展开为结构化问答详情。
                   plan-278-1391: 改为扁平文本（不再套独立卡片），与 fs_read/文件编辑展开同构；
@@ -816,7 +858,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                     .map((q, idx) => ({ q, idx, hit: answerMap[String(idx)] ?? answerMap[String(idx + 1)] }))
                     .filter((r) => !hasAnswers || r.hit != null);
                   // 没有回答记录时按工具状态给占位：等待中 / 取消或超时 都不能显示成「已回答」
-                  const emptyHint = leaf.ok === null ? "等待回答…" : leaf.ok === false ? "未回答" : "已回答";
+                  const emptyHint = running ? "等待回答…" : ok === false ? "未回答" : "已回答";
                   return (
                     <div className="tc-question-qa">
                       {rows.map(({ q, idx, hit }) => (
@@ -837,7 +879,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   问答已由上方结构化列表呈现，这里跳过原文，避免重复且可读性差的 JSON。 */}
               {/* plan-20261016-ux（问题 5）：读文件类工具只要有路径一律走代码视图——此前按扩展名白名单判断，
                   xml / yml / sql / properties 等（子代理调研 MyBatis 映射、配置文件时最常见）都退化成纯文本 */}
-              {leaf.output && leaf.tool !== "ask_user_question" && (path && (FILE_CONTENT_TOOLS.has(leaf.tool) || /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path)) ? (
+              {leaf.output && !isBenignEmptyOut && grepGroups.length === 0 && leaf.tool !== "ask_user_question" && (path && (FILE_CONTENT_TOOLS.has(leaf.tool) || /\.(ts|tsx|js|jsx|py|json|md|css|html|go|rs|java|c|cpp|sh)$/i.test(path)) ? (
                 <CodeView path={path} text={leaf.output} />
               ) : (
                 // plan-522-2209 R10：统一走 ClampBlock；copyText 传完整 output，
@@ -862,7 +904,9 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
  *  完成后——「已执行 N 个操作（…）」摘要行，可展开查看全部明细。 */
 const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: ToolLeaf[] }) {
   const [expanded, setExpanded] = useFlowGroupExpand(`group:${leaves[0].callKey}`, leaves.map((l) => l.callKey));
-  const running = leaves.some((l) => l.ok === null);
+  // 结果缺失只在本轮真在运行时才算执行中（历史消息缺结果不该亮扫光与轮播）
+  const live = useContext(ToolLiveContext);
+  const running = live && leaves.some((l) => l.ok === null);
   // plan-474-2105 组 C：转后台 / 让出等待不是失败，聚合行不要因此亮红叉
   const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
   // 问题2: 轮播只在未执行完成的命令（ok===null）间切换，不再切到已完成命令
@@ -911,7 +955,6 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
             <span className="tc-explore-summary">{summary}</span>
           </>
         )}
-        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
@@ -927,7 +970,8 @@ const ActionClusterRow = memo(function ActionClusterRow({ leaves }: { leaves: To
 /** v19: 同文件连续写合并行：文件徽标 + 累加 +N -M（滚动动效），展开看每次写明细（各自内联 diff） */
 const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLeaf[] }) {
   const [expanded, setExpanded] = useFlowGroupExpand(`group:${leaves[0].callKey}`, leaves.map((l) => l.callKey));
-  const running = leaves.some((l) => l.ok === null);
+  const live = useContext(ToolLiveContext);
+  const running = live && leaves.some((l) => l.ok === null);
   // plan-474-2105 组 C：同上——打断标记不计入失败，避免合并行亮红叉
   const failed = leaves.some((l) => l.ok === false && !interruptTagOf(l));
   const path = leafPath(leaves[0]) ?? "";
@@ -958,13 +1002,12 @@ const WriteMergedRow = memo(function WriteMergedRow({ leaves }: { leaves: ToolLe
         {path && (
           <span className="tc-filelink">
             <FileIcon name={path} size={16} />
-            <span className="tc-filename">{name}</span>
+            <span className={"tc-filename" + (running ? " text-shine" : "")}>{name}</span>
           </span>
         )}
         {path && dir && <Tooltip content={path}><span className="tc-dir">{dir}</span></Tooltip>}
         <span className="tc-meta">×{leaves.length}</span>
         {(add > 0 || del > 0) && <ChangeStat additions={add} deletions={del} />}
-        {running && <span className="tc-status wait"><IconSpinner size={11} /></span>}
         {!running && failed && <span className="tc-status fail"><IconX size={11} /></span>}
         <span className={"tc-chevron" + (expanded ? " open" : "")}><IconChevronRight size={11} /></span>
       </div>
@@ -990,9 +1033,18 @@ const WindowedToolLeaves = memo(function WindowedToolLeaves({ leaves }: { leaves
   return <>{groups}</>;
 });
 
-export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] }) {
+export const ToolTree = memo(function ToolTree({ nodes, live = false }: { nodes: ToolNode[]; live?: boolean }) {
   if (nodes.length === 0) return null;
+  // plan-20261114-message-flow：过程组展平后仍复用工具叶窗口，展开千条记录不一次挂满 DOM。
+  if (nodes.length > 40 && nodes.every((node) => node.kind === "leaf")) {
+    return (
+      <ToolLiveContext.Provider value={live}>
+        <div className="tool-flat"><WindowedToolLeaves leaves={nodes.map((node) => (node as Extract<ToolNode, { kind: "leaf" }>).leaf)} /></div>
+      </ToolLiveContext.Provider>
+    );
+  }
   return (
+    <ToolLiveContext.Provider value={live}>
     <div className="tool-flat">
       {nodes.map((n, i) =>
         n.kind === "action-cluster"
@@ -1009,5 +1061,6 @@ export const ToolTree = memo(function ToolTree({ nodes }: { nodes: ToolNode[] })
                 : <LeafRow key={`l${i}`} leaf={n.leaf} />,
       )}
     </div>
+    </ToolLiveContext.Provider>
   );
 });

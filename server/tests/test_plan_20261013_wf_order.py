@@ -173,7 +173,7 @@ async def test_agent_started_extra_without_thread_messages_has_no_watermark(monk
 
 
 async def test_subagent_listing_carries_spawn_watermark_for_reload(monkeypatch):
-    """刷新后的 REST 子代理列表与实时事件口径一致：节点子代理带派发时刻，普通子代理没有。"""
+    """刷新后普通子代理和工作流子代理都保留创建时序锚点。"""
 
     async def fake_briefs(node_ids):
         return {nid: {"node_id": nid, "program_id": 9} for nid in node_ids}
@@ -184,7 +184,7 @@ async def test_subagent_listing_carries_spawn_watermark_for_reload(monkeypatch):
     client = TestClient(app)
     session_id = await _session()
     node_agent_id, first_msg_id = await _node_agent(session_id, node_id=7, with_task_message=True)
-    plain_agent_id, _ = await _node_agent(session_id, node_id=None, with_task_message=True)
+    plain_agent_id, plain_first_msg_id = await _node_agent(session_id, node_id=None, with_task_message=True)
 
     resp = client.get(f"/api/turns/sessions/{session_id}/subagents")
 
@@ -192,4 +192,4 @@ async def test_subagent_listing_carries_spawn_watermark_for_reload(monkeypatch):
     rows = {row["agent_id"]: row for row in resp.json()}
     assert rows[node_agent_id]["spawn_message_id"] == first_msg_id
     assert rows[node_agent_id]["workflow"]["program_id"] == 9
-    assert rows[plain_agent_id]["spawn_message_id"] is None
+    assert rows[plain_agent_id]["spawn_message_id"] == plain_first_msg_id

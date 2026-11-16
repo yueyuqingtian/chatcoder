@@ -314,6 +314,7 @@ def _ta3_relocate_inline_system(messages: list[ChatMessage]) -> list[ChatMessage
                 items.append(("msg", ChatMessage(
                     role="assistant",
                     content=f"<conversation_summary>\n{summary}\n</conversation_summary>",
+                    context_kind="checkpoint", checkpoint_id=m.checkpoint_id,
                 )))
                 continue
             items.append(("reminder", f"<system-reminder>\n{text.strip()}\n</system-reminder>"))
@@ -359,6 +360,13 @@ def _ta3_relocate_inline_system(messages: list[ChatMessage]) -> list[ChatMessage
                 end += 1
             out.insert(end + 1, ChatMessage(role="user", content="\n\n".join(reminders)))
 
+    # plan-20261109-compact-structure：旧内存路径可能把摘要放末尾，重定位到保留历史之前。
+    summaries = [m for m in out if m.context_kind == "checkpoint"]
+    if summaries:
+        body = [m for m in out if m.context_kind != "checkpoint"]
+        if not body or body[0].role != "user":
+            body.insert(0, ChatMessage(role="user", content="请根据摘要和保留的执行结果继续当前任务。"))
+        out = summaries + body
     if primary_idx is not None:
         out.insert(0, messages[primary_idx])
     return out
@@ -1285,8 +1293,8 @@ class Ta3Provider(ModelProvider):
           之后只剩开头一条 system，按官方 take-first 取用；
         - content 一律转为块数组（contentToBlocks），空消息不入列，相邻同角色合并；
         - assistant 只回传带 signature 的 thinking / redacted_thinking 块并放在最前
-          （normalizeAnthropicThinkingBlocks + unshift，:159-175、:201）；本项目只存
-          reasoning_content 文本、没有 signature，因此不回传（官方对 kimi 无特判）。
+          （normalizeAnthropicThinkingBlocks + unshift，:159-175、:201）；仅保存了
+          reasoning_content 的旧历史没有签名，不将其伪造为 thinking 块。
         """
         converted: list[dict] = []
         system = ""
@@ -1342,7 +1350,8 @@ class Ta3Provider(ModelProvider):
                     "type": "tool_result", "tool_use_id": tool_use_id, "content": raw_text,
                 }])
             elif m.role == "assistant":
-                blocks = []
+                from app.models.providers.thinking_blocks import replay_thinking
+                blocks = replay_thinking(m.thinking_blocks)
                 has_tool_calls = bool(m.tool_calls)
                 if raw_text:
                     blocks.append({"type": "text", "text": raw_text})
@@ -1440,6 +1449,8 @@ class Ta3Provider(ModelProvider):
         tools = self._convert_anthropic_tools(disguised) if disguised else []
         if tools:
             body["tools"] = tools
+        from app.orchestration.history_sequence import finish_anthropic_wire
+        body["messages"] = finish_anthropic_wire(body["messages"], body.get("thinking"))
         return _prune(body)
 
     def _parse_anthropic_frame(self, line: str, monitor) -> bool:
@@ -1455,6 +1466,9 @@ class Ta3Provider(ModelProvider):
             payload = json.loads(data)
         except ValueError:
             return False
+        from app.models.providers.thinking_blocks import collect_thinking
+        if isinstance(payload, dict):
+            collect_thinking(monitor.setdefault("signed_thinking", {}), payload.get("type"), payload)
         monitor["frames"] += 1
         # 网关下发错误帧
         if isinstance(payload, dict) and payload.get("error"):
@@ -1588,6 +1602,8 @@ class Ta3Provider(ModelProvider):
             return
         usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         if self._anthropic:
+            monitor["signed_thinking"] = {i: b for i, b in enumerate(payload.get("content") or [])
+                                          if b.get("type") in ("thinking", "redacted_thinking")}
             text_parts, thinking_parts = [], []
             for idx, block in enumerate(payload.get("content") or []):
                 if not isinstance(block, dict):
@@ -1878,6 +1894,7 @@ class Ta3Provider(ModelProvider):
             "type": "done",
             "content": content,
             "thinking": thinking,
+            "thinking_blocks": list(monitor.get("signed_thinking", {}).values()),
             "tool_calls": tool_calls,
             "finish_reason": monitor["finish_reason"],
             "usage": monitor["usage"],
@@ -1910,6 +1927,7 @@ class Ta3Provider(ModelProvider):
                 response = ChatResponse(
                     content=event["content"],
                     thinking=event["thinking"],
+                    thinking_blocks=event.get("thinking_blocks"),
                     tool_calls=event["tool_calls"],
                     finish_reason=event["finish_reason"],
                     usage=event["usage"],

@@ -25,6 +25,9 @@ interface Props {
   tickLabel: (key: string) => string;
   /** 悬停浮层标题 */
   tipTitle: (key: string) => string;
+  /** 悬停浮层的附加说明行（可选）：返回非空字符串时在图例行之后、合计行之前多显示一行纯文本。
+   *  用于「请求 N 次」这类不属于任何序列的补充信息；不传则浮层与原先完全一致。 */
+  tipExtra?: (key: string) => string | null;
 }
 
 const H = 220;
@@ -99,7 +102,7 @@ function pickTicks(n: number, innerW: number, kind: "line" | "bar"): number[] {
   return out;
 }
 
-export function UsageTrendChart({ series, keys, kind, tickLabel, tipTitle }: Props) {
+export function UsageTrendChart({ series, keys, kind, tickLabel, tipTitle, tipExtra }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(760);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -155,6 +158,8 @@ export function UsageTrendChart({ series, keys, kind, tickLabel, tipTitle }: Pro
 
   const hoverKey = hoverIdx != null ? keys[hoverIdx] : null;
   const tipRight = tipPos.x > width * 0.6;
+  // 附加说明行（如「请求 N 次」）：没有对应序列，所以只渲染纯文本，不画图例圆点
+  const tipExtraText = hoverKey != null && tipExtra ? tipExtra(hoverKey) : null;
 
   return (
     <div className="usage-trend">
@@ -277,6 +282,11 @@ export function UsageTrendChart({ series, keys, kind, tickLabel, tipTitle }: Pro
                 <span className="usage-tip-val">{fmtTokens(s.record[hoverKey] || 0)}</span>
               </div>
             ))}
+            {tipExtraText ? (
+              <div className="usage-tip-row">
+                <span className="usage-tip-name">{tipExtraText}</span>
+              </div>
+            ) : null}
             {series.length > 1 && (
               <>
                 <div className="usage-tip-sep" />

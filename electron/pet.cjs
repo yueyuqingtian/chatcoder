@@ -19,6 +19,7 @@
 const { app, BrowserWindow, ipcMain, screen, dialog, net, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 // plan-73-340：消除 DWM 系统边框（主窗同款手段，宠物窗此前遗漏——
 // 用户看到的「浮窗周围半透明色块」就是系统边框在透明窗口上被 DWM 合成出来的）
 const glassDiag = require("./glass-diagnostics.cjs");
@@ -137,12 +138,19 @@ const logErr = (...a) => ctx.logErr("[pet]", ...a);
 // ─────────────────────────── 路径与偏好 ───────────────────────────
 
 function prefFile() { return path.join(app.getPath("userData"), "pet-pref.json"); }
-/** 默认安装目录：安装包取软件安装目录下的 pets（与浏览器下载目录同口径）；开发态取用户数据目录。 */
+/** 默认宠物目录：用户目录下（plan-693-2868 D23）。
+ *
+ *  此前默认落在**安装目录**，而 NSIS 升级会先把整个 $INSTDIR 搬走再 RMDir /r，
+ *  于是每升级一次宠物就全没。改到 ~/.chatcoder/pets 后与微应用库、下载目录同一套根，
+ *  升级只换程序文件，不碰用户数据。
+ */
 function defaultPetsDir() {
-  if (app.isPackaged) return path.join(path.dirname(app.getPath("exe")), "pets");
-  return path.join(app.getPath("userData"), "pets");
+  return path.join(os.homedir(), ".chatcoder", "pets");
 }
-/** 升级前的旧默认目录（用户数据目录下），用于一次性迁移与不可写时的回落。 */
+/** 旧版默认目录（安装目录下的 pets）。只用于升级后的一次性迁移，**不再**作为回落目标——
+ *  它就是我们要逃离的那个会被升级删掉的位置。 */
+function oldInstallPetsDir() { return path.join(path.dirname(app.getPath("exe")), "pets"); }
+/** 更早的默认目录（用户数据目录下），用于迁移与默认目录不可写时的回落。 */
 function legacyPetsDir() { return path.join(app.getPath("userData"), "pets"); }
 function dirWritable(dir) {
   try {
@@ -151,7 +159,7 @@ function dirWritable(dir) {
     return true;
   } catch { return false; }
 }
-/** 实际使用的宠物目录：用户指定（且可写）→ 默认安装目录（可写）→ 用户数据目录（安装在只读位置时的回落）。 */
+/** 实际使用的宠物目录：用户指定（且可写）→ 默认用户目录（可写）→ 用户数据目录（回落）。 */
 function petsDir() {
   const custom = pref && pref.petsDir ? String(pref.petsDir) : "";
   if (custom && dirWritable(custom)) return custom;
@@ -191,9 +199,18 @@ function migratePetsDir(fromDir, toDir) {
   return result;
 }
 
-/** 升级后把旧默认目录（用户数据目录）里的宠物迁到当前默认目录；目录相同或迁移不需要时为空操作。 */
+/** 升级后把旧位置的宠物迁到当前默认目录；目录相同或迁移不需要时为空操作。 */
 function migrateLegacyPets() {
   const target = petsDir();
+  // 安装目录里的旧宠物优先救：它只在新版本第一次启动时还可能存在，之后就随升级被删了。
+  // 搬不走就只能新装（计划 D39：不做历史恢复提示）。
+  if (app.isPackaged) {
+    const fromInstall = oldInstallPetsDir();
+    if (path.resolve(fromInstall) !== path.resolve(target)) {
+      const r0 = migratePetsDir(fromInstall, target);
+      if (r0.moved) log("已把安装目录里的宠物迁到用户目录:", r0.moved, "个");
+    }
+  }
   const r = migratePetsDir(legacyPetsDir(), target);
   if (r.moved) log("已把旧版宠物迁到当前宠物目录:", r.moved, "个");
 }

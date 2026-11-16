@@ -264,6 +264,9 @@
 .composer-ref-skill { --ref-c: var(--pc-violet); }
 .composer-ref-mcp { --ref-c: var(--pc-teal); }
 .composer-ref-plugin { --ref-c: var(--pc-orange); }
+/* plan-693-2868（P1）：微应用引用 chip——与既有各类引用同结构（高度/内边距/圆角全走 .composer-ref-chip
+   的令牌），只补一个色相（--pc-cyan）。不加左侧竖线/色条：本项目的引用 chip 靠底色区分类型。 */
+.composer-ref-microapp { --ref-c: var(--pc-cyan); }
 .composer-ref-remove { width: 18px; height: 18px; border-radius: var(--r-pill); color: inherit; opacity: 0.6; }
 .composer-ref-remove:hover { opacity: 1; background: color-mix(in oklab, var(--ref-c) 16%, transparent); color: inherit; }
 .composer-attachments { gap: 6px; padding: 0 0 8px; }

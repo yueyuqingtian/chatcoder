@@ -22,23 +22,32 @@ router = APIRouter(prefix="/turns", tags=["turns"])
 logger = logging.getLogger(__name__)
 
 
-async def _write_model_divider_if_changed(db: AsyncSession, session_id: int, model_id: int) -> None:
+async def _write_model_divider_if_changed(db: AsyncSession, session_id: int, model_id: int,
+                                         *, turn_id: int | None = None,
+                                         before_message_id: int | None = None) -> None:
     """上一条主线程用户消息记录的模型与本次不同 → 写一条模型切换分割线（非阻塞）。
 
     历史消息没有 model_id（本字段新增前发送的）时不写：无法判断是否真的换过模型。
     同一会话里来回切多次再发送，只按「上次发送 vs 本次发送」比较，天然只留一条。
+
+    before_message_id：本次新用户消息已入库时传入其 id，回看该 id 之前的用户消息——
+    否则查询到的「最新用户消息」就是刚插入的这一条，永远判定为「没换模型」。
+    turn_id：让分割线归属新的一轮，前端才能把它渲染在「新用户消息之后、AI 执行之前」。
     """
     try:
         from app.persistence.models.message import Message
         from app.persistence.models.model_reg import Model, Provider
 
+        conditions = [
+            Message.session_id == session_id,
+            Message.deleted == False,  # noqa: E712 撤销（回滚）的消息是软删
+            Message.thread_id.is_(None),
+            Message.sender_type == SenderType.USER.value,
+        ]
+        if before_message_id is not None:
+            conditions.append(Message.id < int(before_message_id))
         last = await db.scalar(
-            select(Message).where(
-                Message.session_id == session_id,
-                Message.deleted == False,  # noqa: E712 撤销（回滚）的消息是软删
-                Message.thread_id.is_(None),
-                Message.sender_type == SenderType.USER.value,
-            ).order_by(Message.id.desc()).limit(1)
+            select(Message).where(*conditions).order_by(Message.id.desc()).limit(1)
         )
         prev_id = (last.content or {}).get("model_id") if last is not None and isinstance(last.content, dict) else None
         if not prev_id or int(prev_id) == model_id:
@@ -56,6 +65,7 @@ async def _write_model_divider_if_changed(db: AsyncSession, session_id: int, mod
             db, session_id=session_id,
             content={"text": f"已切换至 {label}", "divider": "model_changed",
                      "model_id": model_id, "provider": provider_name, "model": model.name},
+            turn_id=turn_id,
         )
     except Exception:
         logger.warning("[turns] 模型切换分割线写入失败(非阻塞)", exc_info=True)
@@ -82,13 +92,12 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
     # 用户消息入库（v14: 附件以文件地址形式持久化到 content.attachments，
     # 前端从历史消息可直接展示附件卡片并点击预览）
     user_content: dict = {"text": body.content}
-    # plan-20261017-ux-overhaul 阶段 D：用户消息记下本次实际使用的模型，并在与上一条用户消息
-    # 所用模型不同时，于用户消息之前写入「已切换至 供应商 / 模型」分割线。
-    # 之前在切换（PATCH）当下就写，用户只是试着切一下、没发消息也会留下分割线。
+    # plan-20261017-ux-overhaul 阶段 D：用户消息记下本次实际使用的模型。切换提示由
+    # `_write_model_divider_if_changed` 在本条消息入库并广播之后写入（见下方调用点），
+    # 保证提示落在「新用户消息之后、AI 执行之前」，而不是上一轮的操作按钮前面。
     _effective_model_id = body.model_id or session.model_id
     if _effective_model_id:
         user_content["model_id"] = int(_effective_model_id)
-        await _write_model_divider_if_changed(db, body.session_id, int(_effective_model_id))
     if body.attachments:
         user_content["attachments"] = body.attachments
     # plan-308-1542 需求2: 引用 chips 结构化落库（消息流据此渲染带图标芯片）
@@ -163,6 +172,17 @@ async def create_turn(body: TurnCreate, db: AsyncSession = Depends(get_db)):
         })
     except Exception:
         pass
+
+    # plan-20261017-ux-overhaul 阶段 D：模型切换提示在「用户消息入库 + 广播」**之后**、
+    # AI 开始执行之前写入，且显式归属本轮 turn——这样它在时间线里落在
+    # 「新用户消息之后、AI 输出之前」。
+    # 旧实现在用户消息之前写入且不带 turn_id，前端会把无 turn 的系统消息并入上一个 turn，
+    # 表现为提示出现在上一轮操作按钮组前面（用户反馈）。
+    if _effective_model_id:
+        await _write_model_divider_if_changed(
+            db, body.session_id, int(_effective_model_id),
+            turn_id=turn_id, before_message_id=user_msg.id,
+        )
 
     # v0.3.1 (plan-190-898): 提前将全部 ORM 字段解构成纯 Python 标量变量。
     # 彻底杜绝两大致命错误：
@@ -783,10 +803,8 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
     from app.persistence.models.message import Message as _Message
     from sqlalchemy import func as _func
 
-    node_thread_ids = [agent.id for agent, _task in rows if agent.workflow_node_id]
     # plan-20261019-subagent-ghost: 一次查出所有子代理线程的派发锚点（首条消息 id）与消息数。
     # message_count 供前端识别「没有任何输出、也没有关联任务」的幽灵条目——它们点开是空面板。
-    node_thread_set = set(node_thread_ids)
     thread_ids = [agent.id for agent, _task in rows]
     spawn_ids: dict[int, int] = {}
     message_counts: dict[int, int] = {}
@@ -801,7 +819,6 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
                 continue
             spawn_ids[int(tid)] = int(first_id)
             message_counts[int(tid)] = int(count)
-    spawn_ids = {tid: mid for tid, mid in spawn_ids.items() if tid in node_thread_set}
     # plan-565-2323 G11：附带所属轮次状态。turn 已终态时，其下残留的 task.status 不可信
     # （历史上终态路径漏写子任务终态，重启后重启修复也扫不到）——前端据此不再计入「运行中」，
     # 避免一条残留行把整个会话锁成 busy（本次事故的直接表现）。
@@ -817,7 +834,7 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
         _h = _mgr.get(agent.id) if _mgr is not None else None
         out.append({
             "workflow": briefs.get(agent.workflow_node_id) if agent.workflow_node_id else None,
-            "spawn_message_id": spawn_ids.get(agent.id) if agent.workflow_node_id else None,
+            "spawn_message_id": spawn_ids.get(agent.id),
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
             "turn_id": agent.turn_id,

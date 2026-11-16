@@ -5,10 +5,14 @@ terminal_exec 以 waitForCompletion=false 启动的长驻进程（dev server、w
 - 输出持续收集到环形缓冲（64KB/进程），供 AI 增量读取（offset 按字符序号）；
 - 进程退出后条目保留（状态=exited + 退出码 + 尾部日志），供事后查询；
 - 生命周期独立于 turn/审批（dev server 需跨 turn 存活），不随 cancel_event 终止。
+- plan-693-2868 协议 v3：宿主桥（微应用页面）起的进程可保留 stdin 管道，由
+  `write_stdin` / `close_stdin` 驱动（`exec.stdin`）；`terminal_exec` 的后台命令
+  保持不保留管道——等待输入的命令会立刻读到 EOF，而不是永久挂起。
 
 不落库：进程句柄不可序列化，服务重启后自然失效，查询时报「已退出/未知」。
 """
 import asyncio
+import contextlib
 import logging
 import secrets
 import time
@@ -111,12 +115,21 @@ async def kill_process_tree(proc: asyncio.subprocess.Process, timeout: float = 1
         logger.warning("[kill_timeout] pid=%s 整树终止未在 %.0fs 内完成", proc.pid, timeout)
 
 
+class StdinClosedError(Exception):
+    """后台进程的 stdin 不可写（plan-693-2868 协议 v3 `exec.stdin`）。
+
+    三种成因对外不可区分（页面只需知道「这个 stream 现在写不进去」）：进程已退出、
+    启动时没有保留 stdin 管道（AI 的 `terminal_exec` 后台命令就是这种）、管道已断。
+    """
+
+
 class _BgEntry:
     """单个后台进程的注册条目。"""
 
     __slots__ = ("shell_id", "proc", "command", "cwd", "session_id",
                  "started_at", "buffer", "total_chars", "returncode", "finished_at",
-                 "turn_id", "on_exit", "notified", "stopped_by", "observed", "start_task")
+                 "turn_id", "on_exit", "notified", "stopped_by", "observed", "start_task",
+                 "stdin_open")
 
     def __init__(self, shell_id: str, proc: asyncio.subprocess.Process,
                  command: str, cwd: str | None, session_id: int,
@@ -124,6 +137,10 @@ class _BgEntry:
                  started_at: float | None = None) -> None:
         self.shell_id = shell_id
         self.proc = proc
+        # plan-693-2868 v3：启动时是否保留了 stdin 管道（terminal_exec 默认不保留，
+        # 只有宿主桥 exec.start 传 stdin_pipe=True 才有）。写成功后保持 True，
+        # 显式 eof 或管道断开后置 False——避免对已关闭的写端重复 close 抛底层异常。
+        self.stdin_open = proc.stdin is not None
         self.command = command
         self.cwd = cwd or ""
         self.session_id = session_id
@@ -374,6 +391,27 @@ class BgProcessRegistry:
             "next_offset": next_offset,
         }
 
+    def poll(self, shell_id: str, offset: int = 0) -> dict[str, Any] | None:
+        """流式下游用的**原始**增量读取（plan-693-2868 宿主桥 `stream.log`）。
+
+        与 `status()` 的区别：不做 12k 截断、不插「已截断」提示行——`status()` 面向的是
+        AI 的文本结果（宁可少给也不刷屏），而宿主桥要把每一行原样推给页面，截断会让页面
+        丢行、提示行还会被当成一条日志渲染。`next_offset` 语义与 `status()` 一致。
+
+        返回 None 表示 shell_id 未知（服务重启或条目已被清理）。
+        """
+        entry = self._entries.get(shell_id)
+        if entry is None:
+            return None
+        text, next_offset = entry.read_from(offset)
+        return {
+            "shell_id": entry.shell_id,
+            "running": entry.returncode is None,
+            "returncode": entry.returncode,
+            "log": text,
+            "next_offset": next_offset,
+        }
+
     def mark_observed(self, shell_id: str) -> None:
         """模型已从工具结果里看到该进程的终态：之后的完成回报可以省掉。"""
         entry = self._entries.get(shell_id)
@@ -408,6 +446,64 @@ class BgProcessRegistry:
     def owner_session(self, shell_id: str) -> int | None:
         entry = self._entries.get(shell_id)
         return entry.session_id if entry is not None else None
+
+    async def write_stdin(self, shell_id: str, data: bytes) -> int | None:
+        """向后台进程的 stdin 写入字节（plan-693-2868 协议 v3 `exec.stdin`）。
+
+        返回写入字节数；`None` 表示 shell_id 未知（与服务重启/条目被清理同义）。
+        进程已退出、启动时未保留管道、管道已断——三种情况一律抛 `StdinClosedError`，
+        让上层（`microapp_host`）把它们统一翻成 `microapp-host-stdin-closed`，
+        不把 `ConnectionResetError` 这类底层异常原样抛给页面。
+
+        **只有** `stdin_pipe=True` 起的进程才有写端（宿主桥 `exec.start`）；
+        `terminal_exec` 的后台命令 `proc.stdin is None`，写不进去也**不应**写——
+        AI 的命令不该被页面塞输入。
+        """
+        entry = self._entries.get(shell_id)
+        if entry is None:
+            return None
+        if entry.returncode is not None:
+            raise StdinClosedError(f"进程已退出（退出码 {entry.returncode}）")
+        stdin = entry.proc.stdin
+        if stdin is None or not entry.stdin_open:
+            raise StdinClosedError("该进程没有保留 stdin 管道")
+        try:
+            stdin.write(data)
+            await stdin.drain()
+        except (OSError, RuntimeError, ValueError) as exc:
+            # ConnectionResetError / BrokenPipeError（OSError 子类）是 Windows/POSIX 上
+            # 「进程死了但注册表还没来得及记录退出码」的典型表现；RuntimeError 是
+            # asyncio 里对「已关闭写端继续 write」的报法。这里一律转成可对外解释的语义。
+            entry.stdin_open = False
+            raise StdinClosedError(f"写入失败：{type(exc).__name__}: {exc}") from exc
+        return len(data)
+
+    async def close_stdin(self, shell_id: str) -> bool | None:
+        """关闭 stdin（进程读到 EOF 后自行退出，`exec.stdin` 的 `eof: true`）。
+
+        返回 `True` 表示这次真的关掉了；`False` 表示本来就没开（未保留管道 / 已关过）；
+        `None` 表示 shell_id 未知。关闭失败（管道已断）也返回 `False`——对调用方来说
+        「写端不在了」与「刚被关掉」等价，不该因此报错。
+        """
+        entry = self._entries.get(shell_id)
+        if entry is None:
+            return None
+        stdin = entry.proc.stdin
+        if stdin is None or not entry.stdin_open:
+            return False
+        entry.stdin_open = False
+        # 先把缓冲里的字节推出去再关：`close()` 会丢掉未 flush 的写吗？
+        # asyncio 的 StreamWriter.close() 走 transport.close()，实现上会先冲缓冲，
+        # 但 drain 一次更直观，也让「写 + eof 同一次调用」的顺序确定。冲不动就算了——
+        # 管道已断时「写端不在了」与「刚被关掉」对调用方等价。
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            await stdin.drain()
+        try:
+            if not stdin.is_closing():
+                stdin.close()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return True
 
     async def kill(self, shell_id: str, by: str = "agent") -> dict[str, Any] | None:
         """终止后台进程树。返回 None 表示 shell_id 未知。

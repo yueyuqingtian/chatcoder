@@ -95,23 +95,24 @@ const FONT_OPTIONS: Record<string, string> = {
 /** 全局界面字体（plan-20261017-ux-overhaul 阶段 C）。
  *  默认「Inter + 微软雅黑 UI」：Inter 为屏幕显示设计，字怀大、笔画对齐像素网格，小字号下比
  *  Segoe UI 更锐利；Inter 随应用内置（仅拉丁字符集，按需加载），中文交给系统 UI 黑体。
+ *  思源黑体（Noto Sans SC）同样随应用内置，见 styles/fonts.css。
  *  其余选项依赖本机已安装的字体，未安装时按栈逐级回退，不会出现方块字。 */
-export const UI_FONT_OPTIONS: Record<string, { label: string; desc: string; stack: string }> = {
+export const UI_FONT_OPTIONS: Record<string, { label: string; desc: string; stack: string; bundled?: boolean }> = {
   inter: {
-    label: "Inter（推荐）", desc: "内置字体，小字号清晰锐利",
+    label: "Inter（推荐）", desc: "内置字体，小字号清晰锐利", bundled: true,
     stack: '"Inter Variable", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
   },
   system: {
     label: "系统默认", desc: "Segoe UI / 苹方 + 微软雅黑",
     stack: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   },
-  harmony: {
-    label: "HarmonyOS Sans", desc: "需本机已安装",
-    stack: '"HarmonyOS Sans SC", "HarmonyOS Sans", "Microsoft YaHei UI", "PingFang SC", sans-serif',
-  },
+  // plan-20261116-bundled-fonts：思源黑体改为随应用内置（Noto Sans SC，同一套设计，OFL-1.1），
+  // 字体族用独立名 Source Han Sans SC Bundled（@font-face 见 styles/fonts.css），
+  // 首选项是内置名，后面的系统名只作为极端情况下的兜底。
+  // HarmonyOS Sans 已从候选中移除（npm 无官方包，第三方包许可声明与华为字体协议不符）。
   sourcehan: {
-    label: "思源黑体", desc: "需本机已安装",
-    stack: '"Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei UI", "PingFang SC", sans-serif',
+    label: "思源黑体（内置）", desc: "内置字体，中文黑体", bundled: true,
+    stack: '"Source Han Sans SC Bundled", "Source Han Sans SC", "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei UI", "PingFang SC", sans-serif',
   },
   yahei: {
     label: "微软雅黑", desc: "Windows 自带",

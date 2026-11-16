@@ -1,0 +1,196 @@
+# 社区微应用仓库的自动接收器（plan-693-2868 §3.4 / D32、D34、D35）
+#
+# 为什么写在这里而不是让用户自己的 token 直接改索引：
+#   往共享仓库写需要本仓库的 write 权限，普通发布者只有自己仓库的权限。
+#   所以由本仓库的 Actions 持有写权限，发布者只负责「提一个 issue」——
+#   索引因此只有一个写者，从根上避免两个人同时发布互相覆盖。
+#
+# 安全性：issue 正文是外部输入，这里只用 jq 当数据解析，任何字段都不拼进 shell 命令执行；
+# 下载地址限制为 https + github.com，包必须与声明的 sha256 一致才会被接受。
+name: accept-microapp
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+# 串行化：apps.json 是单文件共享状态，两个 issue 同时跑会互相覆盖
+concurrency:
+  group: apps-json-write
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    if: >-
+      startsWith(github.event.issue.title, '[upload]') ||
+      startsWith(github.event.issue.title, '[withdraw]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析并校验请求
+        id: parse
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          kind=""
+          case "$ISSUE_TITLE" in
+            "[upload]"*) kind="upload" ;;
+            "[withdraw]"*) kind="withdraw" ;;
+          esac
+          if [ -z "$kind" ]; then
+            echo "标题必须以 [upload] 或 [withdraw] 开头"; exit 1
+          fi
+
+          # 取正文里第一个 ```json 围栏块。只当数据解析，不执行。
+          printf '%s\n' "$ISSUE_BODY" \
+            | awk '/^```json[[:space:]]*$/{f=1;next} /^```[[:space:]]*$/{if(f){exit}} f' \
+            > /tmp/payload.json
+          if [ ! -s /tmp/payload.json ]; then
+            echo "issue 正文里缺少 ```json 代码块"; exit 1
+          fi
+          jq -e . /tmp/payload.json > /dev/null || { echo "json 不合法"; exit 1; }
+
+          app_id=$(jq -r '.appId // ""' /tmp/payload.json)
+          version=$(jq -r '.version // ""' /tmp/payload.json)
+
+          # appId 与版本是拼接 tag 的原料，必须先卡死字符集，避免奇怪 tag 与注入
+          if ! printf '%s' "$app_id" | grep -Eq '^[a-z0-9][a-z0-9._-]{1,62}$'; then
+            echo "appId 不合法：$app_id"; exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "version 必须是 MAJOR.MINOR.PATCH：$version"; exit 1
+          fi
+
+          {
+            echo "kind=$kind"
+            echo "app_id=$app_id"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 处理 [withdraw]
+        if: steps.parse.outputs.kind == 'withdraw'
+        env:
+          APP_ID: ${{ steps.parse.outputs.app_id }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # D35：只移除条目，不删 Release —— 已经下载过的链接不能因此失效
+          jq --arg a "$APP_ID" --arg v "$VERSION" \
+            '.apps |= map(select((.appId == $a and .version == $v) | not))' apps.json > /tmp/apps.json
+          mv /tmp/apps.json apps.json
+
+          if git diff --quiet -- apps.json; then
+            gh issue comment "$ISSUE" --body "没有找到 $APP_ID@$VERSION，未做改动。"
+          else
+            git config user.name "chatcoder-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add apps.json
+            git commit -m "withdraw: $APP_ID@$VERSION"
+            git push
+            gh issue comment "$ISSUE" --body "已从索引移除 $APP_ID@$VERSION。Release 里的包保留。"
+          fi
+          gh issue close "$ISSUE" --reason completed
+
+      - name: 下载并校验包
+        if: steps.parse.outputs.kind == 'upload'
+        env:
+          APP_ID: ${{ steps.parse.outputs.app_id }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          set -euo pipefail
+          url=$(jq -r '.downloadUrl // ""' /tmp/payload.json)
+          sha=$(jq -r '.sha256 // ""' /tmp/payload.json)
+          size=$(jq -r '.size // 0' /tmp/payload.json)
+
+          case "$url" in
+            https://github.com/*|https://objects.githubusercontent.com/*) ;;
+            *) echo "downloadUrl 必须是 github.com 的 https 地址"; exit 1 ;;
+          esac
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "sha256 必须是 64 位小写十六进制"; exit 1
+          fi
+          # 100MB 上限：与客户端上传上限保持一致
+          if [ "$size" -le 0 ] || [ "$size" -gt 104857600 ]; then
+            echo "size 必须在 1 到 104857600 字节之间：$size"; exit 1
+          fi
+
+          mkdir -p /tmp/pkg
+          out="/tmp/pkg/${APP_ID}-${VERSION}.ccapp"
+          curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$out" "$url"
+
+          actual_size=$(stat -c%s "$out")
+          if [ "$actual_size" != "$size" ]; then
+            echo "体积不符：声明 $size，实际 $actual_size"; exit 1
+          fi
+          actual_sha=$(sha256sum "$out" | awk '{print $1}')
+          if [ "$actual_sha" != "$sha" ]; then
+            echo "sha256 不符：声明 $sha，实际 $actual_sha"; exit 1
+          fi
+          echo "校验通过：$actual_size 字节"
+
+      - name: 搬到本仓库 Release 并写索引
+        if: steps.parse.outputs.kind == 'upload'
+        env:
+          APP_ID: ${{ steps.parse.outputs.app_id }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${APP_ID}-${VERSION}"
+          asset="${APP_ID}-${VERSION}.ccapp"
+          file="/tmp/pkg/${asset}"
+
+          # 同一 tag 已存在就不再覆盖（版本不可变），让发布者升版本
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh issue comment "$ISSUE" --body "版本 $tag 已存在且不允许覆盖，请升版本后重新发布。"
+            gh issue close "$ISSUE" --reason "not planned"
+            exit 0
+          fi
+
+          gh release create "$tag" "$file" \
+            --title "$tag" \
+            --notes "社区微应用包：$APP_ID $VERSION" \
+            --latest=false
+
+          url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
+          jq --arg url "$url" --arg tag "$tag" '
+            .downloadUrl = $url
+            | .releaseTag = $tag
+            | .updatedAt = (now | todate)
+            | .createdAt = (.createdAt // (now | todate))
+          ' /tmp/payload.json > /tmp/entry.json
+
+          # 先剔除同名同版本旧条目，再追加；索引始终只有一个写者（本 workflow）
+          jq --slurpfile e /tmp/entry.json '
+            .apps = ([.apps[] | select((.appId == $e[0].appId and .version == $e[0].version) | not)] + $e)
+            | .schemaVersion = (.schemaVersion // 1)
+            | .updatedAt = (now | todate)
+          ' apps.json > /tmp/apps.json
+          mv /tmp/apps.json apps.json
+
+          git config user.name "chatcoder-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add apps.json
+          git commit -m "publish: $tag"
+          git push
+
+          gh issue comment "$ISSUE" --body "已发布 $tag。下载地址：$url（索引最长 5 分钟后对所有人可见）"
+          gh issue close "$ISSUE" --reason completed
+
+      - name: 失败回执
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE" --body "处理失败，请检查上面 Actions 日志里的原因（常见：字段缺失、sha256 不匹配、体积超限、版本已存在）。修正后重新提一个 issue 即可。" || true

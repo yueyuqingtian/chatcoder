@@ -428,3 +428,27 @@
 .tcc-path.btn:hover:not(:disabled) {
   background: transparent;
 }
+
+/* plan-20261109-rollback-grouped-fix：复用弹窗分组底色，长清单只滚动内容，保留底部操作。 */
+.rb-impact { margin: 0 0 16px; font-size: 13px; line-height: 1.7; color: var(--text-2); }
+.rb-kept-note { margin: -6px 0 14px; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.rb-file-groups { max-height: 340px; overflow-y: auto; scrollbar-width: thin; }
+.rb-file-groups .ui-dsec + .ui-dsec { margin-top: 16px; }
+.rb-file-item + .rb-file-item { border-top: 1px solid var(--surface-inset-border); }
+.rb-file-row, .rb-file-row.btn {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: auto;
+  min-height: 44px; padding: 10px 12px; border: 0; border-radius: 0;
+  background: transparent; text-align: left; white-space: normal;
+  font-size: 13px; line-height: 1.5; color: var(--text-1);
+}
+.rb-file-row > svg { flex-shrink: 0; color: var(--text-3); }
+.rb-file-main { flex: 1; min-width: 0; }
+.rb-file-path { display: block; overflow-wrap: anywhere; }
+.rb-file-path > span { color: var(--text-3); }
+.rb-file-reason { display: block; margin-top: 2px; color: var(--text-3); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.rb-file-state { flex-shrink: 0; color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.rb-file-state.is-kept { color: var(--warning); }
+.rb-file-caret { display: flex; flex-shrink: 0; width: 12px; color: var(--text-3); transition: transform var(--dur-3); }
+.rb-file-row[aria-expanded="true"] .rb-file-caret { transform: rotate(90deg); }
+.rb-file-item .rc-diff { border-top: 1px solid var(--surface-inset-border); background: var(--bg-panel); }
+.rb-file-item .rc-diff-body { max-height: 240px; }

@@ -322,9 +322,14 @@ export function FileTreePanel({ visible = true, sessionId = null }: { visible?: 
     const generation=++treeGeneration.current;
     const source=projectSource(""); if(!source){setTree([]);return;}
     try {
-      const data=await previewApi.children(source,undefined,8);
+      const [data, deep]=await Promise.all([previewApi.children(source), previewApi.children(source,undefined,8)]);
       if(generation!==treeGeneration.current)return;
-      setTree([{name:project?.name??data.path,path:data.path,type:"dir",children:data.children}]);
+      const deepByPath = new Map(deep.children.map((child) => [pathKey(child.path), child]));
+      const children = data.children.map((child) => {
+        const loaded = deepByPath.get(pathKey(child.path));
+        return child.type === "dir" && loaded?.children ? { ...child, children: loaded.children } : child;
+      });
+      setTree([{name:project?.name??data.path,path:data.path,type:"dir",children}]);
       setOpenPaths(new Set([data.path]));
     } catch (e) { if(generation===treeGeneration.current)setContentError(String(e)); }
   };

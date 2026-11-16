@@ -31,6 +31,10 @@ EXPLORE_TOOLS = [
     "browser_navigate", "browser_tabs", "browser_snapshot", "browser_get_text", "browser_screenshot",
     "browser_scroll", "browser_hover", "browser_wait", "browser_logs",
     "desktop_windows", "desktop_snapshot", "desktop_screenshot",
+    # plan-693-2868 D9：只读子代理只允许「看有哪些微应用」——microapp_call / microapp_validate
+    # 不进本表：前者要驱动界面（跨进程副作用），后者是为改 manifest 服务的写前诊断，
+    # 两者都超出「调研 / 阅读 / 分析」的边界。
+    "microapp_list",
 ]
 
 

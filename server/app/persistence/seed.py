@@ -4,6 +4,8 @@
 默认主代理 Agent、预设配置 profile(default/ci/paranoid)、
 默认安全执行策略规则。
 """
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +16,8 @@ from app.persistence.models.config import ConfigProfile
 from app.persistence.models.exec_policy import ExecPolicyRule
 from app.persistence.models.model_reg import Model
 from app.persistence.models.tenant import Tenant, User
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_or_create_tenant(db: AsyncSession) -> Tenant:
@@ -276,6 +280,77 @@ async def _seed_builtin_mcp(db: AsyncSession) -> int:
     return created
 
 
+async def _seed_builtin_skills(db: AsyncSession) -> int:
+    """注册应用内置技能（plan-693-2868 P2）。
+
+    正文放在 `app/resources/skills/*.md`：技能文档会随版本改进，所以**每次都刷新正文**，
+    但绝不碰 `is_active` / `auto_load`——用户手动关掉的技能不能因为升级又自动打开，
+    这是 _seed_builtin_mcp 已经定下的同一条口径。
+
+    `auto_load=False`：微应用创建是一份长文档，只在用户用 `/技能` 或模型主动 skill_view
+    时才读，常驻会让每一轮上下文都白占几千字。
+    """
+    import sys
+    from pathlib import Path
+
+    from app.persistence.models.skill import Skill
+
+    base = Path(__file__).resolve().parent.parent / "resources" / "skills"
+    # 打包态：PyInstaller 把随包文件放到 _MEIPASS，路径与源码树不同
+    if not base.is_dir():
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            base = Path(meipass) / "app" / "resources" / "skills"
+
+    specs = [
+        {
+            "name": "microapp-create",
+            "display_name": "微应用创建",
+            "description": "为当前任务造一个带界面的微应用（manifest 协议 + 界面规范 + 示例）",
+            "file": "microapp-create.md",
+            "trigger": "需要可视化界面、结构图、看板，或要反复调整某个可视化结果时",
+            "tools": ["microapp_call", "microapp_list", "microapp_validate"],
+            "tags": ["microapp", "ui"],
+        },
+    ]
+    created = 0
+    for spec in specs:
+        content_path = base / spec["file"]
+        try:
+            content = content_path.read_text(encoding="utf-8")
+        except OSError as e:
+            # 缺文件不阻断启动：技能少一个，总比服务起不来好
+            logger.warning("内置技能正文缺失 %s: %s", content_path, e)
+            continue
+        existing = (await db.execute(
+            select(Skill).where(Skill.name == spec["name"])
+        )).scalars().first()
+        if existing is None:
+            db.add(Skill(
+                name=spec["name"],
+                display_name=spec["display_name"],
+                description=spec["description"],
+                source="builtin",
+                content=content,
+                trigger=spec["trigger"],
+                tools=spec["tools"],
+                tags=spec["tags"],
+                is_active=True,
+                auto_load=False,
+            ))
+            created += 1
+        else:
+            # 正文随版本刷新；is_active / auto_load 保留用户选择
+            existing.display_name = spec["display_name"]
+            existing.description = spec["description"]
+            existing.content = content
+            existing.trigger = spec["trigger"]
+            existing.tools = spec["tools"]
+            existing.source = "builtin"
+    await db.flush()
+    return created
+
+
 async def seed() -> dict:
     """执行幂等种子,返回统计信息。"""
     async with async_session_factory() as db:
@@ -287,6 +362,7 @@ async def seed() -> dict:
         await _seed_exec_policy(db)
         await _seed_subagent_profiles(db)
         builtin_mcp = await _seed_builtin_mcp(db)
+        builtin_skills = await _seed_builtin_skills(db)
         await _heal_orphan_turns(db)
         await db.commit()
         return {
@@ -295,4 +371,5 @@ async def seed() -> dict:
             "model_id": model.id if model else None,
             "main_agent_id": agent.id,
             "builtin_mcp_created": builtin_mcp,
+            "builtin_skill_created": builtin_skills,
         }

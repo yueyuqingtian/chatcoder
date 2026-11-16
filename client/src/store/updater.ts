@@ -44,6 +44,44 @@ export interface ReleaseNote {
   prerelease?: boolean;
 }
 
+/** plan-20261024-update-channel：下载通道 id —— 镜像1 / 镜像2 / GitHub 直连 */
+export type UpdateChannelId = "mirror1" | "mirror2" | "github";
+
+/** 通道候选顺序（界面按此顺序渲染卡片，与主进程 CHANNEL_IDS 一致） */
+export const UPDATE_CHANNEL_IDS: UpdateChannelId[] = ["mirror1", "mirror2", "github"];
+
+/** 单条通道的测速结果（主进程 update-channels.cjs 的 publicReport 逐字段对应） */
+export interface ChannelProbe {
+  ok: boolean;
+  /** 首字节耗时（毫秒），不含传数据的耗时 */
+  ms: number;
+  bytesPerSecond: number;
+  /** 失败原因（成功时为空串），界面上归并为「不可用」 */
+  reason: string;
+}
+
+export interface ChannelReport {
+  channels: Record<UpdateChannelId, ChannelProbe>;
+  /** 测速最快的一条；全部失败时为 null */
+  best: UpdateChannelId | null;
+  /** 测速时间戳（毫秒）；0 = 还没测过 */
+  testedAt: number;
+}
+
+/** 通道快照 —— 主进程 getUpdateChannels / measureUpdateChannels / setUpdateChannel 的返回值 */
+export interface ChannelSnapshot {
+  report: ChannelReport | null;
+  /** 测速得出的最快通道 */
+  preferred: UpdateChannelId | null;
+  /** 当前实际生效通道（手动指定优先，否则测速最优，最后回落镜像1） */
+  effective: UpdateChannelId;
+  /** "auto" = 按测速自动选；否则为手动指定 */
+  mode: UpdateChannelId | "auto";
+  /** 正在测速 */
+  measuring: boolean;
+  labels: Record<UpdateChannelId, string>;
+}
+
 interface UpdaterStore {
   status: UpdateStatus;
   appVersion: string;
@@ -56,6 +94,12 @@ interface UpdaterStore {
   /** 发现新版本时自动静默下载（设置「关于」里的开关；默认开，与主进程默认一致） */
   autoDownload: boolean;
   setAutoDownload: (on: boolean) => Promise<void>;
+  /** plan-20261024-update-channel：下载通道快照（测速结果 / 优选 / 生效通道）；null = 未就绪或非桌面端 */
+  channels: ChannelSnapshot | null;
+  /** 重新测速（点击即进入「测速中」，不等主进程推送） */
+  measureChannels: () => Promise<void>;
+  /** 手动指定通道；"auto" 恢复按测速自动选 */
+  setChannel: (id: UpdateChannelId | "auto") => Promise<void>;
   /** 订阅主进程状态推送（幂等，App 挂载时调用一次） */
   init: () => void;
   checkForUpdates: () => Promise<void>;
@@ -80,6 +124,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   releaseHistory: [],
   releaseSource: "",
   pendingWhatsNew: null,
+  channels: null,
   init: () => {
     if (get().listening) return;
     set({ listening: true });
@@ -90,6 +135,16 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     void api.getUpdateState?.().then((s) => { if (isUpdateStatus(s)) set({ status: normalizeStatus(s) }); });
     void api.getAppVersion?.().then((v) => set({ appVersion: v || "" }));
     void api.getUpdateSettings?.().then((s) => { if (s && typeof s.autoDownload === "boolean") set({ autoDownload: s.autoDownload }); }).catch(() => { /* 保持默认 */ });
+    // plan-20261024-update-channel：通道快照随主进程测速推送实时刷新；再拉一次兜底
+    // （测速可能在订阅之前就已完成）。init 有 listening 守卫，不会重复订阅。
+    api.onUpdateChannels?.((snap) => {
+      const next = normalizeChannels(snap);
+      if (next) set({ channels: next });
+    });
+    void api.getUpdateChannels?.().then((snap) => {
+      const next = normalizeChannels(snap);
+      if (next) set({ channels: next });
+    }).catch(() => { /* 保持 null，关于页不渲染通道区 */ });
     // plan-230-1144 M4.2: 升级后首启判定（异步，不阻塞初始化）
     void get().checkWhatsNew();
   },
@@ -133,6 +188,36 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       const r = await window.chatcoderAPI?.switchUpdateSourceToPrimary?.();
       if (isUpdateStatus(r)) set({ status: normalizeStatus(r) });
     } catch { /* 主进程会推送最新状态 */ }
+  },
+  measureChannels: async () => {
+    const api = window.chatcoderAPI;
+    if (!api?.measureUpdateChannels) return;
+    // 乐观态：一轮测速要等三条通道都回来（每条最多一个超时），点了必须立刻有反馈
+    const prev = get().channels;
+    if (prev) set({ channels: { ...prev, measuring: true } });
+    try {
+      const next = normalizeChannels(await api.measureUpdateChannels());
+      if (next) set({ channels: next });
+    } catch {
+      // 失败：退回点击前的快照，避免界面一直停在「测速中」
+      const cur = get().channels;
+      if (cur) set({ channels: { ...cur, measuring: false } });
+    }
+  },
+  setChannel: async (id) => {
+    const api = window.chatcoderAPI;
+    if (!api?.setUpdateChannel) return;
+    // 修改即保存：先把选择落到界面（选中态与提示行立即变化），主进程返回的快照为准
+    const prev = get().channels;
+    if (prev) {
+      set({ channels: { ...prev, mode: id, effective: id === "auto" ? (prev.preferred || prev.effective) : id } });
+    }
+    try {
+      const next = normalizeChannels(await api.setUpdateChannel(id));
+      if (next) set({ channels: next });
+    } catch {
+      if (prev) set({ channels: prev });
+    }
   },
   setAutoDownload: async (on) => {
     const prev = get().autoDownload;
@@ -201,4 +286,31 @@ function normalizeStatus(s: UpdateStatus): UpdateStatus {
 
 function normalizeReleases(list: ReleaseNote[]): ReleaseNote[] {
   return list.map((r) => ({ ...r, notes: htmlReleaseNotesToMarkdown(r.notes || "") }));
+}
+
+function isChannelId(v: unknown): v is UpdateChannelId {
+  return v === "mirror1" || v === "mirror2" || v === "github";
+}
+
+/** plan-20261024-update-channel：主进程快照收窄。
+ *  preload 缺失（dev / 非桌面端）或结构不认识时返回 null，关于页据此不渲染通道区，
+ *  而不是拿半截数据画出「未测速」的假卡片。 */
+function normalizeChannels(v: unknown): ChannelSnapshot | null {
+  if (!v || typeof v !== "object") return null;
+  const raw = v as Record<string, unknown>;
+  if (!("effective" in raw) && !("report" in raw)) return null;
+  const labels = (raw.labels && typeof raw.labels === "object" ? raw.labels : {}) as Record<string, unknown>;
+  const report = raw.report && typeof raw.report === "object" ? (raw.report as ChannelReport) : null;
+  return {
+    report,
+    preferred: isChannelId(raw.preferred) ? raw.preferred : null,
+    effective: isChannelId(raw.effective) ? raw.effective : "mirror1",
+    mode: raw.mode === "auto" ? "auto" : isChannelId(raw.mode) ? raw.mode : "auto",
+    measuring: raw.measuring === true,
+    labels: {
+      mirror1: typeof labels.mirror1 === "string" ? labels.mirror1 : "镜像1",
+      mirror2: typeof labels.mirror2 === "string" ? labels.mirror2 : "镜像2",
+      github: typeof labels.github === "string" ? labels.github : "github",
+    },
+  };
 }

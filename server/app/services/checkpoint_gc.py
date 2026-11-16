@@ -47,25 +47,37 @@ async def _referenced_ckpts(db: AsyncSession) -> set[str]:
     return refs
 
 
-async def collect_orphans(db: AsyncSession, workspace: str) -> dict:
-    """识别孤儿 checkpoint：磁盘存在但 DB 无引用。返回统计（不删除）。"""
-    refs = await _referenced_ckpts(db)
+async def collect_orphans(db: AsyncSession, workspace: str,
+                         refs: set[str] | None = None) -> dict:
+    """识别孤儿 checkpoint：磁盘存在但 DB 无引用。返回统计（不删除）。
+
+    refs：调用方已算过全库引用集时传入，避免多工作区逐一遍历快照。
+    """
+    if refs is None:
+        refs = await _referenced_ckpts(db)
     orphan_paths = [p for p in _iter_checkpoint_files(workspace)
                     if _path_key(p) not in refs]
     return {"workspace": workspace, "orphan_count": len(orphan_paths)}
 
 
-async def cleanup(db: AsyncSession, workspace: str) -> dict:
+async def cleanup(db: AsyncSession, workspace: str, refs: set[str] | None = None) -> dict:
     """执行清理（孤儿 + 过期 + 超量），返回删除统计。
 
     workspace 为空或目录不存在时直接返回零统计。
+    refs：调用方已算过全库引用集时传入（多工作区批量清理时复用，避免重复全表扫）。
+
+    返回的 kept 表示「保留期内且仍被快照引用的文件数」——它们在保留期到期前
+    按设计不会被删除；调用方据此向用户解释「为何清理后占用没变」，
+    而不是把 deleted=0 当成清理失败。
     """
+    empty = {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0, "kept": 0}
     if not workspace:
-        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0}
-    refs = await _referenced_ckpts(db)
+        return empty
+    if refs is None:
+        refs = await _referenced_ckpts(db)
     root = Path(workspace).resolve() / _CHECKPOINT_DIR
     if not root.exists():
-        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0}
+        return empty
 
     all_files = sorted(_iter_checkpoint_files(workspace), key=lambda p: p.stat().st_mtime)
     deleted: list[Path] = []
@@ -91,7 +103,8 @@ async def cleanup(db: AsyncSession, workspace: str) -> dict:
         overflow_cnt += 1
 
     if not deleted:
-        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0}
+        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0,
+                "kept": len(all_files)}
 
     deleted_keys = {_path_key(p) for p in deleted}
     removed_entries = 0
@@ -137,7 +150,8 @@ async def cleanup(db: AsyncSession, workspace: str) -> dict:
         workspace, len(deleted), orphan_cnt, expired_cnt, overflow_cnt, removed_entries,
     )
     return {"deleted": len(deleted), "orphans": orphan_cnt,
-            "expired": expired_cnt, "overflow": overflow_cnt}
+            "expired": expired_cnt, "overflow": overflow_cnt,
+            "kept": max(len(all_files) - len(deleted), 0)}
 
 
 async def run_cleanup_for_workspace(db: AsyncSession, workspace: str) -> dict:
@@ -146,4 +160,4 @@ async def run_cleanup_for_workspace(db: AsyncSession, workspace: str) -> dict:
         return await cleanup(db, workspace)
     except Exception:
         logger.debug("[checkpoint_gc] GC 执行失败(非阻塞)", exc_info=True)
-        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0}
+        return {"deleted": 0, "orphans": 0, "expired": 0, "overflow": 0, "kept": 0}

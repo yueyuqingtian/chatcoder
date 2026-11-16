@@ -4,11 +4,10 @@
 「上下文溢出」「瞬时故障」四条路径上，各自维护等待、换 Key、记账与广播，行为分叉
 （有的不做健康检查、有的只给一次机会、有的重试发送的是未压缩的原始消息）。
 
-现在收敛成**一处**：以「轮」为单位重试。
+现在收敛成一处：每个间隔对应一次额外调用。
 
-- 一轮内按凭据排序依次尝试尚未试过的 Key/账号，失败立刻换下一个、**不等待**；
-  因此 N 个 Key 不会吃掉重试次数（3 个 Key × 3 轮 = 最多 9 次尝试）。
-- 整轮都失败才按 `agent_retry_intervals` 等待并开下一轮。
+- plan-20261112-retry-policy-1：切换凭据也占用一次重试，避免 Key 数放大调用数。
+- 空响应、异常、请求修复共享预算，重新进入恢复不会重置已用次数。
 - 每次拿到响应都要过健康检查：空响应、断流、仅思考无正文与抛异常同等对待。
 - 分类为 `client` 的失败（上下文溢出、function-call 400、参数错误）原样重试无意义，
   引擎立即返回，交给调用方修复/压缩请求内容后再次进入本引擎。
@@ -19,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -41,6 +40,9 @@ _CLIENT_HINTS = (
     "超出上下文", "上下文超出",
     "please ensure that function call", "called exactly once", "must be followed by tool",
     "role 'tool' must be a response",
+    "unexpected tool_result", "unexpected tool_use_id", "tool_result blocks",
+    "must start with a user", "assistant prefill", "assistant message prefill",
+    "missing reasoning_content", "reasoning_content must be passed",
     "invalid request", "invalid_request_error", "unknown field", "unexpected keyword",
 )
 _AUTH_HINTS = (
@@ -152,7 +154,7 @@ def classify_failure(error: object) -> Failure:
 
 @dataclass
 class Attempt:
-    """一次尝试的坐标：第几轮（1-based）、本轮第几次（1-based）、思考档位。"""
+    """一次重试的序号（1-based）、轮内索引（固定为 1）与思考档位。"""
 
     round: int
     index: int
@@ -167,7 +169,7 @@ class RecoveryResult:
     failure: Failure | None = None
     # 实际等待并尝试的轮数（不含首次调用）
     rounds: int = 0
-    # 实际尝试次数（轮内换 Key 也算）
+    # 本次进入恢复引擎的实际调用次数（不含首次调用）
     attempts: int = 0
     # 最后一次失败的原始错误（异常路径用于终止文案）
     error: BaseException | None = None
@@ -181,6 +183,18 @@ class RecoveryCancelled(RuntimeError):
     """等待或尝试期间收到用户中断信号。"""
 
 
+@dataclass
+class RetryBudget:
+    """plan-20261112-retry-policy-1：同一次模型步骤不能重复领取重试次数。"""
+
+    intervals: Sequence[float]
+    attempts: int = 0
+    failure: Failure | None = None
+
+    def __post_init__(self) -> None:
+        self.intervals = tuple(self.intervals)
+
+
 async def recover_model_call(
     *,
     call: Callable[[Attempt], Awaitable[Any]],
@@ -189,11 +203,11 @@ async def recover_model_call(
     cancelled: Callable[[], bool],
     check: Callable[[Any], Failure | None] | None = None,
     efforts: Sequence[str | None] = (),
-    per_round: int = 1,
+    budget: RetryBudget | None = None,
     on_status: Callable[[str], Awaitable[None]] | None = None,
     on_outcome: Callable[[Attempt, Any | None, Failure | None], Awaitable[None]] | None = None,
 ) -> RecoveryResult:
-    """按「轮」重试一次模型调用。
+    """按配置间隔恢复一次模型调用，每个间隔只调用一次。
 
     Args:
         call: 执行一次调用；内部负责切换到本轮对应的凭据并构造请求。
@@ -203,19 +217,21 @@ async def recover_model_call(
         cancelled: 是否已收到中断信号。
         check: 响应健康检查；返回 None 表示健康。
         efforts: 每轮的思考档位降档序列（不足按默认 None）。
-        per_round: 每轮最多尝试几个凭据（= 该供应商可用凭据数，至少 1）。
+        budget: 同一次失败跨恢复路径共享的预算；省略时按 intervals 新建。
         on_status: 状态行广播（「N 秒后重试 i/j」）。
         on_outcome: 每次尝试结束后的记账回调（成功/失败都调用）。
 
     Raises:
         RecoveryCancelled: 等待或尝试期间用户中断。
     """
-    rounds = max(0, int(per_round or 1))
-    result = RecoveryResult()
+    if budget is None:
+        budget = RetryBudget(intervals)
+    intervals = budget.intervals
+    result = RecoveryResult(failure=budget.failure)
     failures: list[Failure] = []
-    last_error: BaseException | None = None
 
-    for r_idx, wait_s in enumerate(list(intervals), start=1):
+    for r_idx in range(budget.attempts + 1, len(intervals) + 1):
+        wait_s = intervals[r_idx - 1]
         if cancelled():
             raise RecoveryCancelled("用户中断")
         effort = efforts[r_idx - 1] if r_idx - 1 < len(efforts) else None
@@ -227,48 +243,48 @@ async def recover_model_call(
             )
         if not await wait(float(wait_s)):
             raise RecoveryCancelled("重试等待期间收到中断信号")
-        result.rounds = r_idx
-
-        for i_idx in range(1, rounds + 1):
-            if cancelled():
-                raise RecoveryCancelled("用户中断")
-            attempt = Attempt(round=r_idx, index=i_idx, effort=effort)
-            result.attempts += 1
-            response = None
-            failure: Failure | None = None
-            try:
-                response = await call(attempt)
-            except RecoveryCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 所有调用异常都当作一次失败
-                last_error = exc
-                failure = classify_failure(exc)
-                logger.warning(
-                    "[recovery] 第 %d 轮第 %d 次调用失败（%s）：%s",
-                    r_idx, i_idx, failure.kind, str(exc)[:200],
-                )
-            else:
-                if check is not None:
-                    failure = check(response)
-                if failure is None:
-                    if on_outcome is not None:
-                        await on_outcome(attempt, response, None)
-                    result.response = response
-                    result.failure = None
-                    result.error = None
-                    return result
-                logger.warning(
-                    "[recovery] 第 %d 轮第 %d 次响应不健康（%s）：%s",
-                    r_idx, i_idx, failure.kind, failure.text[:200],
-                )
-
-            failures.append(failure)
-            result.failure = failure
-            result.error = last_error if response is None else None
-            if on_outcome is not None:
-                await on_outcome(attempt, None, failure)
-            # 请求内容本身有问题：原样重试不会好转，交调用方修复后重新进入
-            if not failure.retryable:
+        if cancelled():
+            raise RecoveryCancelled("用户中断")
+        if on_status is not None:
+            await on_status(f"正在重试 {r_idx}/{len(intervals)}…")
+        if cancelled():
+            raise RecoveryCancelled("用户中断")
+        budget.attempts += 1
+        result.rounds += 1
+        result.attempts += 1
+        attempt = Attempt(round=r_idx, index=1, effort=effort)
+        response = None
+        failure: Failure | None = None
+        result.error = None
+        try:
+            response = await call(attempt)
+        except RecoveryCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 所有调用异常都当作一次失败
+            result.error = exc
+            failure = classify_failure(exc)
+            logger.warning("[recovery] 第 %d 次重试失败（%s）：%s",
+                           r_idx, failure.kind, str(exc)[:200])
+        else:
+            if check is not None:
+                failure = check(response)
+            if failure is None:
+                if on_outcome is not None:
+                    await on_outcome(attempt, response, None)
+                result.response = response
+                result.failure = None
+                budget.failure = None
                 return result
+            logger.warning("[recovery] 第 %d 次重试响应不健康（%s）：%s",
+                           r_idx, failure.kind, failure.text[:200])
+
+        failures.append(failure)
+        result.failure = failure
+        budget.failure = failure
+        if on_outcome is not None:
+            await on_outcome(attempt, None, failure)
+        # 请求内容本身有问题：原样重试不会好转，交调用方修复后用剩余预算恢复。
+        if not failure.retryable:
+            return result
 
     return result

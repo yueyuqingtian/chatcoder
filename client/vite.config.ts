@@ -47,6 +47,9 @@ export default defineConfig({
       input: {
         main: "index.html",
         pet: "pet.html",
+        // 微应用独立窗口的外壳页（内置微应用的 webview 承载 + 全屏按钮）。
+        // 与 pet 同一种做法：独立 HTML 入口 → 独立 chunk，不增加主窗包体积。
+        microapp: "microapp.html",
         ...(process.env.CHATCODER_PERF_FIXTURE === "1" ? { performance: "performance.html" } : {}),
       },
     },

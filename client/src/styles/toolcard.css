@@ -35,7 +35,9 @@
   --tcard-fs-sm: calc(var(--tcard-fs) - 1px);
   --tcard-fs-xs: calc(var(--tcard-fs) - 2px);
   --tcard-lh: 1.5;
-  --tcard-pad-x: 14px;
+  /* plan-20261116-toolcard-hover：标题 / 行内容距卡片内壁 18px，完整高亮块距内壁 10px。
+     高亮的外扩空间还须纳入栏目折叠容器的裁切范围，单独加大栏目内距无法修复贴边与直角。 */
+  --tcard-pad-x: 18px;
   /* 行高取整：行与行的节奏稳定，进程栏按行数计容量时不会因小数累计出偏差 */
   --tcard-row-h: round(nearest, calc(var(--tcard-fs) * 2.15), 1px);
   /* 底色：浅色固定白；深色取浮层色（比舞台亮一档） */
@@ -46,7 +48,9 @@
   --tcard-shadow:
     0 1px 2px rgba(0, 0, 0, calc(0.04 * var(--shadow-strength, 1))),
     0 2px 8px rgba(0, 0, 0, calc(0.06 * var(--shadow-strength, 1)));
-  --tcard-hover: color-mix(in srgb, var(--text-1) 5.5%, transparent);
+  /* 行悬停底色：5.5% → 7%、深色 8% → 10.5%。原来的对比太低，圆角行块的边界看不出来，
+     整块读作一个矩形色带（用户反馈「四角是纯矩形」）。加深到能读出边界即可，不做成实心高亮。 */
+  --tcard-hover: color-mix(in srgb, var(--text-1) 7%, transparent);
   --tcard-line: color-mix(in srgb, var(--text-1) 7%, transparent);
   /* 限高（--tcard-max-h，px）由 SessionToolCard 按面板高度实测后写在外壳上：不超过面板高度减去上下留白，
      且最高 720px；常规内容放得下不出滚动条，栏目特别多时**卡片体**内才滚动。
@@ -59,7 +63,7 @@
   --tcard-shadow:
     0 1px 3px rgba(0, 0, 0, calc(0.28 * var(--shadow-strength, 1))),
     0 2px 8px rgba(0, 0, 0, calc(0.22 * var(--shadow-strength, 1)));
-  --tcard-hover: color-mix(in srgb, var(--text-1) 8%, transparent);
+  --tcard-hover: color-mix(in srgb, var(--text-1) 10.5%, transparent);
   --tcard-line: color-mix(in srgb, var(--text-1) 9%, transparent);
 }
 
@@ -88,6 +92,11 @@
   font-size: var(--tcard-fs);
   line-height: var(--tcard-lh);
   box-shadow: 0 0 0 1px var(--tcard-ring), var(--tcard-shadow);
+  /* 形态切换（停靠卡片 ↔ 悬浮卡片）会换掉整条 box-shadow：此前没有过渡，阴影瞬间跳变。
+     两态的层数可以不同（悬浮态多一层），按规范短的一侧会用「透明 + 全零」补齐末尾，
+     仍逐层插值，所以过渡不会跳。时长只用 --dur-3（已乘 --motion-scale）与 --ease-standard；
+     「动画效果=关闭」档 --motion-scale=0 → 时长归零，与系统的减少动效一并对齐为瞬时。 */
+  transition: box-shadow var(--dur-3) var(--ease-standard);
   transform-origin: 100% 0;
   --tc-cap-r: calc(var(--tcard-cap-h) / 2);
 }
@@ -139,7 +148,12 @@
   pointer-events: none;
 }
 
-/* 运动期降级：面板拖拽 / 窗口缩放时不播放入场与形变（形变的收尾由 JS 兜底，不依赖 animationend） */
+/* 运动期降级：面板拖拽 / 窗口缩放时不播放入场与形变（形变的收尾由 JS 兜底，不依赖 animationend）。
+   注意：这里只关 animation，刻意不动 transition——外壳的 box-shadow 过渡（见上方 .tcard-shell）
+   由两类全局降级兜底，不需要在这里放行或禁用：
+   ① motion.css 的 prefers-reduced-motion 全局块把 transition-duration 压到 0.01ms；
+   ② 「动画效果=关闭」档 --motion-scale=0 → --dur-* 归零，过渡时长即为 0。
+   面板拖拽 / 窗口缩放本身不会改变卡片形态，所以这段过渡不会在这些时刻被触发。 */
 :is(html[data-window-motion="1"], body.panel-dragging) .tcard-shell,
 :is(html[data-window-motion="1"], body.panel-dragging) .tcard-shell :is(.tcard-card, .tcard-capsule) { animation: none; }
 
@@ -265,10 +279,17 @@
 .tcard-sec-caret.is-open { transform: none; }
 .tcard-sec-head:hover .tcard-sec-caret,
 .tcard-sec-head:focus-visible .tcard-sec-caret { opacity: 1; color: var(--text-1); }
-.tcard-sec-body, .tcard-proc-list { display: flex; flex-direction: column; }
-.tcard-sec-body { margin-top: 2px; }
+/* 行之间留 2px 缝：悬停底色是圆角块，上下不粘连才不会看成一条通栏色带 */
+.tcard-sec-body, .tcard-proc-list { display: flex; flex-direction: column; gap: 2px; }
+/* plan-20261116-toolcard-hover：Collapse 内层始终裁切溢出，原先把行两侧外扩的 8px 连同圆角全部切掉。
+   扩大本栏目折叠容器的裁切范围，再在内容体补回内距：文字位置 / 可用宽度不变，行块完整可见。
+   保留公共 Collapse 的 overflow:hidden，确保收起过程仍能裁切内容。 */
+.tcard-sec > .ui-collapse { margin-inline: -8px; }
+.tcard-sec-body { margin-top: 2px; padding-inline: 8px; }
 
 /* ═══════════ 通用行：行首固定图标槽 + 单行文本 + 行尾附加 ═══════════ */
+/* 悬停底色是一块独立的圆角行块：左右比内容区各外扩 8px、块内再留 8px，
+   图标左边界仍与栏目标题对齐（18 - 8 + 8 = 18）；上下靠 .tcard-sec-body 的 2px gap 分隔。 */
 .tcard-row {
   display: flex;
   align-items: center;
@@ -298,7 +319,9 @@
 .tcard-row-strong { font-weight: 500; }
 .tcard-row-hint { flex-shrink: 0; color: var(--text-3); font-size: var(--tcard-fs-sm); font-variant-numeric: tabular-nums; }
 .tcard-row-btn {
-  width: calc(100% + 16px);
+  /* 宽度交给 flex 的 stretch + 上面的负外边距算：显式写 width 会把负外边距重复叠加，
+     按钮比行内容宽出 12px、右缘溢出卡片（实测）。 */
+  width: auto;
   border: none;
   background: transparent;
   text-align: left;
@@ -364,10 +387,14 @@ div.tcard-row:focus-visible { outline: none; background: var(--tcard-hover); }
 .tcard-sec-meta[data-tone="done"] { color: var(--success); }
 
 /* 悬浮形态（放不下停靠卡片时用户仍展开）：盖在内容之上，宽度不超过宿主；
-   与停靠卡片同一套扁平外观，只多一层很浅的投影，表明它浮在正文之上 */
+   与停靠卡片同一套扁平外观，只多一层很浅的投影，表明它浮在正文之上。
+   投影取统一令牌 --shadow-md（浅色 0 4px 12px .08 + 0 2px 4px .04 / 深色见 tokens.css），
+   不再自造 0 4px 16px：16px 模糊的尾部会超出卡片 inset（上 10px / 右 14px），
+   被 .chat-panel{overflow:hidden} 与 .app-main{contain:layout paint} 在上 / 右裁成直线。
+   12px 模糊在既有留白里收得住，且与全局浮层同一套阴影语言（扁平取向不变，仍只一层描边环 + 令牌投影）。 */
 .tcard-shell.is-floating {
   max-width: calc(100% - var(--tcard-inset) * 2);
-  box-shadow: 0 0 0 1px var(--tcard-ring), 0 4px 16px rgba(0, 0, 0, calc(0.08 * var(--shadow-strength, 1)));
+  box-shadow: 0 0 0 1px var(--tcard-ring), var(--shadow-md);
 }
 .tcard-shell.is-floating .tcard-card { max-width: 100%; }
 

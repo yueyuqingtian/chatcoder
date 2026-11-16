@@ -29,6 +29,7 @@ from app.models.base import ModelProvider
 from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.workbuddy_model_caps import get_model_caps, map_reasoning_effort
+from app.orchestration.history_sequence import prepare_history, validate_openai_wire
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,7 @@ class WorkBuddyProvider(ModelProvider):
     def _build_body(self, request: ChatRequest) -> dict:
         body: dict = {
             "model": request.model or self._model_name,
-            "messages": [self._convert_message(m) for m in request.messages],
+            "messages": validate_openai_wire([self._convert_message(m) for m in prepare_history(request.messages)]),
             "stream": True,
         }
         # 温度统一取值：思考开启时不设置；目录声明的 temperature 作为次级默认；

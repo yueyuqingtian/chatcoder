@@ -192,3 +192,64 @@ async def test_update_session_divider_not_written_for_other_fields(db_env, captu
     await update_session(1, SessionUpdate(pinned=True), db)
     assert await _system_messages(db) == []
     assert captured == []
+
+
+async def test_divider_attached_to_new_turn_after_user_message(db_env, captured):
+    """plan-20261115：切换提示必须落在「新用户消息之后、AI 执行之前」。
+
+    用户反馈：发送前切了模型，提示却出现在**上一轮**的复制按钮组前面。
+    根因有二——① 旧实现先写提示再写用户消息，提示拿到更小的 id；
+    ② 提示不带 turn_id，前端把无 turn 的系统消息并入上一个 turn。
+    这里同时锁住「归属本轮 turn」与「id 大于本批用户消息」两条。
+    """
+    from app.gateway.routers.turns import _write_model_divider_if_changed
+
+    db = db_env
+    await _mk_session(db, model_id=2)
+    await _mk_model(db, model_id=1, name="glm-4.6", provider_name="智谱")
+    await _mk_model(db, model_id=2, name="glm-4.6", provider_name="硅基流动")
+    await _add_user_message_with_model(db, model_id=1)  # 上一轮用户消息
+
+    # 新用户消息先入库（与 create_turn 中的顺序一致）
+    new_user = Message(session_id=1, sender_type="user", msg_type="text",
+                      content={"text": "下一条", "model_id": 2}, turn_id=99)
+    db.add(new_user)
+    await db.commit()
+
+    await _write_model_divider_if_changed(
+        db, 1, 2, turn_id=99, before_message_id=new_user.id,
+    )
+
+    rows = await _system_messages(db)
+    assert len(rows) == 1
+    divider = rows[0]
+    # 归属新的一轮：前端按 turn 分组时才会渲染在 AI 执行之前
+    assert divider.turn_id == 99
+    # 时间序在新用户消息之后
+    assert divider.id > new_user.id
+
+
+async def test_divider_compares_against_message_before_new_user_message(db_env, captured):
+    """回看基准必须排除刚插入的新用户消息，否则永远判成「没换模型」。"""
+    from app.gateway.routers.turns import _write_model_divider_if_changed
+
+    db = db_env
+    await _mk_session(db, model_id=1)
+    await _mk_model(db, model_id=1, name="m1")
+    await _mk_model(db, model_id=2, name="m2")
+    await _add_user_message_with_model(db, model_id=1)
+
+    new_user = Message(session_id=1, sender_type="user", msg_type="text",
+                      content={"text": "换了模型的新消息", "model_id": 2}, turn_id=7)
+    db.add(new_user)
+    await db.commit()
+
+    # 不传 before_message_id 时，最新用户消息就是刚插入的这条 → 不写提示
+    await _write_model_divider_if_changed(db, 1, 2)
+    assert await _system_messages(db) == []
+
+    # 传了之后回看得到上一条（model_id=1），正确写出提示
+    await _write_model_divider_if_changed(db, 1, 2, turn_id=7,
+                                          before_message_id=new_user.id)
+    rows = await _system_messages(db)
+    assert len(rows) == 1 and rows[0].turn_id == 7

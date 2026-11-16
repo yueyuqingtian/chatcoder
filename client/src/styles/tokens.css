@@ -313,6 +313,8 @@
   --text-3: var(--color-foreground-subtlest);
 
   --text-shine-grad: none;
+  --shine-base: #595964;
+  --shine-peak: #bfc4d0;
   --grad-flow: none;
 
   --border: var(--color-border);
@@ -354,6 +356,8 @@
   --text-1: var(--color-foreground);
   --text-2: var(--color-foreground-subtle);
   --text-3: var(--color-foreground-subtlest);
+  --shine-base: #868696;
+  --shine-peak: #f4f4f8;
   --bg-overlay: rgba(0, 0, 0, 0.6);
   --accent-hover: var(--color-white);
   --border-light: color-mix(in oklab, var(--color-neutral-50) 5%, transparent);
@@ -488,6 +492,7 @@
   --dur-loop: 1.6s;
   /* 语义化循环时长（已含 --motion-scale）：加载条、吉祥物跳动，避免组件内写死 ms */
   --dur-load: calc(1800ms * var(--motion-scale));
+  --dur-flow-shine: calc(1750ms * var(--motion-scale));
   --dur-hop: calc(900ms * var(--motion-scale));
   /* 向后兼容别名（旧类名仍引用；下一版本清理） */
   /* plan-621-2572: 补齐旧样式中引用的 --dur-base 别名 */
@@ -547,7 +552,7 @@
      行与文本始终等高、间距始终一致（节距 = 行高 + --flow-gap = 段落节奏）。
      注意 --chat-line-height 是无单位倍率（与外观设置语义一致）。 */
   --chat-line-height: 2.2;
-  --flow-gap: calc(var(--fs-md, 13px) * 0.62);
+  --flow-gap: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2) * 0.28);
   /* plan-20261017-ux-overhaul 阶段 B：四处消息流（主流 / 子代理 / 侧边对话 / 工作流）共用的工具行规格 */
   --flow-icon: 16px;          /* 工具图标槽位，图标替换 / 运行态切换不改变宽度 */
   --flow-icon-gap: 8px;       /* 图标与动作文字 */

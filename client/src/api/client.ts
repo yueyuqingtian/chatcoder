@@ -287,11 +287,15 @@ export interface ProjectTreeOut {
  *  且正则无终止符会把整行吞成一个纯文本 token（发送后图标变文字）。
  *  落库结构化副本后，消息流可直接渲染出与输入框一致的带图标芯片。 */
 export interface ComposerRefOut {
-  /** plan-633-2604（R3）：新增 "dir"——拖入的文件夹引用（值为目录路径，AI 侧用 fs_list 查看） */
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
+  /** plan-633-2604（R3）：新增 "dir"——拖入的文件夹引用（值为目录路径，AI 侧用 fs_list 查看）
+   *  plan-693-2868（P1）：新增 "microapp"——微应用引用（值为 appId，发送后仍保留在输入框里，可继续追问）。
+   *  与 ComposerCore.ComposerRef、drafts.ComposerRefDraft 三处必须同步，漏一处 tsc 就报错。 */
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
   value: string;
   label: string;
   project_label?: string;
+  /** plan-693-2868（P1）：微应用引用记下版本——「查看界面」要按这个版本打开标签 */
+  version?: string;
 }
 
 export interface SessionMentionCandidate {
@@ -353,7 +357,7 @@ export interface DiagnosticsOut {
     | { name: string; ok: boolean; detail?: string }[]
     | Record<string, { ok?: boolean; detail?: string } | undefined>;
   /** plan-88: 各项目工作区 .chatcoder/checkpoints 占用统计 */
-  checkpoints?: Array<{ workspace: string; file_count: number; size_mb: number; orphan_count: number }>;
+  checkpoints?: Array<{ workspace: string; file_count: number; size_mb: number; orphan_count: number; retention_days?: number }>;
 }
 
 export interface UpdateCheckOut {
@@ -413,6 +417,164 @@ export interface ScanResult {
   updated: number;
   unchanged: number;
   total_scanned: number;
+}
+
+/** plan-693-2868（P1/P4）：已安装微应用（`GET /api/microapps` 的**列表项**）。
+ *
+ *  字段口径以 P4 落地的后端路由为准（server/app/gateway/routers/microapps.py `_app_summary()`）：
+ *  appId / name / version / description / methods / perms / vendors / installedVersions /
+ *  sizeBytes / origin / path。两处不要各写一套——「工具说有、管理页说没有」正是口径漂移的症状。
+ *
+ *  注意 `version` 是**当前版本**（同一 appId 已装的最高版本），全部版本见 `installedVersions`。 */
+export interface MicroAppOut {
+  appId: string;
+  name: string;
+  version: string;
+  description?: string | null;
+  /** 入口页（相对 app 目录，缺省由主进程 / MicroAppPanel 按 app/index.html 补） */
+  entry?: string | null;
+  /** 声明的方法面：菜单与工具卡的补充说明可用 */
+  methods?: string[] | null;
+  /** 声明的权限清单（安装前展示用，§6.4「安装前展示」） */
+  perms?: string[] | null;
+  /** 声明的共享 vendor（§6.3） */
+  vendors?: Array<{ name: string; version: string }> | null;
+  /** 该 appId 全部已装版本（升序）；删除单个版本时用 */
+  installedVersions?: string[] | null;
+  /** 该 appId 所有版本合计的磁盘占用 */
+  sizeBytes?: number | null;
+  /** 来源记录（`.origin.json`）：source = local / import / community；缺文件时回落 local */
+  origin?: MicroAppOrigin | null;
+  /** 当前版本目录的绝对路径 */
+  path?: string | null;
+}
+
+/** `.origin.json` 的形状（§6.1 目录图）：缺文件视为本地手写（source=local）。 */
+export interface MicroAppOrigin {
+  source?: string;
+  /** 导入时间（import） */
+  importedAt?: string;
+  /** 社区来源：仓库标识与作者（D15） */
+  repo?: string;
+  authorId?: string;
+  authorName?: string;
+  /** 社区来源：安装时的包哈希（篡改校验用） */
+  sha256?: string;
+  [key: string]: unknown;
+}
+
+/** `GET /api/microapps` 的响应体（后端返回 `{apps, count, root}`，不是裸数组）。 */
+export interface MicroAppListOut {
+  apps: MicroAppOut[];
+  count: number;
+  /** 库根（`CHATCODER_MICROAPP_ROOT` → 默认 `~/.chatcoder/microapps`，§6.1） */
+  root: string;
+}
+
+/** 单个已装版本的展示信息（`GET /api/microapps/{appId}` 的 versions[]）。 */
+export interface MicroAppVersionOut {
+  version: string;
+  path: string;
+  sizeBytes: number;
+  hasManifest: boolean;
+  origin: MicroAppOrigin;
+}
+
+/** `GET /api/microapps/{appId}` 的响应体：列表项 + manifest 原文 + 全部版本。 */
+export interface MicroAppDetailOut extends MicroAppOut {
+  appDir: string;
+  versions: MicroAppVersionOut[];
+  manifest: Record<string, unknown>;
+  manifestText: string;
+}
+
+/** `POST /api/microapps/{appId}/validate`：校验不过也是 200（ok=false + issues[]）。 */
+export interface MicroAppValidateOut {
+  ok: boolean;
+  appId: string;
+  version: string;
+  path: string;
+  issues: string[];
+}
+
+/** `DELETE /api/microapps/{appId}/{version}`：version=all 时删掉整个 appId。 */
+export interface MicroAppRemoveOut {
+  ok: boolean;
+  appId: string;
+  version: string;
+  deleted: string;
+  appRemoved: boolean;
+  remainingVersions: string[];
+}
+
+/** `POST /api/microapps/import`：导入成功后**默认不启用**（返回 enabled=false）。 */
+export interface MicroAppImportOut {
+  ok: boolean;
+  appId: string;
+  version: string;
+  path: string;
+  bytes: number;
+  unpackedBytes: number;
+  origin: MicroAppOrigin;
+  enabled: boolean;
+  message: string;
+}
+
+/** 社区索引条目（§6.4「索引条目」；`_entry_dict` 原样透出 apps.json 的字段）。 */
+export interface CommunityAppOut {
+  appId: string;
+  name: string;
+  version: string;
+  /** 作者标识 `usr_<uuid>`（D15，不可验证） */
+  authorId?: string;
+  authorName?: string;
+  desc?: string;
+  size?: number;
+  sha256?: string;
+  perms?: string[];
+  methods?: string[];
+  vendors?: Array<{ name: string; version: string }>;
+  downloadUrl?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** `GET /api/community/list`：`enabled=false` 表示社区未配置（入口应隐藏，§7 P5-8）。 */
+export interface CommunityListOut {
+  apps: CommunityAppOut[];
+  enabled: boolean;
+  /** true = 远端不可达，数据来自过期本地缓存（界面应提示） */
+  stale: boolean;
+  source?: string;
+  repo?: string;
+  updatedAt?: string;
+  staleSeconds?: number;
+  query?: string;
+  count: number;
+}
+
+/** `GET /api/community/detail`：索引条目 + 本机是否已装（不代表已注入）。 */
+export interface CommunityDetailOut extends CommunityAppOut {
+  enabled: boolean;
+  stale: boolean;
+  installed: boolean;
+}
+
+/** `POST /api/community/install`：装完默认不启用（enabled=false）。 */
+export interface CommunityInstallOut {
+  ok?: boolean;
+  appId: string;
+  version: string;
+  path?: string;
+  origin?: MicroAppOrigin;
+  enabled: boolean;
+  [key: string]: unknown;
+}
+
+/** 拉黑表两档（D16）：users 按 authorId 过滤该作者全部条目，apps 按 appId 过滤单条。 */
+export interface CommunityBlocklistOut {
+  users: string[];
+  apps: string[];
 }
 
 /** plan-152-704: 全软件 token 用量统计（/api/usage/stats） */
@@ -1171,7 +1333,10 @@ export const api = {
       token_usage?: number; files_count?: number;
       /** 工作流节点的子代理：节点信息（普通子代理为空） */
       workflow?: WorkflowNodeBrief | null;
-      /** 工作流节点的子代理：派发时刻（线程首条消息 id），主消息流据此定位节点卡（普通子代理为空） */
+      /** 派发时刻 = 该子代理线程 id 最小的一条消息（主代理派发给它、sender_type=user 的任务消息）。
+       *  plan-723-3029：后端 listSessionSubagents 已统一按线程 min(message.id) 下发（turns.py），
+       *  不再只对工作流节点生效——工作流节点卡据此定位创建位置，子代理面板也用它补回
+       *  被首屏尾锚定窗口裁掉的派发消息；线程无消息时为 null。 */
       spawn_message_id?: number | null;
       /** plan-20261019-subagent-ghost: 线程消息数（0 且无任务、非运行中 = 幽灵条目） */
       message_count?: number;
@@ -1446,7 +1611,13 @@ export const api = {
   updateCheck: () => get<UpdateCheckOut>("/update-check"),
   /** plan-88: 手动触发 checkpoint 垃圾回收（不传 workspace=全部活跃项目） */
   cleanupCheckpoints: (workspace?: string) =>
-    post<{ ok: boolean; results: Array<Record<string, unknown>> }>(
+    post<{
+      ok: boolean;
+      /** plan-20261115：后端即使没删任何文件也会回传 workspace 与 kept，
+       *  前端据此区分「清理失败」与「本来就没可删的（保留期内）」。 */
+      results: Array<{ workspace?: string; deleted?: number; orphans?: number; expired?: number; overflow?: number; kept?: number }>;
+      retention_days?: number;
+    }>(
       `/diagnostics/checkpoints/cleanup${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`,
     ),
   // ── plan-230-1144 M3: 符号索引状态 / 手动重建 ──
@@ -1551,6 +1722,68 @@ export const api = {
     args: string[]; env: Record<string, string> | null; url: string | null;
     source_path: string;
   }>>("/mcp-servers/scan"),
+
+  // ── 微应用库（plan-693-2868 §6.5 / §7 P4：`/api/microapps`，只读写本机库）──
+  /** 已安装微应用列表（`GET /api/microapps`）。
+   *
+   *  plan-693-2868（P4）修正两处口径，与后端 `routers/microapps.py` 对齐：
+   *  ① 响应是 `{apps, count, root}` 而不是裸数组——此前按数组声明，`store/microapps.ts`
+   *     拿到对象后 `Array.isArray` 恒为 false，界面永远是「还没有微应用」（静默假空态）；
+   *  ② 库根由这份响应的 `root` 给出（设置页「微应用库位置」直接展示它，不再前端拼路径）。
+   *  空库返回 `{apps: [], count: 0}`，不是错误。 */
+  listMicroApps: (query?: string) =>
+    get<MicroAppListOut>(`/microapps${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+  /** 单个微应用详情：列表项 + manifest 原文 + 全部版本（删除单版本 / 查看详情用）。 */
+  getMicroApp: (appId: string) =>
+    get<MicroAppDetailOut>(`/microapps/${encodeURIComponent(appId)}`),
+  /** 校验已装微应用（校验最高版本目录）：不通过也是 200 + ok=false + issues[]。 */
+  validateMicroApp: (appId: string) =>
+    post<MicroAppValidateOut>(`/microapps/${encodeURIComponent(appId)}/validate`, {}),
+  /** 删除版本；`version="all"` 删掉整个 appId（D35 之外的本机库管理，与社区撤回无关）。 */
+  removeMicroApp: (appId: string, version: string) =>
+    del<MicroAppRemoveOut>(`/microapps/${encodeURIComponent(appId)}/${encodeURIComponent(version)}`),
+  /** 导入本地 zip 包（multipart）：同名同版本已存在返回 409，导入后默认不启用。 */
+  importMicroApp: async (file: File): Promise<MicroAppImportOut> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    // 导入链路要解压 + 校验 manifest，10s 默认超时不够（100MB 包按 §6.4 上限估算）
+    const res = await fetch(`${await baseForFetch()}/microapps/import`, {
+      method: "POST",
+      body: formData,
+      signal: AbortSignal.timeout(300_000),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw toApiError(res, detail);
+    }
+    return res.json() as Promise<MicroAppImportOut>;
+  },
+
+  // ── 社区（plan-693-2868 §6.5 / §7 P5：`/api/community`，只读 + 下载安装）──
+  /** 社区应用列表；`refresh=true` 跳过 TTL 缓存直接打远端（用户点「刷新」时用）。
+   *  `enabled=false` 表示 `community_repo` 未配置 —— 前端据此隐藏社区入口（§7 P5-8）。 */
+  listCommunityApps: (opts?: { query?: string; refresh?: boolean }) => {
+    const q = new URLSearchParams();
+    if (opts?.query) q.set("q", opts.query);
+    if (opts?.refresh) q.set("refresh", "true");
+    const qs = q.toString();
+    return get<CommunityListOut>(`/community/list${qs ? `?${qs}` : ""}`);
+  },
+  /** 社区条目详情（索引条目 + 本机是否已装）。 */
+  communityDetail: (appId: string, version: string) =>
+    get<CommunityDetailOut>(
+      `/community/detail?appId=${encodeURIComponent(appId)}&version=${encodeURIComponent(version)}`,
+    ),
+  /** 从社区安装：下载 → 校验 sha256/size → 解压 → 落库；装完默认不启用（§6.4）。 */
+  installCommunityApp: (appId: string, version: string) =>
+    post<CommunityInstallOut>("/community/install", { appId, version }),
+  /** 读拉黑表（两档，D16）。 */
+  getCommunityBlocklist: () => get<CommunityBlocklistOut>("/community/blocklist"),
+  /** 写拉黑表（PUT 全量提交）：字段为 undefined 表示「本次不改这一档」，空数组表示清空。 */
+  updateCommunityBlocklist: (data: { users?: string[]; apps?: string[] }) =>
+    put<CommunityBlocklistOut>("/community/blocklist", data),
+  /** 本机社区身份 `usr_<hex>`（首次调用时生成并落盘，幂等；发布时作 authorId，D15）。 */
+  getCommunityIdentity: () => get<{ userId: string; createdAt?: string }>("/community/identity"),
 
   // ── 技能仓库（第15点：云端 git url 技能仓库）──
   listSkillRepos: () => get<Array<{ id: string; name: string; url: string; synced?: boolean; skill_count?: number }>>("/skills/repos"),
@@ -1872,6 +2105,10 @@ export interface GlobalSettingsOut {
   browser_headless?: boolean;
   /** 下一步建议卡开关（默认关闭；开启后智能体 / 工作流模式才注入建议卡工具与提示词） */
   suggestion_enabled?: boolean;
+  /** plan-693-2868（§7 P5-8 / D8）：社区仓库地址（`owner/repo`）。
+   *  留空 = 关闭社区（拓展页隐藏所有社区入口）；服务端 `community_service.repo()` 直接读这份配置。
+   *  与其它设置项一样「修改即保存」——注意这是**整条链路的开关**，不是单纯的地址字段。 */
+  community_repo?: string;
   /** 任务完成系统通知：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭 */
   task_notify_mode?: "always" | "unfocused" | "off";
   /** plan-334-1661: 电脑操控总开关（开启后 desktop_* 工具集可用） */

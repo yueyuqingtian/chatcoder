@@ -545,7 +545,8 @@ class KiroProvider(ModelProvider):
         turns: list[dict] = []
         pending_results: list[dict] = []
 
-        for msg in request.messages:
+        from app.orchestration.history_sequence import prepare_history, validate_kiro_wire
+        for msg in prepare_history(request.messages):
             if msg.role in ("system", "developer"):
                 if msg.content:
                     system_parts.append(msg.content)
@@ -697,7 +698,7 @@ class KiroProvider(ModelProvider):
         profile_arn = self._profile_arn()
         if profile_arn:
             payload["profileArn"] = profile_arn
-        return payload
+        return validate_kiro_wire(payload)
 
     # ─────────────────────────── 事件解析 ───────────────────────────
 

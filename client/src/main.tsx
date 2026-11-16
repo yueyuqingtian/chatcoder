@@ -24,6 +24,9 @@ import "./styles/git-panel.css";
 import "./styles/worktree.css";
 import "./styles/browser.css";
 import "./styles/market.css";
+// plan-693-2868（P4）：微应用（拓展第四标签 + 设置页第四组配置区）样式层；紧随 market.css，
+// 与拓展页同一视觉语言、类名统一用 mkt-microapp-* / mas-* 前缀，不与市场条目互相覆盖。
+import "./styles/microapp.css";
 import "./styles/motion.css";
 import "./styles/focus.css";
 import "./styles/model-picker.css";

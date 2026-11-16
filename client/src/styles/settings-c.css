@@ -131,7 +131,8 @@
 .usage-drp-day:hover:not(:disabled) { background: var(--color-selected); }
 .usage-drp-day:disabled { color: var(--text-3); opacity: 0.4; cursor: default; }
 .usage-drp-day.in { background: var(--accent-soft); border-radius: 0; }
-.usage-drp-day.edge { background: var(--accent); color: #fff; border-radius: var(--r-md); font-weight: 600; }
+/* 选中态文字色必须跟随 --accent-contrast：石墨 / 深色主题下 --accent 近白，硬编码 #fff 会变成白底白字 */
+.usage-drp-day.edge { background: var(--accent); color: var(--accent-contrast, #fff); border-radius: var(--r-md); font-weight: 600; }
 .usage-drp-day.today::after {
   content: ""; position: absolute; left: 50%; bottom: 4px; width: 4px; height: 4px; margin-left: -2px;
   border-radius: 999px; background: var(--accent);

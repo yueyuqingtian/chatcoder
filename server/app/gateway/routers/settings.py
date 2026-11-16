@@ -419,6 +419,9 @@ class GlobalSettingsOut(BaseModel):
     browser_headless: bool = True
     # 下一步建议卡开关（默认关闭，见 config.suggestion_enabled）
     suggestion_enabled: bool = False
+    # plan-693-2868 §7 P5 第 8 条：社区仓库地址（owner/repo，留空即关闭社区、隐藏入口）。
+    # 与 settings 里的其它项一样「修改即保存」；服务端 community_service.repo() 直接读这份配置。
+    community_repo: str = ""
     # plan-334-1661: 电脑操控（内核常驻的内置工具集，不作为 MCP 注册）
     # 注意：这些字段必须同时出现在 Out 与 In 两个模型里——只加 In 会导致
     # _global_settings_out 传入的 kwarg 被 pydantic 静默丢弃，前端表现为"改了不保存"。
@@ -540,6 +543,8 @@ class GlobalSettingsIn(BaseModel):
     browser_enabled: bool | None = None
     browser_headless: bool | None = None
     suggestion_enabled: bool | None = None
+    # plan-693-2868 §7 P5 第 8 条：社区仓库地址（owner/repo；空串 = 关闭社区）
+    community_repo: str | None = None
     # plan-334-1661: 电脑操控（集中一处，_global_settings_out 与 PUT 都读这里）
     desktop_enabled: bool | None = None
     desktop_plain_ops_enabled: bool | None = None
@@ -638,6 +643,8 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         browser_enabled=data.get("browser_enabled", settings.browser_enabled),
         browser_headless=data.get("browser_headless", settings.browser_headless),
         suggestion_enabled=bool(data.get("suggestion_enabled", settings.suggestion_enabled)),
+        # plan-693-2868：社区仓库地址（空串 = 关闭社区；非法值由 community_service 归一化）
+        community_repo=str(data.get("community_repo") or ""),
         # plan-334-1661: 电脑操控（新增字段只需改这里，不会再漏——见本函数 docstring）
         desktop_enabled=data.get("desktop_enabled", getattr(settings, "desktop_enabled", True)),
         desktop_plain_ops_enabled=data.get(
@@ -868,6 +875,10 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.suggestion_enabled is not None:
         data["suggestion_enabled"] = bool(body.suggestion_enabled)
         settings.suggestion_enabled = bool(body.suggestion_enabled)
+    # plan-693-2868 §7 P5 第 8 条：社区仓库地址。存原样（归一化在 community_service.repo()），
+    # 这样用户改成非法值时不会静默清空，而是下次读取时按「未配置」处理并在日志里留痕。
+    if "community_repo" in body.model_fields_set:
+        data["community_repo"] = str(body.community_repo or "").strip()[:120]
     # plan-334-1661: 电脑操控开关（落盘 + 运行时立即生效，工具门禁每次调用都读 settings）
     for _field in (
         "desktop_enabled", "desktop_plain_ops_enabled",

@@ -11,7 +11,9 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import httpx
 from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
 from app.core.config import settings
@@ -107,7 +109,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def __init__(self, *, api_key: str, base_url: str, model: str,
                  proxy: str | None = None, proxy_disabled: bool = False,
-                 proxy_configured: bool = False, max_retries: int = 3):
+                 proxy_configured: bool = False, max_retries: int = 0):
         self._default_model = model
         # v28: stream chunk 空闲超时改读配置——长思考模型（grok-4.6 等）chunk 间隔
         # 可能超过旧硬编码 30s，导致"运行中突然停止且无报错"。
@@ -119,8 +121,6 @@ class OpenAICompatibleProvider(ModelProvider):
         # 保持本地直连网关零行为变化）。
         http_client = None
         if proxy_configured:
-            import httpx
-
             kwargs: dict = {"timeout": _DEFAULT_TIMEOUT, "trust_env": not proxy_disabled}
             if proxy:
                 kwargs["proxy"] = proxy
@@ -129,9 +129,7 @@ class OpenAICompatibleProvider(ModelProvider):
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_DEFAULT_TIMEOUT,
-            # plan-20261020-retry-cred-perf R8：多凭据供应商由 registry 传入 1——
-            # SDK 遇到 429 会按 Retry-After 连睡 3 次（最长数分钟），把整轮卡住才轮到下一个 Key；
-            # 单凭据保持 3 次，仍是「同一个 Key 自我重试」的兜底。
+            # plan-20261112-retry-policy-1：等待与次数由恢复引擎控制，SDK 默认不得再次重试。
             max_retries=max(0, int(max_retries)),
             default_headers={"Accept-Encoding": "gzip, deflate"},
             **({"http_client": http_client} if http_client is not None else {}),
@@ -246,6 +244,64 @@ class OpenAICompatibleProvider(ModelProvider):
                     retry["reasoning_effort"] = "xhigh"
                 logger.warning("[provider] 网关拒绝 thinking 字段(400 UNKNOWN_FIELD)，降级重试一次")
 
+    @asynccontextmanager
+    async def _managed_stream(self, stream):
+        # plan-20261114-gemini-stream：完成标记后的传输断连不应丢弃已完成的回答，
+        # 但仍读取正常用量尾帧；完成前的断连交给统一恢复引擎，避免额外调用。
+        #
+        # plan-20261115-stream-tail（定论）：openai SDK 2.53.0 在**流迭代阶段**不会把
+        # httpx 传输异常包装成 APIConnectionError——迭代走 AsyncStream._iter_events →
+        # response.aiter_bytes()，异常原样上抛（实测抛裸 httpx.RemoteProtocolError）；
+        # APIConnectionError("Connection error.") 只出现在 create() 的请求发出阶段
+        # （_base_client._request 的 send 分支），那时必然还没收到 finish_reason，
+        # 即 completed 恒为 False。因此捕获面保持 httpx.RemoteProtocolError 即可，
+        # 无需扩到 openai.APIConnectionError。
+        #
+        # plan-20261115-stream-tail（判据）：仅「已完成」不足以判断"回答已拿到"——
+        # 网关可能只下发 finish_reason 就断流，此时正文其实全丢。若照旧静默返回，
+        # 上层拿到的是空响应（只能按"模型返回空响应"兜底，丢掉"断流"这一真实原因）。
+        # 所以吞掉尾部异常必须同时满足「已收到 finish_reason」与「已拿到可交付载荷
+        # （正文或工具调用）」，否则按未完成原样抛出，交恢复引擎按网络失败重试。
+        # 仅思考无正文不算可交付载荷：这类响应下游本就判致命（agent_loop v967），
+        # 在这里直接按断流上报原因更准确。
+        async def chunks():
+            completed = False
+            has_payload = False
+            iterator = stream.__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(), timeout=self._chunk_timeout,
+                    )
+                except StopAsyncIteration:
+                    return
+                except httpx.RemoteProtocolError:
+                    if not (completed and has_payload):
+                        raise
+                    logger.warning("[provider] 响应已完成且已收到正文，忽略尾部连接协议中断")
+                    return
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"model gateway error: stream chunk timeout ({int(self._chunk_timeout)}s)"
+                    ) from None
+                if chunk.choices:
+                    _delta = chunk.choices[0].delta
+                    if _delta and (_delta.content or _delta.tool_calls):
+                        has_payload = True
+                    if chunk.choices[0].finish_reason:
+                        completed = True
+                yield chunk
+
+        reader = chunks()
+        try:
+            yield reader
+        finally:
+            await reader.aclose()
+            # plan-20261114-gemini-stream：失败及取消也释放响应，避免重试占用旧连接。
+            close = getattr(stream, "close", None)
+            if close is not None:
+                await close()
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """非流式调用，内部用 stream=True 收集。"""
         messages = self._convert_messages(request.messages)
@@ -287,67 +343,55 @@ class OpenAICompatibleProvider(ModelProvider):
         usage_data = {"prompt": 0, "completion": 0, "total": 0}
 
         try:
-            # v4.8.3: chat() 回退路径也加 chunk 超时，与 stream_structured 一致
-            # v28: 超时值改读配置 provider_stream_idle_timeout（默认 180s，兼容长思考模型）
-            _stream_iter = stream.__aiter__()
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(
-                        _stream_iter.__anext__(), timeout=self._chunk_timeout,
-                    )
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    raise RuntimeError(
-                        f"model gateway error: stream chunk timeout ({int(self._chunk_timeout)}s)"
-                    ) from None
-                # v4.5: 无论是否有 choices 都检查 usage
-                if chunk.usage:
-                    _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
-                    _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
-                    usage_data = {
-                        "prompt": chunk.usage.prompt_tokens or 0,
-                        "completion": chunk.usage.completion_tokens or 0,
-                        "total": chunk.usage.total_tokens or 0,
-                        # v1.2: 提取缓存输入 token（OpenAI prompt_cache_hit_tokens / DeepSeek cached_tokens）
-                        "cached": (getattr(_prompt_details, 'cached_tokens', 0) or
-                                   getattr(chunk.usage, 'prompt_cache_hit_tokens', 0) or
-                                   getattr(chunk.usage, 'cached_tokens', 0) or 0),
-                        # v1.2: 提取推理 token（completion_tokens_details.reasoning_tokens）
-                        "reasoning": getattr(_completion_details, 'reasoning_tokens', 0) or 0,
-                    }
-                if not chunk.choices:
-                    continue
+            async with self._managed_stream(stream) as chunks:
+                async for chunk in chunks:
+                    # v4.5: 无论是否有 choices 都检查 usage
+                    if chunk.usage:
+                        _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
+                        _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
+                        usage_data = {
+                            "prompt": chunk.usage.prompt_tokens or 0,
+                            "completion": chunk.usage.completion_tokens or 0,
+                            "total": chunk.usage.total_tokens or 0,
+                            # v1.2: 提取缓存输入 token（OpenAI prompt_cache_hit_tokens / DeepSeek cached_tokens）
+                            "cached": (getattr(_prompt_details, 'cached_tokens', 0) or
+                                       getattr(chunk.usage, 'prompt_cache_hit_tokens', 0) or
+                                       getattr(chunk.usage, 'cached_tokens', 0) or 0),
+                            # v1.2: 提取推理 token（completion_tokens_details.reasoning_tokens）
+                            "reasoning": getattr(_completion_details, 'reasoning_tokens', 0) or 0,
+                        }
+                    if not chunk.choices:
+                        continue
 
-                delta = chunk.choices[0].delta
-                choice_fr = chunk.choices[0].finish_reason
+                    delta = chunk.choices[0].delta
+                    choice_fr = chunk.choices[0].finish_reason
 
-                if delta:
-                    # v4.3: 收集推理/思考内容（DeepSeek reasoning_content / Claude thinking）
-                    # plan-53-265: 补 OpenRouter 风格 reasoning 字段——部分中转网关
-                    # （service.guyueyu.asia 等）把思考放在 delta.reasoning，漏读会整段丢弃思考块。
-                    _reasoning = (getattr(delta, 'reasoning_content', None)
-                                  or getattr(delta, 'reasoning', None)
-                                  or getattr(delta, 'thinking', None))
-                    if _reasoning:
-                        thinking_parts.append(_reasoning)
-                    if delta.content:
-                        content_parts.append(delta.content)
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_map:
-                                tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                            if tc.id:
-                                tool_calls_map[idx]["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls_map[idx]["name"] += tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls_map[idx]["arguments"] += tc.function.arguments
+                    if delta:
+                        # v4.3: 收集推理/思考内容（DeepSeek reasoning_content / Claude thinking）
+                        # plan-53-265: 补 OpenRouter 风格 reasoning 字段——部分中转网关
+                        # （service.guyueyu.asia 等）把思考放在 delta.reasoning，漏读会整段丢弃思考块。
+                        _reasoning = (getattr(delta, 'reasoning_content', None)
+                                      or getattr(delta, 'reasoning', None)
+                                      or getattr(delta, 'thinking', None))
+                        if _reasoning:
+                            thinking_parts.append(_reasoning)
+                        if delta.content:
+                            content_parts.append(delta.content)
+                        if delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                idx = tc.index
+                                if idx not in tool_calls_map:
+                                    tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                                if tc.id:
+                                    tool_calls_map[idx]["id"] = tc.id
+                                if tc.function:
+                                    if tc.function.name:
+                                        tool_calls_map[idx]["name"] += tc.function.name
+                                    if tc.function.arguments:
+                                        tool_calls_map[idx]["arguments"] += tc.function.arguments
 
-                if choice_fr:
-                    finish_reason = choice_fr
+                    if choice_fr:
+                        finish_reason = choice_fr
         except Exception as e:
             logger.error("[provider] stream 收集异常: %s", e)
             raise RuntimeError(f"model gateway error (stream): {e}") from e
@@ -429,9 +473,10 @@ class OpenAICompatibleProvider(ModelProvider):
 
         try:
             stream = await self._create_compat(kwargs)
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+            async with self._managed_stream(stream) as chunks:
+                async for chunk in chunks:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
         except APIError as e:
             logger.error("[provider] 流式错误: %s", e)
             raise RuntimeError(f"model gateway error: {e.message}") from e
@@ -477,76 +522,64 @@ class OpenAICompatibleProvider(ModelProvider):
         # plan-248-1258 M7: 内容去重（grok 类网关重复投递同段增量的修复）
         _dedup = _ContentDeduper()
 
-        # v4.8: 流式读取加 chunk 超时，防止网关半开连接导致永久挂起
-        # v28: 超时值改读配置 provider_stream_idle_timeout（默认 180s，兼容长思考模型）
-        _stream_iter = s.__aiter__()
-        while True:
-            try:
-                chunk = await asyncio.wait_for(
-                    _stream_iter.__anext__(), timeout=self._chunk_timeout,
-                )
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"model gateway error: stream chunk timeout ({int(self._chunk_timeout)}s)"
-                ) from None
-            # v4.5: 无论是否有 choices 都检查 usage（某些网关把 usage 放在最后有 choices 的 chunk）
-            if chunk.usage:
-                _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
-                _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
-                _cached = (getattr(_prompt_details, 'cached_tokens', None) or
-                           getattr(chunk.usage, 'prompt_cache_hit_tokens', None) or
-                           getattr(chunk.usage, 'cached_tokens', None) or 0)
-                _reasoning = getattr(_completion_details, 'reasoning_tokens', None) or 0
-                usage_data = Usage(
-                    prompt_tokens=chunk.usage.prompt_tokens or 0,
-                    completion_tokens=chunk.usage.completion_tokens or 0,
-                    total_tokens=chunk.usage.total_tokens or 0,
-                    cached_input_tokens=_cached,
-                    reasoning_tokens=_reasoning,
-                )
-            if not chunk.choices:
-                continue
+        async with self._managed_stream(s) as chunks:
+            async for chunk in chunks:
+                # v4.5: 无论是否有 choices 都检查 usage（某些网关把 usage 放在最后有 choices 的 chunk）
+                if chunk.usage:
+                    _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
+                    _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
+                    _cached = (getattr(_prompt_details, 'cached_tokens', None) or
+                               getattr(chunk.usage, 'prompt_cache_hit_tokens', None) or
+                               getattr(chunk.usage, 'cached_tokens', None) or 0)
+                    _reasoning = getattr(_completion_details, 'reasoning_tokens', None) or 0
+                    usage_data = Usage(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        completion_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                        cached_input_tokens=_cached,
+                        reasoning_tokens=_reasoning,
+                    )
+                if not chunk.choices:
+                    continue
 
-            delta = chunk.choices[0].delta
-            choice_fr = chunk.choices[0].finish_reason
+                delta = chunk.choices[0].delta
+                choice_fr = chunk.choices[0].finish_reason
 
-            if delta:
-                # v4.4: 思考内容实时广播
-                # plan-53-265: 同上补 reasoning 字段（两处必须同口径，否则流式与非流式行为不一致）
-                _reasoning = (getattr(delta, 'reasoning_content', None)
-                              or getattr(delta, 'reasoning', None)
-                              or getattr(delta, 'thinking', None))
-                if _reasoning:
-                    mark_first_token(request)  # plan-20261021-usage-update：首个真实输出帧
-                    thinking_parts.append(_reasoning)
-                    yield {"type": "thinking", "delta": _reasoning}
+                if delta:
+                    # v4.4: 思考内容实时广播
+                    # plan-53-265: 同上补 reasoning 字段（两处必须同口径，否则流式与非流式行为不一致）
+                    _reasoning = (getattr(delta, 'reasoning_content', None)
+                                  or getattr(delta, 'reasoning', None)
+                                  or getattr(delta, 'thinking', None))
+                    if _reasoning:
+                        mark_first_token(request)  # plan-20261021-usage-update：首个真实输出帧
+                        thinking_parts.append(_reasoning)
+                        yield {"type": "thinking", "delta": _reasoning}
 
-                if delta.content:
-                    _clean = _dedup.feed(delta.content)
-                    if _clean:
-                        mark_first_token(request)
-                        content_parts.append(_clean)
-                        yield {"type": "content", "delta": _clean}
+                    if delta.content:
+                        _clean = _dedup.feed(delta.content)
+                        if _clean:
+                            mark_first_token(request)
+                            content_parts.append(_clean)
+                            yield {"type": "content", "delta": _clean}
 
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_calls_map:
-                            tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                        if tc.id:
-                            tool_calls_map[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_map[idx]["name"] += tc.function.name
-                                mark_first_token(request)  # 纯工具调用的回复没有文字事件，以工具名 / 参数帧为首字
-                            if tc.function.arguments:
-                                tool_calls_map[idx]["arguments"] += tc.function.arguments
-                                mark_first_token(request)
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_map:
+                                tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                            if tc.id:
+                                tool_calls_map[idx]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls_map[idx]["name"] += tc.function.name
+                                    mark_first_token(request)  # 纯工具调用的回复没有文字事件，以工具名 / 参数帧为首字
+                                if tc.function.arguments:
+                                    tool_calls_map[idx]["arguments"] += tc.function.arguments
+                                    mark_first_token(request)
 
-            if choice_fr:
-                finish_reason = choice_fr
+                if choice_fr:
+                    finish_reason = choice_fr
 
         # 组装 tool_calls
         tool_calls = []

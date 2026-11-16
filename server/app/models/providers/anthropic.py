@@ -199,11 +199,12 @@ class AnthropicProvider(ModelProvider):
                 })
                 continue
 
-            if m.role == "assistant" and m.tool_calls:
-                assistant_content: list[dict] = []
+            if m.role == "assistant" and (m.tool_calls or m.thinking_blocks):
+                from app.models.providers.thinking_blocks import replay_thinking
+                assistant_content: list[dict] = replay_thinking(m.thinking_blocks)
                 if m.content:
                     assistant_content.append({"type": "text", "text": m.content})
-                for tc in m.tool_calls:
+                for tc in m.tool_calls or []:
                     assistant_content.append({
                         "type": "tool_use",
                         "id": tc.get("id", "call_default"),
@@ -310,6 +311,8 @@ class AnthropicProvider(ModelProvider):
                 for t in request.tools
                 if t.get("type") == "function"
             ]
+        from app.orchestration.history_sequence import finish_anthropic_wire
+        payload["messages"] = finish_anthropic_wire(payload["messages"], payload.get("thinking"))
         return payload
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
@@ -384,6 +387,7 @@ class AnthropicProvider(ModelProvider):
             ),
             model=request.model or self._default_model,
             thinking="\n".join(thinking_parts) or None,
+            thinking_blocks=[b for b in content_blocks if b.get("type") in ("thinking", "redacted_thinking")],
         )
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[str]:
@@ -466,6 +470,7 @@ class AnthropicProvider(ModelProvider):
                 # 结果：模型输出一句话并准备调用工具时，agent_loop 看不到任何工具调用，
                 # 直接判定"本轮结束"——用户看到的就是「回复一句话就中断、无报错」。
                 tool_blocks: dict[int, dict] = {}
+                signed_thinking: dict[int, dict] = {}
                 finish_reason = "stop"
                 async for line in resp.aiter_lines():
                     s = line.strip()
@@ -480,6 +485,8 @@ class AnthropicProvider(ModelProvider):
                             chunk = json.loads(body)
                         except (json.JSONDecodeError, TypeError):
                             continue
+                        from app.models.providers.thinking_blocks import collect_thinking
+                        collect_thinking(signed_thinking, event_type, chunk)
                         if event_type == "content_block_start":
                             block = chunk.get("content_block") or {}
                             if block.get("type") == "tool_use":
@@ -571,5 +578,6 @@ class AnthropicProvider(ModelProvider):
                     ),
                     "finish_reason": finish_reason,
                     "tool_calls": tool_calls,
+                    "thinking_blocks": list(signed_thinking.values()),
                 }
             return

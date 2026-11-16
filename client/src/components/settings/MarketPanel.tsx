@@ -24,9 +24,26 @@ import {
   IconSearch, IconRefresh, IconPlus, IconDownload, IconTrash, IconFolder, IconMoreHorizontal, IconCheck, IconSpinner, IconArrowUpRight, IconX,
 } from "../icons";
 import { MarketDecor, KindMark, KIND_ACCENT, WaveUnderline } from "./MarketDecor";
+import { MicroAppsPanel } from "./MicroAppsPanel";
 
+/** plan-693-2868（D1 / D11）：第四标签「微应用」。
+ *
+ *  D11 明确「不扩 MarketKind」——`MarketKind` 是市场接口（`/api/market/*`）的类型，
+ *  微应用走 `/api/microapps` + `/api/community`，两者不是同一套数据。
+ *  所以这里另立一个**标签维度** `MarketTab`，市场三类仍是 `MarketKind`：
+ *  UI 上一个分段控件切四栏，代码里只有 `microapp` 一支走不同的取数路径。 */
+type MarketTab = MarketKind | "microapp";
+
+/** 微应用的品类色：沿用引用 chip 的 `--pc-cyan`（P1 已定），不新增色相 */
+const MICROAPP_ACCENT = {
+  strong: "var(--pc-cyan)",
+  soft: "color-mix(in oklab, var(--pc-cyan) 14%, var(--color-card))",
+  pencil: "color-mix(in oklab, var(--pc-cyan) 55%, transparent)",
+};
+
+/** 标签元数据：市场三类 + 微应用。`key` 用 `MarketTab`，四栏共用一份渲染。 */
 const KINDS: Array<{
-  key: MarketKind; label: string; icon: React.ReactNode; noun: string;
+  key: MarketTab; label: string; icon: React.ReactNode; noun: string;
   hero: string;
   /** 副标题里的强调词（下方画手写标记线） */
   waveWord: string;
@@ -39,6 +56,9 @@ const KINDS: Array<{
     hero: "聚焦 效率提升、内容创作、官方精选。", waveWord: "效率提升", waveColor: KIND_ACCENT.skill.pencil },
   { key: "connector", label: "连接器", icon: <KindMark kind="connector" size={32} />, noun: "Connectors",
     hero: "聚焦 内容创作、知识研究。", waveWord: "内容创作", waveColor: KIND_ACCENT.connector.pencil },
+  // plan-693-2868（D1）：第四栏。数据源与上面三类不同，见 MarketTab 注释
+  { key: "microapp", label: "微应用", icon: <KindMark kind="microapp" size={32} />, noun: "MicroApps",
+    hero: "聚焦 界面注入、社区共享。", waveWord: "界面注入", waveColor: MICROAPP_ACCENT.pencil },
 ];
 
 /** 副标题渲染：把配置的强调词包进波浪容器（参考图里关键词下有一条手绘波浪线）。 */
@@ -160,13 +180,15 @@ function fuzzyHit(text: string, query: string): boolean {
 
 export function MarketPanel() {
   // plan-20261009-ui A：输入框「+」浮窗的「探索更多…」带着分类意图而来，挂载时消费一次并预选对应标签
-  const [kind, setKind] = useState<MarketKind>(() => useNavIntentStore.getState().takeMarketKind() ?? "plugin");
+  const [kind, setKind] = useState<MarketTab>(() => useNavIntentStore.getState().takeMarketKind() ?? "plugin");
   const [items, setItems] = useState<MarketItem[]>([]);
   const [categories, setCategories] = useState<MarketCategoryFacet[]>([]);
   const [marketUrl, setMarketUrl] = useState("");
   const [loading, setLoading] = useState(false);
   /** plan-20261009-ui U9：每个类型最近一次（无筛选）的总数，分段标签上展示计数 */
-  const [totals, setTotals] = useState<Partial<Record<MarketKind, number>>>({});
+  const [totals, setTotals] = useState<Partial<Record<MarketTab, number>>>({});
+  /** plan-693-2868（P4）：微应用标签的重载信号——顶部刷新按钮也作用于它（子组件自己取数） */
+  const [microReload, setMicroReload] = useState(0);
   /** 刚装好的条目 id：安装按钮先「形变」成已安装的对勾停留片刻，再换成启停 / 更多操作 */
   const [recent, setRecent] = useState<string | null>(null);
   const recentTimer = useRef(0);
@@ -179,6 +201,8 @@ export function MarketPanel() {
   /** 图标加载失败的条目 id（回退首字母色块，避免破图） */
   const [iconFailed, setIconFailed] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** plan-693-2868（P4）：导入微应用包用的隐藏 file input（见 importMicroAppPackage 注释） */
+  const importInputRef = useRef<HTMLInputElement>(null);
   /** 分类胶囊行：右侧还有内容时渐隐提示可横向滑动 */
   const catsRef = useRef<HTMLDivElement>(null);
   const [catsOverflow, setCatsOverflow] = useState(false);
@@ -254,8 +278,11 @@ export function MarketPanel() {
   }, []);
 
   /** 查询条件变化 → 重置到第 1 页重新拉取。
-   *  搜索词防抖 400ms 并走**远端**（全库检索）：43,710 条不可能在本地过滤。 */
+   *  搜索词防抖 400ms 并走**远端**（全库检索）：43,710 条不可能在本地过滤。
+   *  plan-693-2868（P4）：第四标签「微应用」不走市场接口（D11），由 MicroAppsPanel 自己取数，
+   *  这里直接跳过——否则会拿微应用当市场类型打一次必然失败的 /market/browse。 */
   useEffect(() => {
+    if (kind === "microapp") return;
     queryRef.current = { kind, query: query.trim(), category, sort };
     const delay = query.trim() ? SEARCH_DEBOUNCE_MS : 0;
     const timer = window.setTimeout(() => { void fetchPage(kind, 1, false); }, delay);
@@ -263,7 +290,7 @@ export function MarketPanel() {
   }, [kind, query, category, sort, fetchPage]);
 
   /** 切换类型：分类回退「全部」（分类集合随类型变化），保留搜索词（跨类型检索意图延续） */
-  const switchKind = (k: MarketKind) => {
+  const switchKind = (k: MarketTab) => {
     if (k === kind) return;
     setCategory("");
     setDetail(null);
@@ -273,8 +300,9 @@ export function MarketPanel() {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   };
 
-  /** 无限滚动：距底 400px 且还有下一页时追加加载 */
+  /** 无限滚动：距底 400px 且还有下一页时追加加载（微应用标签不分页） */
   const onScroll = () => {
+    if (kind === "microapp") return;
     const el = scrollRef.current;
     if (!el || loading || loadingMore) return;
     if (page >= lastPage) return;
@@ -333,6 +361,13 @@ export function MarketPanel() {
   /** 组标题只在连接器页出现（且不带计数——数量由标题行的规模徽标承担） */
   const showGroupTitles = kind === "connector";
 
+  /** 市场三类的 kind（微应用标签下为 null）：所有 /market/* 调用都只在这里非空时发起。 */
+  const marketKind: MarketKind | null = kind === "microapp" ? null : kind;
+  /** 品类主色：微应用沿用 `--pc-cyan`（与引用 chip 同一色），市场三类取 KIND_ACCENT。 */
+  const accent = kind === "microapp" ? MICROAPP_ACCENT : KIND_ACCENT[kind];
+  /** 标题行的规模徽标：市场三类取远端 total；微应用没有远端计数，徽标不出现（0）。 */
+  const heroCount = kind === "microapp" ? 0 : total;
+
   /** plan-41-225：安装条目到本机（用户要求「点击就安装，不跳浏览器」）。
    *  - 本机扫描到的插件（installKind=scan）→ 直接用它的本地目录安装；
    *  - 远端条目 → 走后端 /market/install：技能下载技能包落盘入库、插件下载包并复用
@@ -376,7 +411,7 @@ export function MarketPanel() {
       setRecent(item.id);
       window.clearTimeout(recentTimer.current);
       recentTimer.current = window.setTimeout(() => setRecent(null), 1600);
-      await fetchPage(kind, 1, false);
+      if (marketKind) await fetchPage(marketKind, 1, false);
       await useChatStore.getState().loadBootstrap();
     } catch (e) {
       // 后端对失败场景返回 400 + 中文可读原因，直接展示而不再裹一层技术错
@@ -422,18 +457,51 @@ export function MarketPanel() {
       const patch = (it: MarketItem): MarketItem =>
         it.id === t.id ? { ...it, installed: false, enabled: false, installKind: "remote", localId: undefined } : it;
       setItems((prev) => prev.map(patch));
-      await fetchPage(kind, 1, false);
+      if (marketKind) await fetchPage(marketKind, 1, false);
       await useChatStore.getState().loadBootstrap();
     } catch (e) { notify(String(e)); }
     finally { setBusy(null); }
   };
 
-  /** 刷新：重拉当前查询并让图标转满一圈（点击的即时反馈） */
+  /** plan-693-2868（P4）：导入本地 .ccapp / .zip 包进微应用库（`POST /api/microapps/import`）。
+   *
+   *  与市场三类的「安装 / 导入」弹窗分开：微应用没有市场条目、没有远端 ident，
+   *  输入就是一个本地文件。走隐藏的 `input[type=file]` 而不是主进程选路径：
+   *  `api.importMicroApp` 要的是 `File`（multipart 上传），主进程的选路径 IPC 只回字符串；
+   *  这条通道在网页调试下同样可用，不必区分桌面/网页。
+   *  导入后**默认不启用**（后端返回 enabled=false），成功提示照后端 message 说清下一步。 */
+  const importMicroAppPackage = () => {
+    const input = importInputRef.current;
+    if (!input) return;
+    input.value = ""; // 允许连续导入同一个文件（否则 change 不触发）
+    input.click();
+  };
+
+  /** 文件选中 → 上传 → 刷新清单（微应用标签自己取数，这里递重载信号）。 */
+  const onImportFilePicked = async (file: File | undefined) => {
+    if (!file) return;
+    setLoading(true);
+    try {
+      const res = await api.importMicroApp(file);
+      notify(res.message || `已导入 ${res.appId}@${res.version}`);
+      setMicroReload((n) => n + 1);
+      await useChatStore.getState().loadBootstrap();
+    } catch (e) {
+      // 后端对 409 / 413 / 422 都给中文可读原因（routers/microapps.py），原样展示
+      notify(`导入失败：${String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 刷新：重拉当前查询并让图标转满一圈（点击的即时反馈）。
+   *  plan-693-2868（P4）：微应用标签自己取数（MicroAppsPanel），这里只递一个重载信号。 */
   const refresh = async () => {
     if (refreshing) return;
     setRefreshing(true);
     try {
-      await fetchPage(kind, 1, false);
+      if (kind === "microapp") setMicroReload((n) => n + 1);
+      else await fetchPage(kind, 1, false);
       await useChatStore.getState().loadBootstrap();
     } finally {
       // 至少转满一圈（--dur-spin 基准 0.8s）再停下，避免"点了没转完就复位"
@@ -441,7 +509,10 @@ export function MarketPanel() {
     }
   };
 
-  const current = KINDS.find((k) => k.key === kind)!;
+  /** 当前标签元数据。plan-693-2868 §7 P4-5：原写法 `KINDS.find(...)!` 是**非空断言**——
+   *  `kind` 一旦出现表里没有的值（新增标签、navIntent 带进未知值）就整页白屏；
+   *  改为兜底到第一项，漏项最多是「标签名不对」，不会把界面打挂。 */
+  const current = KINDS.find((k) => k.key === kind) ?? KINDS[0];
 
   /** 卡片渲染（plan-20261009-ui U9；分组列表复用）：
    *  图标块 + 名称 + 两行说明；底部左为分类 / 精选徽标，右为操作区。
@@ -578,10 +649,31 @@ export function MarketPanel() {
             已安装
             <IconArrowUpRight size={13} />
           </button>
-          <button type="button" className="btn btn-primary btn-md" onClick={() => setDialog(kind)}>
+          <button
+            type="button"
+            className="btn btn-primary btn-md"
+            // plan-693-2868（P4）：微应用标签的主动作是「导入包」（POST /api/microapps/import）；
+            // 市场三类的导入弹窗只覆盖插件/技能/连接器，微应用不混进去（导入通道完全不同）。
+            onClick={() => {
+              if (kind === "microapp") { importMicroAppPackage(); return; }
+              setDialog(kind);
+            }}
+          >
             <IconPlus size={14} />
-            {kind === "plugin" ? "安装插件" : kind === "skill" ? "导入技能" : "添加连接器"}
+            {kind === "plugin" ? "安装插件"
+              : kind === "skill" ? "导入技能"
+                : kind === "microapp" ? "导入微应用包" : "添加连接器"}
           </button>
+          {/* 隐藏的包选择器：微应用导入只认 File（multipart），见 importMicroAppPackage 注释 */}
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".ccapp,.zip"
+            className="mkt-hidden-file"
+            aria-hidden
+            tabIndex={-1}
+            onChange={(e) => void onImportFilePicked(e.target.files?.[0])}
+          />
         </div>
       </div>
 
@@ -593,18 +685,18 @@ export function MarketPanel() {
             <h2 className="market-hero-title">
               发现 {current.icon}
               {/* plan-284-1450：品类名用所属主色 + 字距微调，作为页面身份标识 */}
-              <span className="market-hero-noun" style={{ color: KIND_ACCENT[kind].strong }}>
+              <span className="market-hero-noun" style={{ color: accent.strong }}>
                 {current.noun}
               </span>
               {/* plan-59-286：规模徽标挂在标题行末尾（不再混进筛选区）——
                   它是品类体量的一部分，与"发现什么、有多少"这句语义同处一行；
                   底色与数字色取品类主色，和品类名同源，不额外引入第三种颜色。 */}
-              {total > 0 && (
+              {heroCount > 0 && (
                 <span
                   className="market-hero-total"
-                  style={{ background: KIND_ACCENT[kind].soft, color: KIND_ACCENT[kind].strong }}
+                  style={{ background: accent.soft, color: accent.strong }}
                 >
-                  {total > 999 ? `${Math.round(total / 1000)}k` : total.toLocaleString()} 个
+                  {heroCount > 999 ? `${Math.round(heroCount / 1000)}k` : heroCount.toLocaleString()} 个
                 </span>
               )}
             </h2>
@@ -612,17 +704,25 @@ export function MarketPanel() {
             <p className="market-hero-sub" key={kind}>
               {renderHero(current)}
             </p>
-            {degraded && (
+            {degraded && kind !== "microapp" && (
               <div className="market-degraded">网络暂不可用，以下为本机已缓存/已安装内容，联网后自动更新</div>
             )}
           </div>
-          <div className="market-hero-art" aria-hidden>
-            {/* 装饰卡片组（plan-41-226）：三类各自一组造型卡片（花形/方块/圆形 + 品类图标），
-                切标签时整组重挂载以重播「零散聚拢」入场动画。 */}
-            <MarketDecor kind={kind} />
-          </div>
+          {/* 装饰卡片组（plan-41-226）：市场三类各有造型卡片；微应用没有这套插画，
+              这里**连容器一起不渲染**——只留空容器会在标题右侧留出一块空白（plan-693-2868 回归修复）。 */}
+          {kind !== "microapp" && (
+            <div className="market-hero-art" aria-hidden>
+              <MarketDecor kind={kind} />
+            </div>
+          )}
         </div>
 
+        {/* plan-693-2868（P4）：微应用标签 = 独立内容区（自有取数 / 注入 / 发布 / 撤回）。
+            分类条、排序、卡片网格都属于市场三类的接口口径，微应用不适用，直接不渲染。 */}
+        {kind === "microapp" ? (
+          <MicroAppsPanel query={query} reloadToken={microReload} />
+        ) : (
+        <>
         {/* 分类：一行胶囊横向滚动（分类很多时不再折成三行挤占首屏）+ 排序分段 */}
         <div className="mkt-filters">
           <div className={"mkt-cats" + (catsOverflow ? " is-overflow" : "")} ref={catsRef} role="group" aria-label="分类" onWheel={(e) => {
@@ -689,6 +789,8 @@ export function MarketPanel() {
         )}
         {!loadingMore && !loading && page >= lastPage && items.length > 0 && (
           <div className="market-more">已到底部（共 {total.toLocaleString()} 条）</div>
+        )}
+        </>
         )}
         </div>
       </div>
@@ -779,7 +881,12 @@ export function MarketPanel() {
       <ActionDialogs
         which={dialog}
         onClose={() => setDialog(null)}
-        onDone={async () => { setDialog(null); await fetchPage(kind, 1, false); await useChatStore.getState().loadBootstrap(); }}
+        onDone={async () => {
+          setDialog(null);
+          // 微应用标签下（marketKind === null）这个弹窗根本打不开，守卫只是让类型收窄成立
+          if (marketKind) await fetchPage(marketKind, 1, false);
+          await useChatStore.getState().loadBootstrap();
+        }}
       />
 
       <ConfirmDialog

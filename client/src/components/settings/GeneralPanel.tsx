@@ -20,16 +20,21 @@ const TERMINAL_SHELLS: Array<{ value: string; label: string }> = [
   { value: "git-bash", label: "Git Bash" },
 ];
 
-/** 终端字体候选（等宽）。JetBrains Mono 随应用内置，始终可用；其余字体取决于本机是否安装。 */
+/** 终端字体候选（等宽）。JetBrains Mono / Fira Code / Source Code Pro 随应用内置（@font-face 见 styles/fonts.css），
+ *  始终可用；Cascadia Code / Consolas 依赖本机安装，未装时置灰。
+ *  plan-20261116-bundled-fonts：更纱等宽（Sarasa Mono SC）已从候选移除——npm 上没有对应的 @fontsource 包，
+ *  无法内置，而本机安装率极低，留着只会是个常年置灰的「未安装」项。 */
 const DEFAULT_TERMINAL_FONT = "JetBrains Mono";
 const TERMINAL_FONTS: Array<{ value: string; label: string; bundled?: boolean }> = [
   { value: DEFAULT_TERMINAL_FONT, label: "JetBrains Mono（内置）", bundled: true },
+  { value: "Fira Code", label: "Fira Code（内置）", bundled: true },
+  { value: "Source Code Pro", label: "Source Code Pro（内置）", bundled: true },
   { value: "Cascadia Code", label: "Cascadia Code" },
   { value: "Consolas", label: "Consolas" },
-  { value: "Fira Code", label: "Fira Code" },
-  { value: "Source Code Pro", label: "Source Code Pro" },
-  { value: "Sarasa Mono SC", label: "更纱等宽 (Sarasa Mono SC)" },
 ];
+
+/** 随应用打包的等宽字体（@font-face 在 styles/fonts.css）：判断可用性时不必探测本机 */
+const BUILTIN_TERMINAL_FONTS = new Set(TERMINAL_FONTS.filter((f) => f.bundled).map((f) => f.value));
 
 /** 异常重试间隔：每个标签是一次重试前的等待秒数（整数 0–3600），标签个数即重试次数（最多 20） */
 const RETRY_MAX_COUNT = 20;
@@ -134,8 +139,10 @@ export function GeneralPanel() {
       return { value: f.value, label: f.label, disabled: !ok, hint: ok ? undefined : "未安装" };
     });
     if (cfg.terminal_font && !opts.some((o) => o.value === cfg.terminal_font)) {
-      const ok = isFontInstalled(cfg.terminal_font);
-      opts.push({ value: cfg.terminal_font, label: cfg.terminal_font, disabled: !ok, hint: ok ? undefined : "未安装" });
+      // plan-20261116-bundled-fonts：历史配置里选过的字体不在候选表时，若它就是内置字体则直接可用
+      const bundled = BUILTIN_TERMINAL_FONTS.has(cfg.terminal_font);
+      const ok = bundled || isFontInstalled(cfg.terminal_font);
+      opts.push({ value: cfg.terminal_font, label: bundled ? `${cfg.terminal_font}（内置）` : cfg.terminal_font, disabled: !ok, hint: ok ? undefined : "未安装" });
     }
     return opts;
   }, [cfg.terminal_font]);

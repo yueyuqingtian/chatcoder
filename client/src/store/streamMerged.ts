@@ -106,8 +106,9 @@ export function useMergedStreamText(): string {
 }
 
 /** 主会话流式思考（所有 agent 桶按序拼接）。 */
-export function useMergedThinkingText(): string {
-  return useSyncExternalStore(subscribe, () => mergedThinking, () => mergedThinking);
+const noThinkingSubscription = () => () => {};
+export function useMergedThinkingText(enabled = true): string {
+  return useSyncExternalStore(enabled ? subscribe : noThinkingSubscription, () => enabled ? mergedThinking : "", () => enabled ? mergedThinking : "");
 }
 
 /** 仅供 dev 自测/回归：合并文本是否与逐桶 join 恒等。 */

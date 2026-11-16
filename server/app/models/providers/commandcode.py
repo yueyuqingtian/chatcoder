@@ -96,7 +96,8 @@ class CommandCodeProvider(ModelProvider):
         system_parts: list[str] = []
         out_messages: list[dict] = []
 
-        for m in messages:
+        from app.orchestration.history_sequence import prepare_history
+        for m in prepare_history(messages):
             role = m.role
 
             if role in ("system", "developer"):
@@ -168,7 +169,8 @@ class CommandCodeProvider(ModelProvider):
             })
 
         system_prompt = "\n\n".join(system_parts) if system_parts else None
-        return system_prompt, out_messages
+        from app.orchestration.history_sequence import validate_commandcode_wire
+        return system_prompt, validate_commandcode_wire(out_messages)
 
     @staticmethod
     def _convert_image_block(block: dict) -> dict | None:

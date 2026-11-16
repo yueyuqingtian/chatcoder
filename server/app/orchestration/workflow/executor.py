@@ -50,6 +50,8 @@ class NodeResult:
     tokens: int = 0
     agent_id: int | None = None
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
+    # plan-20261112-retry-policy-1：模型层已处理重试时，节点层只能保留进度并暂停。
+    retry_handled: bool = False
 
 
 class NodeExecutor(Protocol):

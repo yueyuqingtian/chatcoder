@@ -239,14 +239,35 @@
 :root[data-motion="reduced"] .anim-breath,
 :root[data-motion="reduced"] .anim-pulse,
 :root[data-motion="reduced"] .text-shine,
+:root[data-motion="off"] .text-shine {
+  animation: none !important;
+  background: none !important;
+  -webkit-background-clip: border-box !important;
+  background-clip: border-box !important;
+  color: var(--text-2) !important;
+  -webkit-text-fill-color: currentColor !important;
+}
 :root[data-motion="reduced"] .mo-shimmer,
 :root[data-motion="reduced"] .cc-queue-item.is-flushing,
 :root[data-motion="reduced"] .pets-thumb[data-state="loading"]::after,
 :root[data-motion="reduced"] .pets-thumb-pulse,
 :root[data-motion="reduced"] .mkt-sk,
 :root[data-motion="reduced"] .mkt-twinkle,
-:root[data-motion="reduced"] .mkt-dot {
+:root[data-motion="reduced"] .mkt-dot,
+:root[data-motion="reduced"] .sa-avatar.is-running svg,
+:root[data-motion="reduced"] .dada-loader-hop,
+:root[data-motion="reduced"] .dada-loader-shadow {
   animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .text-shine {
+    animation: none;
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--text-2);
+    -webkit-text-fill-color: currentColor;
+  }
 }
 /* 关闭档：与系统 reduced-motion 同等降级 */
 :root[data-motion="off"] .pets-thumb[data-state="loading"]::after,
@@ -273,6 +294,9 @@
 :is(html[data-window-motion="1"], body.panel-dragging) .st-icon .st-arc,
 :is(html[data-window-motion="1"], body.panel-dragging) .st-icon .st-pulse,
 :is(html[data-window-motion="1"], body.panel-dragging) .cc-queue-item.is-flushing,
-:is(html[data-window-motion="1"], body.panel-dragging) .es-chat-caret {
+:is(html[data-window-motion="1"], body.panel-dragging) .es-chat-caret,
+:is(html[data-window-motion="1"], body.panel-dragging) .sa-avatar.is-running svg,
+:is(html[data-window-motion="1"], body.panel-dragging) .dada-loader-hop,
+:is(html[data-window-motion="1"], body.panel-dragging) .dada-loader-shadow {
   animation: none !important;
 }

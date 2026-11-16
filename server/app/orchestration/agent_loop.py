@@ -26,6 +26,7 @@ from app.orchestration.agent_events import broadcast
 from app.orchestration.call_recovery import (
     Failure as CallFailure,
     RecoveryCancelled,
+    RetryBudget,
     classify_failure,
     recover_model_call,
 )
@@ -84,19 +85,25 @@ async def _broadcast_turn_status(session_id: int, turn_id: int, thread_id: int |
 async def _wait_retry_interval(cancel_event: asyncio.Event | None, seconds: float | None = None) -> bool:
     """v35/v45: 重试前等待指定秒数。
 
-    seconds=None 时取配置序列的首个间隔（兼容旧调用）；期间每 0.5s 检查一次中断信号，
+    seconds=None 时取配置序列的首个间隔（兼容旧调用）；中断信号可立即唤醒等待，
     被中断返回 False（调用方应停止重试），正常等待完成返回 True。
     """
     if seconds is None:
         seconds = _retry_wait_seconds(1)
     total = max(0.0, float(seconds))
-    waited = 0.0
-    while waited < total:
-        if cancel_event and cancel_event.is_set():
-            return False
-        await asyncio.sleep(0.5)
-        waited += 0.5
-    return not (cancel_event and cancel_event.is_set())
+    if cancel_event is None:
+        await asyncio.sleep(total)
+        return True
+    if cancel_event.is_set():
+        return False
+    if total <= 0:
+        return True
+    # plan-20261112-retry-policy-1：一次准确等待避免固定步长向上取整与累计调度误差。
+    try:
+        await asyncio.wait_for(cancel_event.wait(), timeout=total)
+    except asyncio.TimeoutError:
+        return not cancel_event.is_set()
+    return False
 
 
 def _retry_wait_seconds(attempt: int) -> float:
@@ -117,23 +124,12 @@ def _retry_plan() -> list[float]:
     return list(settings.agent_retry_interval_list)
 
 
-def _credential_slots(db_creds: int) -> int:
-    """一轮重试最多尝试几个凭据（N 个 Key 不吃掉重试次数）。"""
-    return max(1, int(db_creds or 1))
-
-
-def _retry_exhausted_text(reason: str, attempts: int, intervals: list[float],
-                          creds: int = 1) -> str:
-    """重试穷尽后的用户可见文案（R11）：说清重试了几轮、试过几个 Key。
-
-    此前异常路径只写原始错误、响应路径只写重试次数，用户分不清「没重试」还是
-    「重试过」；多 Key 时也看不到系统确实换了账号再试。
-    """
-    rounds = len(intervals)
-    tried = max(int(attempts or 0), rounds)
-    if creds > 1:
-        return f"{reason}（已自动重试 {rounds} 次，尝试 {tried} 个 Key/账号仍失败）"
-    return f"{reason}（已自动重试 {rounds} 次仍失败）"
+def _retry_exhausted_text(reason: str, attempts: int) -> str:
+    """plan-20261112-retry-policy-1：提前终止也只展示实际完成的重试次数。"""
+    attempts = max(0, int(attempts))
+    if not attempts:
+        return reason
+    return f"{reason}（已自动重试 {attempts} 次仍失败）"
 
 
 async def _report_credential(db, provider, failure: CallFailure | None = None,
@@ -173,8 +169,8 @@ async def _report_credential(db, provider, failure: CallFailure | None = None,
 async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schemas,
                              session_id, turn_id, step, agent_id, agent_name,
                              thread_id, cancel_event, reasoning_effort, thinking,
-                             workspace, effort, index_no, failed_creds: set[int]):
-    """重试中的一次尝试：轮内第 2 次起先换凭据，再走**与首次相同的流式管线**。
+                             workspace, effort, failed_creds: set[int]):
+    """一次已授权的重试：失败凭据可切换，再走与首次相同的流式管线。
 
     - R5：messages 用调用方传入的 api_messages（build_api_copy 后的同一份 payload），
       不再重发未做落盘保护/旧推理剥离的原始 messages；
@@ -182,17 +178,20 @@ async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schem
     """
     provider = state["provider"]
     _cur_cid = getattr(provider, "credential_row_id", None)
-    # 「失败即换」：本轮当前凭据刚失败过（已在 failed_creds 里）时，首次尝试就切走，
-    # 不再先用同一个 Key 白打一次。
-    _must_switch = (
-        (index_no > 1 or (_cur_cid is not None and _cur_cid in failed_creds))
-        and bool(failed_creds)
-    )
+    # plan-20261112-retry-policy-1：换 Key 必须发生在已授权的重试内，不能额外增加调用。
+    _must_switch = _cur_cid is not None and _cur_cid in failed_creds
     if _must_switch and model is not None:
         try:
             _np, _nreason, _ncid = await get_model_registry().next_provider_for_model(
                 db, model, exclude=failed_creds,
             )
+            if _np is None and len(failed_creds) > 1:
+                # plan-20261112-retry-policy-1：下一次授权调用可重新轮换已试凭据，不能卡在末尾 Key。
+                failed_creds.clear()
+                failed_creds.add(_cur_cid)
+                _np, _nreason, _ncid = await get_model_registry().next_provider_for_model(
+                    db, model, exclude=failed_creds,
+                )
             if _np is not None:
                 state["provider"] = provider = _np
                 logger.warning("[agent] turn=%s 已切换到备用凭据 #%s", turn_id, _ncid)
@@ -610,6 +609,8 @@ class AgentOutput:
     # plan-91-394: 失败是否属于网络/网关类瞬时故障（子代理据此保活等待恢复，而非判死）。
     # 确定性失败（鉴权、模型不可用、输出达到上限）为 False。
     transient: bool = False
+    # plan-20261112-retry-policy-1：外层不得在模型恢复结束后重新启动一整套自动重试。
+    retry_handled: bool = False
 
 
 def _is_memory_pairing_balanced(messages: list, k: int) -> bool:
@@ -766,6 +767,7 @@ async def _compact_persistent_or_fallback(
     turn_id: int, messages: list, trigger: str = "pressure",
     reply_language: str = "auto",
     thread_id: int | None = None, agent_kind: str = "main",
+    tool_schemas: list | None = None,
 ) -> tuple[dict | None, list]:
     """优先落库式压缩（v30，参照 deepseek-harness compaction）。
 
@@ -784,64 +786,70 @@ async def _compact_persistent_or_fallback(
         (result, messages)：result 非 None 表示落库式压缩成功。
     """
     # plan-19-82: checkpoint 前言按本轮语言选择（中文会话用中文前言，避免英文污染回复语言）
-    from app.orchestration.prompts import get_checkpoint_preamble
-
     _result: dict | None = None
+    _current_tasks = [m.model_copy(deep=True) for m in messages if m.context_kind == "current_task"]
     # plan-560-2311 A2：非主线程不能落库式压缩（原因见 docstring），交由内存式回退
     _persistent_allowed = thread_id is None and agent_kind == "main"
     # plan-19-82 步骤5: 固定开销（system/developer + 工具规则）实测值——压缩不会动它们，
     # 必须先扣除再判定目标可达性，否则会「压不动却反复压」。
-    from app.orchestration.token_counter import estimate_fixed_overhead_tokens as _fixed_of
-    _fixed_overhead = _fixed_of(messages)
+    from app.orchestration.token_counter import (
+        estimate_fixed_overhead_tokens as _fixed_of, estimate_tools_tokens as _est_tools,
+    )
+    # plan-20261115-compact-tools：tools schema 随请求独立传给 provider、不属于 messages，
+    # 但确实占窗口（实测 57 个工具占掉近半 prompt）。压缩的验收与预算扣除必须与触发侧
+    # （本文件 `_est_raw = _est_tokens(api_messages) + _tools_tokens`）同口径，否则
+    # post_compact_ratio / target_reached 系统性偏低——「自报已达标、实际仍高位」。
+    _tools_overhead = _est_tools(tool_schemas or [])
+    _fixed_overhead = _fixed_of(
+        [m for m in messages if m.context_kind != "checkpoint"]) + _tools_overhead
     try:
         from app.persistence.models.message import Session as _SessRow
         from app.orchestration.context_compressor import compact_session, emergency_compact_session
         _sess = await db.get(_SessRow, session_id) if _persistent_allowed else None
         if _sess is not None:
+            # plan-20261109-compact-structure：先提交已执行结果，再按稳定来源绑定同一快照。
+            from app.persistence.write_behind import write_behind as _wb
+            await _wb.get(session_id, turn_id).flush()
+            from app.orchestration.context_memory import _fetch_main_messages
+            from app.orchestration.checkpoint_projection import bind_runtime_sources
+            _source_ctx = _sess.shared_context or {}
+            _rows = await _fetch_main_messages(db, session_id, limit=None,
+                                               min_id=int(_source_ctx.get("compacted_floor") or 0),
+                                               include_ids=_source_ctx.get("compacted_exceptions") or [])
+            messages = bind_runtime_sources(messages, _rows)
             if trigger == "context-overflow":
                 _result = await emergency_compact_session(
                     db, session=_sess, provider=provider, context_window=agent_window,
                     used_tokens=used_tokens, agent_id=agent_id, agent_name=agent_name,
                     turn_id=turn_id, language=reply_language,
                     # plan-560-2311 A4：与 pressure 路径同源传固定开销，口径一致
-                    fixed_overhead_tokens=_fixed_overhead,
+                    fixed_overhead_tokens=_fixed_overhead, source_messages=_rows,
                 )
             else:
                 _result = await compact_session(
                     db, session=_sess, provider=provider, context_window=agent_window,
                     used_tokens=used_tokens, agent_id=agent_id, agent_name=agent_name,
                     turn_id=turn_id, trigger=trigger, language=reply_language,
-                    fixed_overhead_tokens=_fixed_overhead,
+                    fixed_overhead_tokens=_fixed_overhead, source_messages=_rows,
                 )
     except Exception:
         logger.warning("[agent] turn=%s %s 落库式压缩失败，回退内存式", turn_id, trigger, exc_info=True)
         _result = None
 
     if _result is not None:
-        # plan-278-1391: 先裁剪本轮内存消息，再追加 checkpoint。
-        # 不裁剪的话，被压缩内容仍留在本轮 prompt 里 → 占用不降 → 每步反复触发压缩。
+        # plan-20261109-compact-structure：只按同一次持久化遮蔽范围投影，不再独立估算裁剪。
+        from app.orchestration.checkpoint_projection import load_checkpoints, project_checkpoints
         from app.orchestration.token_counter import estimate_messages_tokens
-        _before_tokens = estimate_messages_tokens(messages)
-        # plan-19-82 步骤5: 内存裁剪预算改用「压缩后目标预算」而非固定 16% 保留，
-        # 否则落库压缩达标了、内存 prompt 仍占高位（下一 step 又判超阈值 → 反复压缩）。
-        from app.orchestration.token_counter import get_compact_target_tokens
-        _retain = _result.get("retained_tokens")
-        if not isinstance(_retain, int) or _retain <= 0:
-            _retain = get_compact_target_tokens(agent_window)
-        _pruned = _prune_messages_for_compaction(messages, _retain)
-        _after_tokens = estimate_messages_tokens(_pruned)
+        await db.refresh(_sess)
+        _checkpoints = await load_checkpoints(db, _sess.shared_context or {})
+        messages = project_checkpoints(messages, _checkpoints, _result["shadowed_ids"])
+        # plan-20261115-compact-tools：对外广播的 post_compact_ratio 也必须计入 tools schema
+        # （与触发侧 `_est_tokens(api_messages) + _tools_tokens` 同口径），否则压缩卡
+        # 显示的比例会比其他地方的占用率低一截，看起来「压完就很空」。
+        _after_tokens = estimate_messages_tokens(messages) + _tools_overhead
         _post_ratio = round(_after_tokens / agent_window * 100, 1) if agent_window else None
-        logger.info(
-            "[agent] turn=%s 压缩后内存上下文 %d -> %d tokens（保留预算 %d，消息 %d -> %d 条，压缩后占用 %s%%）",
-            turn_id, _before_tokens, _after_tokens, _retain, len(messages), len(_pruned), _post_ratio,
-        )
-        # plan-599-2520：落库式压缩的内存上下文同样走统一收尾，避免裁剪后的保留区
-        # 以 assistant(tool_calls) 或 tool 开场、或在 checkpoint 之前出现悬空调用。
-        from app.orchestration.compaction import finalize_compacted_messages
-        messages = finalize_compacted_messages([*_pruned, ChatMessage(
-            role="developer",
-            content=f"{get_checkpoint_preamble(reply_language)}\n\n{_result['summary']}",
-        )], reply_language)
+        logger.info("[agent] stage=context_projection turn=%s compaction=%s messages=%d tokens=%d",
+                    turn_id, _result["compaction_id"], len(messages), _after_tokens)
         await broadcast(session_id, {
             "event": "compact.summary",
             "payload": {
@@ -855,6 +863,7 @@ async def _compact_persistent_or_fallback(
                 "saved_tokens": _result.get("saved_tokens"),
                 "summary_message_id": _result.get("summary_message_id"),
                 "summary": (_result.get("summary") or "")[:300],
+                "summary_source": _result.get("summary_source"),
                 "trigger": _result.get("trigger"),
                 "used_tokens": used_tokens,
                 "context_window": agent_window,
@@ -872,6 +881,19 @@ async def _compact_persistent_or_fallback(
             from app.orchestration.compaction import auto_compact
             messages = await auto_compact(messages, agent_window, provider,
                                           language=reply_language)
+        # plan-20261109-compact-structure：内存回退也不能只用泛化的“继续”替代本轮真实约束。
+        if _current_tasks and not any(m.context_kind == "current_task" for m in messages):
+            _prefix = [m for m in messages if m.role in ("system", "developer")]
+            _body = [m for m in messages if m.role not in ("system", "developer")]
+            messages = _prefix + _current_tasks + _body
+        from app.orchestration.compaction import finalize_compacted_messages
+        _memory_checkpoints = [m for m in messages if m.context_kind == "checkpoint"]
+        if len(_memory_checkpoints) > 1:
+            from app.orchestration.checkpoint_projection import project_checkpoints
+            _combined = _memory_checkpoints[-1].model_copy(update={
+                "content": "\n\n".join(dict.fromkeys(m.content or "" for m in _memory_checkpoints))})
+            messages = project_checkpoints(messages, [_combined])
+        messages = finalize_compacted_messages(messages, reply_language)
     return _result, messages
 
 
@@ -1175,17 +1197,6 @@ async def run_agent_loop(
     # plan-248-1258 M2.2: 凭据轮询状态——已失败的凭据 id 集合 + 已上报成功的集合
     _failed_creds: set[int] = set()
     _ok_reported: set[int] = set()
-    # plan-20261020-retry-cred-perf：该供应商的凭据条数——决定一轮重试能换几次 Key。
-    # 多凭据时轮内换 Key 不等待，N 个 Key 不会吃掉重试次数。
-    _cred_total = 1
-    try:
-        _cred_pid = getattr(provider, "provider_row_id", None)
-        if _cred_pid:
-            from app.services import credential_service as _cred_svc0
-            _cred_total = max(1, len(await _cred_svc0.list_credentials(db, _cred_pid)))
-    except Exception:  # noqa: BLE001 - 数不清就按单凭据处理
-        _cred_total = 1
-
     # v21: thinking 模式开关 —— provider 支持 thinking 参数（DeepSeek/GLM/Kimi 系）
     # 且本轮 effort 非 none 时开启（对齐 deepseek-harness：thinking:{type:"enabled"} + effort）。
     # 修复：此前只发 reasoning_effort、从不发 thinking，DeepSeek 官方网关不识别
@@ -1297,6 +1308,9 @@ async def run_agent_loop(
     _sub_mgr_for_reminder = (subagent_context or {}).get("manager") if subagent_context else None
     _subagent_reminded_sig: tuple[int, ...] = ()
     _subagent_reminded_at_step = 0
+    # plan-20261115-subagent-quota：零在跑时的额度提醒节流游标。初始化为负间隔，
+    # 保证本轮第一次进入（step 0/1）就注入一次额度——派发前就知道上限，不必撞到拒绝才发现。
+    _subagent_quota_reminded_at_step = -_SUBAGENT_REMINDER_STEP_GAP
     # plan-20261020-bgtask：本轮自己启动、仍在运行的后台命令提醒的节流状态
     _bg_reminded_sig: tuple[str, ...] = ()
     _bg_reminded_at_step = 0
@@ -1341,6 +1355,7 @@ async def run_agent_loop(
     })
     _obs_tools: list[tuple[str, bool]] = []
 
+    _pending_compact_tokens = 0
     try:
         for step in range(1, loop_step_limit + 1):
             # plan-91-394: 每步开始登记检查点引用（列表原地追加，失败/暂停时读到的即最新进度）
@@ -1419,7 +1434,7 @@ async def run_agent_loop(
                     )
                     agent_window = 500000
                 # 修复重复/空 tool_call id（Gemini 等网关 400 根因），再配对/排序
-                messages = repair_tool_call_ids(messages)
+                messages = repair_tool_call_ids([m.model_copy(deep=True) for m in messages])
                 messages = ensure_tool_pairing(messages)
                 # v8 根治: 强制 assistant(tool_calls) 后紧跟 tool 结果，杜绝 400
                 messages = normalize_tool_sequence(messages)
@@ -1427,7 +1442,7 @@ async def run_agent_loop(
                 # 只保留单条超长工具结果的落盘保护；压缩仅由超设置阈值的
                 # 落库式压缩（可见压缩卡片）完成。
                 # plan-20261020-pts：超长结果落盘到本会话工作区，模型按占位提示 fs_read 才读得回
-                api_messages = build_api_copy(messages, workspace, preserve_reasoning=getattr(provider, "name", "") == "ta3")
+                api_messages = build_api_copy(messages, workspace, preserve_reasoning=True)
                 # plan-282-1441：把本轮"上下文回收"如实告知用户（此前静默折叠，
                 # 用户只看到占用突然降几十 k，误以为丢历史——即"隐藏压缩"的观感来源）。
                 try:
@@ -1470,7 +1485,8 @@ async def run_agent_loop(
                     est_raw=_est_raw, calib=_calib_factor,
                     last_est_raw=_last_est_raw, last_real_prompt=_last_real_prompt,
                 )
-                if _used_tokens >= _pre_threshold:
+                if _used_tokens >= _pre_threshold or _pending_compact_tokens:
+                    _pending_compact_tokens = 0
                     logger.info(
                         "[agent] turn=%s step=%s 前置已使用 %d (est_raw=%d calib=%.3f "
                         "last_real=%d) >= 阈值 %d (%.0f%%)，调用前压缩",
@@ -1487,23 +1503,26 @@ async def run_agent_loop(
                         turn_id=turn_id, messages=messages, trigger="pressure",
                         reply_language=reply_language,
                         thread_id=thread_id, agent_kind=agent_kind,
+                        # plan-20261115-compact-tools：把 tools schema 计入压缩的固定开销与验收口径
+                        tool_schemas=tool_schemas,
                     )
                     messages = repair_tool_call_ids(messages)
                     messages = ensure_tool_pairing(messages)
                     messages = normalize_tool_sequence(messages)
-                    api_messages = build_api_copy(messages, workspace, preserve_reasoning=getattr(provider, "name", "") == "ta3")
+                    api_messages = build_api_copy(messages, workspace, preserve_reasoning=True)
                     _est_after = int((_est_tokens(api_messages) + _tools_tokens) * _calib_factor)
                     logger.info("[agent] turn=%s step=%s 前置压缩后 prompt=%d -> %d (persistent=%s)", turn_id, step, _used_tokens, _est_after, bool(_cc_pre))
                     # 上下文已被重写，真实基数与估算增量都失效：下一次退回全量估算口径
                     _last_real_prompt = 0
                     _last_est_raw = 0
                     await broadcast(session_id, {"event": "usage.update", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, "prompt_tokens": _est_after, "completion_tokens": 0, "total_tokens": _est_after, "context_window": agent_window, "usage_source": "est_after_compact", "cached_input_tokens": 0, "reasoning_tokens": 0, "agent_kind": agent_kind}})
-                    await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id, **(_cc_pre or {})}})
+                    await broadcast(session_id, {"event": "compact.completed", "payload": {"agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
+                        **{k: v for k, v in (_cc_pre or {}).items() if k not in ("checkpoint_text", "retained_ids")}}})
                 else:
                     logger.debug("[agent] turn=%s step=%s 前置已使用 %d (est_raw=%d calib=%.3f last_real=%d) < 阈值 %d，不压缩", turn_id, step, _used_tokens, _est_raw, _calib_factor, _last_real_prompt, _pre_threshold)
             except Exception:
-                logger.warning("[agent] turn=%s step=%s 前置压缩检查失败，降级为原始消息继续", turn_id, step, exc_info=True)
-                api_messages = messages
+                logger.error("[agent] stage=context_projection turn=%s step=%s 上下文构建失败", turn_id, step, exc_info=True)
+                raise
 
             # plan-19-82 增强（对齐 ZCode runtime-reminders）：周期性重申语言纪律与规则优先级。
             # 只在本步骤首次进入该区间时注入，注入后更新游标（避免同一提醒连续多步重复）。
@@ -1574,6 +1593,15 @@ async def run_agent_loop(
                 elif not _running_now:
                     # 全部结束：复位签名，下一批新派发的子代理能立即触发一次提醒
                     _subagent_reminded_sig = ()
+                    # plan-20261115-subagent-quota：没有子代理在跑时也要让主代理看到额度。
+                    # 此前额度只出现在「有子代理在跑」的提醒与「已满被拒」的错误里，
+                    # 派发前是盲区，模型只能一次派满、撞墙才知道上限（用户反馈）。
+                    if step - _subagent_quota_reminded_at_step >= _SUBAGENT_REMINDER_STEP_GAP:
+                        _pending_reminders.append(_build_subagent_quota_reminder(
+                            max(1, min(30, int(getattr(settings, "max_concurrent_subagents", 4) or 4))),
+                            pending=int(_sub_mgr_for_reminder.pending_count()),
+                        ))
+                        _subagent_quota_reminded_at_step = step
 
             # plan-20261020-bgtask：本轮自己启动、仍在运行的后台命令——长驻服务用完必须主动停。
             # 只在主线程提醒（子代理线程不替主代理管命令）；只提醒**本轮**启动的，
@@ -1649,6 +1677,7 @@ async def run_agent_loop(
                     turn_id, len(api_messages), _role_counts,
                 )
 
+            _retry_budget = RetryBudget(_retry_plan())
             try:
                 response = await _stream_chat_and_broadcast(
                     provider, request,
@@ -1713,8 +1742,7 @@ async def run_agent_loop(
                         if _cid0 is not None:
                             _failed_creds.add(_cid0)
                         await _report_credential(db, provider, _resp_failure, _ok_reported)
-                    _retry_waits = _retry_plan()
-                    _retry_attempts = 0
+                    _retry_waits = _retry_budget.intervals
                     if _fatal and _retry_waits:
                         _efforts = settings.agent_empty_retry_effort_list
                         _state = {"provider": provider}
@@ -1727,6 +1755,11 @@ async def run_agent_loop(
                             return CallFailure(kind=classify_failure(_rf[0]).kind, text=_rf[0])
 
                         async def _outcome(_att, _resp, _fail):
+                            _cid = getattr(_state["provider"], "credential_row_id", None)
+                            if _fail is not None and _fail.counted and _cid is not None:
+                                _failed_creds.add(_cid)
+                            elif _fail is None:
+                                _failed_creds.clear()
                             await _report_credential(db, _state["provider"], _fail, _ok_reported)
 
                         try:
@@ -1739,14 +1772,14 @@ async def run_agent_loop(
                                     thread_id=thread_id, cancel_event=cancel_event,
                                     reasoning_effort=reasoning_effort, thinking=_thinking_flag,
                                     workspace=workspace, effort=_att.effort,
-                                    index_no=_att.index, failed_creds=_failed_creds,
+                                    failed_creds=_failed_creds,
                                 ),
                                 check=_health,
                                 intervals=_retry_waits,
                                 wait=lambda _s: _wait_retry_interval(cancel_event, _s),
                                 cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
                                 efforts=_efforts,
-                                per_round=_credential_slots(_cred_total),
+                                budget=_retry_budget,
                                 on_status=lambda _t: _broadcast_turn_status(
                                     session_id, turn_id, thread_id, _t),
                                 on_outcome=_outcome,
@@ -1758,7 +1791,6 @@ async def run_agent_loop(
                             )
                             return AgentOutput(kind="cancelled", error="任务被用户中断")
                         provider = _state["provider"]
-                        _retry_attempts = _rec.attempts
                         if _rec.ok:
                             response = _rec.response
                             _failure = None
@@ -1774,6 +1806,8 @@ async def run_agent_loop(
                                            turn_id, _rec.failure.text[:200])
                             raise RuntimeError(_rec.failure.text)
                         else:
+                            if _rec.failure is not None:
+                                _reason = _rec.failure.text
                             logger.warning("[agent] turn=%s step=%s 响应异常重试仍失败（attempts=%d）: %s",
                                            turn_id, step, _rec.attempts, _reason)
                     if _failure is not None:
@@ -1782,7 +1816,7 @@ async def run_agent_loop(
                         _err_text = _reason
                         if _fatal and _retry_waits:
                             _err_text = _retry_exhausted_text(
-                                _reason, _retry_attempts, _retry_waits, _cred_total)
+                                _reason, _retry_budget.attempts)
                         # plan-365-1790: 致命响应终止前记录诊断字段——
                         # 以 finish/frames/usage 三者组合区分「网关截断」与「模型真无输出」。
                         logger.warning(
@@ -1801,14 +1835,15 @@ async def run_agent_loop(
                         )
                         if _fatal:
                             return AgentOutput(kind="error", error=_err_text,
-                                               transient=_is_transient_failure_text(_reason))
+                                               transient=_is_transient_failure_text(_reason),
+                                               retry_handled=True)
             except Exception as api_err:
                 from app.orchestration.history_sequence import HistorySequenceError
                 if isinstance(api_err, HistorySequenceError):
                     raise
                 logger.warning("[agent] turn=%s 模型调用失败，尝试修复/压缩: %s", turn_id, str(api_err)[:200])
                 # 先兜底初始化：下方 except 分支会读它们，若在赋值前就抛异常不能变成 NameError
-                _repair_waits: list[float] = []
+                _repair_waits = _retry_budget.intervals
                 _rec = None
                 try:
                     _err_msg = str(api_err)
@@ -1820,19 +1855,27 @@ async def run_agent_loop(
                         if _cid0 is not None:
                             _failed_creds.add(_cid0)
                         await _report_credential(db, provider, _failure0, _ok_reported)
-                    _repair_waits = _retry_plan()
-                    if not _repair_waits:
+                    if _retry_budget.attempts >= len(_repair_waits):
                         raise api_err  # 未配置重试：交回外层按失败收尾
-                    # plan-20261020-retry-cred-perf R4：修复/压缩只负责改请求内容，之后的失败
-                    # 进入同一套轮式重试（不再「修完只给一次机会，再失败就终止」）。
+                    # plan-20261112-retry-policy-1：修复/压缩后的调用继续消耗同一次失败的剩余预算。
                     for _repair_round in range(1, 3):
+                        if _retry_budget.attempts >= len(_repair_waits):
+                            raise api_err
                         _fc_400 = (
                             "Please ensure that function call" in _err_msg
                             or "called exactly once" in _err_msg
                             or "must be followed by tool" in _err_msg
                             or "role 'tool' must be a response" in _err_msg
+                            or any(hint in _err_msg.lower() for hint in (
+                                "unexpected tool_result", "unexpected tool_use_id", "tool_result blocks",
+                                "must start with a user", "assistant prefill", "assistant message prefill",
+                                "missing reasoning_content", "reasoning_content must be passed",
+                            ))
                         )
                         if _fc_400:
+                            if _repair_round > 1:
+                                raise api_err
+                            _before_repair = [m.model_dump() for m in api_messages]
                             from app.orchestration.compaction import (
                                 build_api_copy as _build_api_fc,
                                 ensure_tool_pairing as _ensure_pairing,
@@ -1843,14 +1886,25 @@ async def run_agent_loop(
                             messages = _ensure_pairing(messages)
                             messages = _norm_fc(messages)
                             # v37: 重试发送前同样构建 api_messages 副本
-                            api_messages = _build_api_fc(messages, workspace)
-                            logger.info("[agent] turn=%s function-call 400 已修复请求，进入重试", turn_id)
+                            api_messages = _build_api_fc(messages, workspace, preserve_reasoning=True)
+                            if thread_id is None and agent_kind == "main":
+                                from app.orchestration.checkpoint_projection import load_checkpoints, project_checkpoints
+                                from app.persistence.models.message import Session as _RepairSession
+                                _repair_session = await db.get(_RepairSession, session_id)
+                                if _repair_session is not None:
+                                    await db.refresh(_repair_session)
+                                    _repair_ctx = _repair_session.shared_context or {}
+                                    messages = project_checkpoints(messages, await load_checkpoints(db, _repair_ctx),
+                                                                   _repair_ctx.get("compacted_ids") or [])
+                                    api_messages = _build_api_fc(messages, workspace, preserve_reasoning=True)
+                            if [m.model_dump() for m in api_messages] == _before_repair:
+                                raise api_err
+                            logger.info("[agent] stage=structure_recovery turn=%s 请求已改变，使用剩余重试预算", turn_id)
                         elif _is_context_overflow_error(_err_msg):
                             # v33: 仅真正的上下文溢出才走紧急压缩（对齐 deepseek-harness：
                             # context-overflow 只对 provider 确认的溢出恢复触发）。
                             from app.orchestration.compaction import (
                                 build_api_copy as _build_api_dc,
-                                emergency_compact,
                             )
                             from app.orchestration.token_counter import get_agent_context_window
                             # v16: 与主循环同口径——实际调用模型的窗口
@@ -1864,9 +1918,9 @@ async def run_agent_loop(
                                 turn_id=turn_id, messages=messages, trigger="context-overflow",
                                 reply_language=reply_language,
                                 thread_id=thread_id, agent_kind=agent_kind,
+                                # plan-20261115-compact-tools：溢出恢复同口径计入 tools schema
+                                tool_schemas=tool_schemas,
                             )
-                            if _cc_ovf is None:
-                                messages = emergency_compact(messages, agent_window, reply_language)
                             # 紧急压缩后同样修复 id + 补齐配对 + 规范化工具消息序列，
                             # 防止孤立 tool / 夹层消息（plan-599-2520：缺 ensure 时
                             # normalize 会把缺结果的后续 tool 成批丢弃，压缩后首次请求即报错）
@@ -1874,8 +1928,11 @@ async def run_agent_loop(
                             messages = ensure_tool_pairing(messages)
                             messages = normalize_tool_sequence(messages)
                             # R5: 与首次同一份 payload（含超长结果落盘保护、旧推理剥离）
-                            api_messages = _build_api_dc(messages, workspace)
+                            api_messages = _build_api_dc(messages, workspace, preserve_reasoning=True)
                             logger.info("[agent] turn=%s 上下文溢出已压缩，进入重试", turn_id)
+                        elif classify_failure(_err_msg).is_client:
+                            # plan-20261112-retry-policy-1：请求未能改变时，等待或换 Key 都不能修复确定性错误。
+                            raise api_err
                         else:
                             # v33: 429/503/连接/超时等瞬时故障——压缩无意义且会拖垮 turn
                             logger.warning(
@@ -1893,6 +1950,11 @@ async def run_agent_loop(
                             return CallFailure(kind=classify_failure(_rf[0]).kind, text=_rf[0])
 
                         async def _outcome(_att, _resp, _fail):
+                            _cid = getattr(_state["provider"], "credential_row_id", None)
+                            if _fail is not None and _fail.counted and _cid is not None:
+                                _failed_creds.add(_cid)
+                            elif _fail is None:
+                                _failed_creds.clear()
                             await _report_credential(db, _state["provider"], _fail, _ok_reported)
 
                         try:
@@ -1905,13 +1967,13 @@ async def run_agent_loop(
                                     thread_id=thread_id, cancel_event=cancel_event,
                                     reasoning_effort=reasoning_effort, thinking=_thinking_flag,
                                     workspace=workspace, effort=_att.effort,
-                                    index_no=_att.index, failed_creds=_failed_creds,
+                                    failed_creds=_failed_creds,
                                 ),
                                 check=_health,
                                 intervals=_repair_waits,
                                 wait=lambda _s: _wait_retry_interval(cancel_event, _s),
                                 cancelled=lambda: bool(cancel_event and cancel_event.is_set()),
-                                per_round=_credential_slots(_cred_total),
+                                budget=_retry_budget,
                                 on_status=lambda _t: _broadcast_turn_status(
                                     session_id, turn_id, thread_id, _t),
                                 on_outcome=_outcome,
@@ -1951,17 +2013,17 @@ async def run_agent_loop(
                     return AgentOutput(kind="cancelled", error="任务被用户中断")
                 except Exception as retry_err:
                     logger.error("[agent] turn=%s 紧急压缩重试失败: %s", turn_id, retry_err)
-                    _final_err = str(api_err)[:200]
-                    if _repair_waits:
-                        _final_err = _retry_exhausted_text(
-                            _final_err, _rec.attempts if _rec is not None else 0,
-                            _repair_waits, _cred_total)
+                    _last_failure = _retry_budget.failure
+                    _final_err = _retry_exhausted_text(
+                        (_last_failure.text if _last_failure else str(api_err))[:200],
+                        _retry_budget.attempts)
                     await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                           agent_id=agent_id, agent_name=agent_name,
                                           msg_type=MsgType.ERROR,
                                           content={"text": f"模型调用失败: {_final_err}", "agent_name": agent_name})
                     return AgentOutput(kind="error", error=f"模型调用失败: {_final_err}",
-                                       transient=_is_transient_failure_text(str(api_err)))
+                                       transient=_is_transient_failure_text(_final_err),
+                                       retry_handled=True)
 
             # 诊断日志：每步模型输出摘要
             logger.info(
@@ -2144,36 +2206,8 @@ async def run_agent_loop(
                         turn_id, step, _real_ratio * 100, _final_prompt,
                         agent_window, _threshold * 100,
                     )
-                    # v6.5: 压缩前广播，让前端显示"正在压缩上下文"反馈
-                    await broadcast(session_id, {
-                        "event": "compact.started",
-                        "payload": {
-                            "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
-                            "used_tokens": _final_prompt,
-                            "context_window": agent_window,
-                            "ratio": round(_real_ratio * 100, 1),
-                        },
-                    })
-                    # v30: 优先落库式压缩（持久化 checkpoint），失败回退内存式 auto_compact
-                    # plan-560-2311 A2：带上线程身份，子代理不做落库式压缩
-                    _cc_real, messages = await _compact_persistent_or_fallback(
-                        db, session_id=session_id, provider=provider, agent_window=agent_window,
-                        used_tokens=_final_prompt, agent_id=agent_id, agent_name=agent_name,
-                        turn_id=turn_id, messages=messages, trigger="pressure",
-                        reply_language=reply_language,
-                        thread_id=thread_id, agent_kind=agent_kind,
-                    )
-                    # 上下文已被重写：真实基数与估算增量都失效，下一步退回全量估算口径
-                    _last_real_prompt = 0
-                    _last_est_raw = 0
-                    # v6.5: 压缩后广播，前端关闭反馈提示（携带阴影定价供渲染压缩卡片）
-                    await broadcast(session_id, {
-                        "event": "compact.completed",
-                        "payload": {
-                            "agent_id": agent_id, "agent_name": agent_name, "turn_id": turn_id,
-                            **(_cc_real or {}),
-                        },
-                    })
+                    # plan-20261109-compact-structure：本次响应与工具结果尚未落库，延至下一调用边界。
+                    _pending_compact_tokens = _final_prompt
                 else:
                     logger.debug(
                         "[agent] turn=%s step=%s 上下文占用 %.1f%% (p=%d/w=%d) < %.0f%%，无需压缩",
@@ -2222,12 +2256,12 @@ async def run_agent_loop(
             # " " 这类占位是 truthy，于是库里留下一条只有一个空格的 thinking 消息——前端照常渲染
             # 「思考过程」行，展开却是空白块。落库按 strip 后判断，正文仍保留原文（含内部换行缩进）。
             _thinking_text = (response.thinking or "").strip()
-            if _is_substantive_thinking(response.thinking):
+            if _is_substantive_thinking(response.thinking) or response.thinking_blocks:
                 await _emit_agent_msg(db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
                                       agent_id=agent_id, agent_name=agent_name,
                                       msg_type=MsgType.THINKING,
                                       content={"text": _thinking_text, "agent_name": agent_name,
-                                               "thinking": True})
+                                               "thinking": True, "thinking_blocks": response.thinking_blocks})
 
             # 工具调用
             if response.tool_calls:
@@ -2245,6 +2279,7 @@ async def run_agent_loop(
                     # v1.2: thinking 模式网关要求工具调用回合的历史 assistant 回传
                     # reasoning_content（模型本步产生的思考），否则下一轮调用 400
                     reasoning_content=response.thinking or None,
+                    thinking_blocks=response.thinking_blocks,
                 ))
                 # plan-20261019-suggestion-flow：本步的建议工具是否成功（收束判定用，见 for 循环之后）
                 _suggestion_ok_this_step = False
@@ -2973,6 +3008,8 @@ async def run_agent_loop(
                     # plan-20261015-browser-agent：截图类结果落盘，消息流在该调用的时间线位置展示预览
                     from app.orchestration.tool_images import persist_tool_image
                     _tool_image = persist_tool_image(tool_name, result)
+                    _exit_note = result.data.get("exit_note") if isinstance(result.data, dict) else None
+                    _returncode = result.data.get("returncode") if isinstance(result.data, dict) else None
                     await broadcast(session_id, {
                         "event": "tool.result",
                         # v7(H): 补 call_key——前端据此精确关联写操作/命令行，运行中即可展示 +N-M/diff
@@ -2980,7 +3017,9 @@ async def run_agent_loop(
                                     "ok": result.ok, "duration_ms": _dur,
                                     "output_preview": (result.output or result.error)[:300],
                                     **({"change_stat": _change_stat} if _change_stat else {}),
-                                    **({"image": _tool_image} if _tool_image else {})},
+                                    **({"image": _tool_image} if _tool_image else {}),
+                                    **({"exit_note": _exit_note} if _exit_note else {}),
+                                    **({"returncode": _returncode} if _returncode is not None else {})},
                     })
 
                     # plan-156-620：落库与上下文使用同一份呈现文本（超长时完整输出落盘并给出续读方式）
@@ -2998,7 +3037,9 @@ async def run_agent_loop(
                                  "error": result.error, "error_code": result.error_code, "duration_ms": _dur,
                                  "agent_name": agent_name,
                                  **({"change_stat": _change_stat} if _change_stat else {}),
-                                 **({"image": _tool_image} if _tool_image else {})},
+                                 **({"image": _tool_image} if _tool_image else {}),
+                                 **({"exit_note": _exit_note} if _exit_note else {}),
+                                 **({"returncode": _returncode} if _returncode is not None else {})},
                         buffered=True,
                     )
                     # 失败时把错误类别与恢复指引附在文本末尾，模型据此选择修正动作（落库的 error 字段保持原样）
@@ -3879,8 +3920,17 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     （长思考模型 30s 硬编码断流问题的修复点）。
     """
     from app.models.schemas import ChatResponse, Usage as UsageModel
+    from app.orchestration.history_sequence import HistorySequenceError, structure_diagnostic
+    from app.orchestration.history_sequence import request_diagnostic_context
+    request_diagnostic_context.set({"session_id": session_id, "turn_id": turn_id,
+                                    "message_id": request.message_id, "provider": getattr(provider, "name", "unknown"),
+                                    "compaction_ids": [m.checkpoint_id for m in request.messages if m.checkpoint_id]})
+    logger.info("[context-request] session=%s turn=%s message=%s provider=%s structure=%s",
+                session_id, turn_id, request.message_id, getattr(provider, "name", "unknown"),
+                structure_diagnostic(request.messages, protocol=getattr(provider, "name", "unknown")))
     full_content = ""
     full_thinking = ""
+    signed_thinking = None
     tool_calls = []
     finish_reason = "stop"
     usage = UsageModel()
@@ -3973,6 +4023,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 _done_thinking = event.get("thinking") or ""
                 if _is_substantive_thinking(_done_thinking):
                     full_thinking = _done_thinking
+                signed_thinking = event.get("thinking_blocks")
                 tool_calls = event.get("tool_calls", [])
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", UsageModel())
@@ -4012,6 +4063,10 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             _cancelled = True
             finish_reason = "cancelled"
     except Exception as e:
+        if isinstance(e, HistorySequenceError):
+            raise
+        from app.orchestration.history_sequence import record_upstream_error
+        record_upstream_error(e)
         if _cancelled:
             pass  # 中断导致的异常，忽略
         elif _is_stream_timeout(e):
@@ -4028,28 +4083,11 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
                 turn_id, type(e).__name__, str(e)[:120], len(full_thinking), len(full_content),
             )
         else:
-            # plan-20261020-retry-cred-perf R8: 429 / 鉴权类错误换请求方式也没用——
-            # 直接抛给上层换 Key 或重试，不再白白多打一轮非流式请求。
-            _stream_kind = classify_failure(e).kind
-            if _stream_kind in ("quota", "auth"):
-                logger.warning(
-                    "[agent] turn=%s 流式调用失败(%s)，跳过非流式回退: %s",
-                    turn_id, _stream_kind, str(e)[:160],
-                )
-                raise
-            logger.exception("[agent] turn=%s 流式调用异常，回退非流式", turn_id)
-            # 问题5: 非流式回退也可取消——与 cancel_event 竞速，命中即中断该请求
-            response = await _chat_with_cancel(provider, request, cancel_event)
-            if response is None:
-                logger.warning("[agent] turn=%s 非流式回退被用户中断", turn_id)
-                _cancelled = True
-                finish_reason = "cancelled"
-            else:
-                full_content = response.content or ""
-                full_thinking = response.thinking or ""
-                tool_calls = response.tool_calls or []
-                finish_reason = response.finish_reason
-                usage = response.usage
+            # plan-20261112-retry-policy-1：流式失败后的非流式补发同样是一次额外调用，
+            # 必须交给共享重试预算，不能在关闭重试时仍然自动补发。
+            logger.warning("[agent] turn=%s 流式调用失败，交给统一重试: %s",
+                           turn_id, str(e)[:160])
+            raise
 
     # v19: 剥离正文中的内联思考标签（部分网关把思考写进 content）
     # 超时、取消或流异常若发生在 done 前，尚未释放的开头也必须保留；
@@ -4097,6 +4135,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
         # plan-20261023-thinking-blank：只含空白的思考等同于没有思考——返回 None 后上游不会落库，
         # 也不会再生成一个展开后空白的思考块（历史库里的空格记录由前端时间线统一跳过）。
         thinking=(full_thinking if _is_substantive_thinking(full_thinking) else None),
+        thinking_blocks=signed_thinking,
         tool_calls=tool_calls, finish_reason=finish_reason, usage=usage,
         frames_received=frames_received,
         first_token_ms=_first_ms, gen_ms=_gen_ms,
@@ -4201,6 +4240,28 @@ def _build_subagent_running_reminder(
         "② 只做与它们不重叠的工作；"
         "③ 没有非重叠工作可做时，调用 collect_results(wait=true) 阻塞等待，完成后统一整合其报告。"
     )
+
+
+def _build_subagent_quota_reminder(max_conc: int, pending: int | None = None) -> str:
+    """plan-20261115-subagent-quota：零在跑时的「并发额度」常驻提醒。
+
+    `_build_subagent_running_reminder` 只在有子代理在跑时出现，于是主代理在**派发前**
+    拿不到任何额度信息（用户反馈：经常不知道上限，只能一次派满、被动等拒绝）。
+    这里单独给一条轻量额度行，按 `_SUBAGENT_REMINDER_STEP_GAP` 节流注入；
+    剩余为 0 时明确告诉模型「先收结果、不要再派发」，避免无意义的重试。
+    """
+    used = max(0, int(pending or 0))
+    remaining = max(0, max_conc - used)
+    tail = (
+        "剩余为 0 时不要再派发，先 collect_results(wait=true) 收取已有结果或自己做不重叠的工作。"
+        if remaining == 0
+        else "派发前按剩余名额规划一次派几个，避免派满被拒后重试。"
+    )
+    return (
+        f"[子代理并发额度] 上限 {max_conc}｜当前在跑 {used}｜剩余 {remaining}。"
+        "每次派发的回执也会带上实时额度。" + tail
+    )
+
 
 # plan-20261020-bgtask：后台命令运行中提醒的节流间隔（步）——集合不变时至少间隔这么多步才重复注入
 _BG_REMINDER_STEP_GAP = 8

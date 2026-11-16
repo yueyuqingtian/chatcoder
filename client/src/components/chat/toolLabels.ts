@@ -118,6 +118,11 @@ export const TOOL_VERBS: Record<string, string> = {
   decide_workflow: "已提交工作流决策",
   request_write_scope: "已申请写入范围",
   mcp: "已调用连接器",
+  // plan-693-2868（P1）：微应用工具（P0 落地的三个）——不写中文动词就会在消息流里
+  // 显示成「已调用工具 微应用 call」这类中英混排；方法名/应用名由工具卡与行内摘要给出。
+  microapp_call: "已调用微应用",
+  microapp_list: "已列出微应用",
+  microapp_validate: "已校验微应用",
   // plan-20261015-browser-agent：内置浏览器与电脑操控工具
   browser_navigate: "已打开网页",
   browser_tabs: "已管理标签",
@@ -230,6 +235,11 @@ const TOOL_LABELS: Record<string, [string, string?]> = {
   db_execute: ["执行", "数据变更"],
   db_ddl: ["变更", "表结构"],
   db_schema: ["读取", "表结构"],
+  // plan-693-2868（P1）：微应用工具的行标签——方法与 appId 由行内摘要（ToolTree.leafSummary）给出，
+  // 这里只给动作词与补充说明，避免同一条信息在行里出现两次。
+  microapp_call: ["调用", "微应用"],
+  microapp_list: ["列出", "微应用"],
+  microapp_validate: ["校验", "微应用"],
   browser_navigate: ["打开"],
   browser_tabs: ["标签"],
   browser_snapshot: ["结构", "页面元素"],

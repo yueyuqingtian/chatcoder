@@ -16,6 +16,8 @@ import { ThinkingTicker } from "./ThinkingTicker";
 import { ThinkingExpanded } from "./ThinkingExpanded";
 import { ChatCollapse } from "./ChatCollapse";
 import { useLiveThinkingExpand } from "../../store/flowExpand";
+import { Dada } from "../mascot/Dada";
+import { useRunningTicker } from "./useRunningTicker";
 
 export interface StreamingTextProps {
   /** 是否处于运行中（不运行返回 null） */
@@ -32,6 +34,8 @@ export interface StreamingTextProps {
   statusLabel?: string;
   /** 子代理线程 id（主会话不传）：流式思考的展开态按线程区分 */
   threadId?: number;
+  /** plan-flow-redesign：当前轮次起始时间戳（毫秒），用于在加载动画右侧实时显示「· 已工作 X 分 Y 秒」 */
+  workStartMs?: number;
 }
 
 /** 停滞追平时限（毫秒）：流式正文长时间不再增长（= 后端这一段已写完）时，
@@ -135,7 +139,7 @@ function useSmoothText(target: string): string {
   return shown;
 }
 
-export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel, threadId }: StreamingTextProps) {
+export function StreamingText({ active, thinking, text, processingLabel = "处理中…", waitingLabel = "等待响应…", statusLabel, threadId, workStartMs }: StreamingTextProps) {
   const thinkingText = thinking.trim();
   // plan-511-2182：思考行是否出现改用原始缓冲判定。平滑器要下一帧才追上 target，
   // 若仍用平滑后的文本，状态行卸载与思考行出现会落在两次提交里，中间出现高度为 0 的空窗。
@@ -179,7 +183,7 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
           </div>
           {/* 状态层：思考行出现前的「等待响应…」/ 瞬时提示；被思考层接棒后仍留在格内撑住一行高度 */}
           <div className="stream-state-layer" data-show={slotStateShown ? "true" : "false"}>
-            <StateLine label={statusLabel ?? waitingLabel} />
+            <StateLine label={statusLabel ?? waitingLabel} workStartMs={workStartMs} />
           </div>
         </div>
       </div>
@@ -204,7 +208,7 @@ export function StreamingText({ active, thinking, text, processingLabel = "处�
 
           plan-20261112-loading-home-sidebar：有正文或思考时固定保留尾部状态行；
           两者均为空时交给槽位状态层，工具调用和正文落库的间隙仍有三点反馈。 */}
-      {tailStateShown && <StateLine label={statusLabel ?? processingLabel} />}
+      {tailStateShown && <StateLine label={statusLabel ?? processingLabel} workStartMs={workStartMs} />}
     </div>
   );
 }
@@ -222,7 +226,7 @@ function StreamingThinkingRow({ text, threadId }: { text: string; threadId?: num
         onClick={() => setOpen(!open)}
       >
         <span className="tc-icon"><ToolGlyph tool="thinking" size={16} /></span>
-        <span className="tc-verb">正在思考</span>
+        <span className="tc-verb text-shine">思考</span>
         {!open && (
           <span className="thinking-ticker-wrap">
             <span className="thinking-breath-dot" />
@@ -240,25 +244,33 @@ function StreamingThinkingRow({ text, threadId }: { text: string; threadId?: num
   );
 }
 
-/** plan-91-393：消息流底部「进行中」标记——三枚圆点沿正弦依次起伏并在末端汇成光标，
- *  像对方正在输入；颜色跟随主题强调色，动效时长走令牌（降低动效时静止）。 */
-function WaitMark() {
+/** plan-flow-redesign（方案 A）：底部轻量“小嗒嗒轻跃”加载标记（复用 mascot.css 跳动与共享 Dada 组件）。 */
+function DadaHopMark() {
   return (
-    <svg className="wait-mark" width="22" height="12" viewBox="0 0 22 12" aria-hidden>
-      <circle className="wm-dot" cx="3" cy="6" r="2" style={{ animationDelay: "0ms" }} />
-      <circle className="wm-dot" cx="9" cy="6" r="2" style={{ animationDelay: "140ms" }} />
-      <circle className="wm-dot" cx="15" cy="6" r="2" style={{ animationDelay: "280ms" }} />
-      <rect className="wm-caret" x="19.5" y="1.5" width="1.6" height="9" rx="0.8" />
-    </svg>
+    <span className="dada-loader-figure is-mini" aria-hidden style={{ ["--dl-size" as string]: "18px" }}>
+      <span className="dada-loader-shadow" />
+      <span className="dada-loader-hop">
+        <Dada variant="icon" size={18} blink={false} />
+      </span>
+    </span>
   );
 }
 
-/** 统一"进行中"状态行：呼吸点 + 文案（四态共用，唯一样式出口）。 */
-function StateLine({ label }: { label: string }) {
+/** 统一"进行中"状态行：小嗒嗒轻跃 + 流动状态文案 + 工作时长（四态共用，唯一样式出口）。 */
+function StateLine({ label, workStartMs }: { label: string; workStartMs?: number }) {
+  const hasTimer = typeof workStartMs === "number" && workStartMs > 0;
+  useRunningTicker(hasTimer);
+  let elapsedLabel = "";
+  if (hasTimer) {
+    const sec = Math.max(0, Math.round((Date.now() - workStartMs) / 1000));
+    const min = Math.floor(sec / 60);
+    elapsedLabel = min > 0 ? `${min} 分 ${sec % 60} 秒` : `${sec} 秒`;
+  }
   return (
-    <div className="turn-status-line">
-      <WaitMark />
-      <span className="thinking-block-status">{label}</span>
+    <div className="turn-status-line bottom-loader-line" role="status" aria-live="polite">
+      <DadaHopMark />
+      <span className="thinking-block-status text-shine">{label}</span>
+      {elapsedLabel && <span className="loader-worktime">· 已工作 {elapsedLabel}</span>}
     </div>
   );
 }

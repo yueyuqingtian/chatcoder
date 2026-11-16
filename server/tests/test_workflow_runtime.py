@@ -296,6 +296,20 @@ async def test_deterministic_failure_marks_program_failed(tmp_path):
     assert await _node_status(pid, "backend", "impl") == "failed"
 
 
+async def test_model_retry_handled_pauses_without_node_retries(tmp_path):
+    """plan-20261112-retry-policy-1：节点层不能在模型已处理重试后重新领取次数。"""
+    transient = NodeResult(status="failed", transient=True, retry_handled=True, error="网关超时")
+    executor = ScriptedExecutor({"impl": [transient]})
+    rt = _runtime(executor, retry_plan=lambda: [0, 0, 0])
+    pid = await rt.create_program(
+        session_id=await _session(), plan=_backend_plan(), workspace=str(tmp_path))
+    await rt.start(pid)
+    await rt.run_until_idle(timeout=20)
+    assert await _program_status(pid) == "paused"
+    assert [c[1] for c in executor.calls if c[0] == "impl"] == ["fresh"]
+    assert await _node_status(pid, "backend", "impl") == "interrupted"
+
+
 async def test_invalid_review_output_gets_one_repair_attempt(tmp_path):
     executor = ScriptedExecutor({"review": [NodeResult(status="done", text="没有结构化结论")]})
     rt = _runtime(executor)

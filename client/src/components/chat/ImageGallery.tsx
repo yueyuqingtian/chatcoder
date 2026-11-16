@@ -319,6 +319,9 @@ export function ImageGallery() {
   const onStageClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (draggedRef.current) {
       draggedRef.current = false;
+      // 必须在此拦住冒泡：外层 .gallery-overlay 的 onClick 会关闭预览，
+      // 只 return 不 stopPropagation 时，拖拽平移后一松手就会退出预览（用户反馈）。
+      e.stopPropagation();
       return;
     }
     // 点击舞台空白区域关闭预览
@@ -327,11 +330,21 @@ export function ImageGallery() {
     }
   };
 
+  // 遮罩上的点击：拖拽平移结束时 pointer capture 可能把 click 直接送到遮罩上，
+  // 这里再守一道，避免「拖完松手即退出预览」。
+  const onOverlayClick = () => {
+    if (draggedRef.current) {
+      draggedRef.current = false;
+      return;
+    }
+    close();
+  };
+
   const scale = zoom / 100;
   const isShifted = zoom !== 100 || offset.x !== 0 || offset.y !== 0;
 
   return createPortal(
-    <div className="gallery-overlay" onClick={close}>
+    <div className="gallery-overlay" onClick={onOverlayClick}>
       {/* 左上角显示文件名与序号 */}
       <div className="gallery-caption" onClick={(e) => e.stopPropagation()}>
         <span className="gallery-caption-name">{current.name}</span>

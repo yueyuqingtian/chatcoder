@@ -2,7 +2,7 @@
 // 修复: data: URL → loadFile / stdout 安全 / 全局错误捕获 / 图标
 // plan-75-335：libuv 线程池须在首次异步 IO 前配置（默认 4，提高到 8 增加主进程 IO 并行度）。
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || "8";
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, Notification, protocol } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -11,6 +11,13 @@ const net = require("net");
 const fs = require("fs");
 // plan-73-323：宠物窗口与宠物资源管理（只管窗口/资源/偏好，任务状态由渲染层直连后端）
 const pet = require("./pet.cjs");
+// plan-693-2868 §6.1 / D27：微应用库根统一解析（app:// 协议读文件与 spawn 后端注入共用同一套链）
+const microApp = require("./microapp-root.cjs");
+
+// plan-693-2868 · docs/app1/11-host-bridge-protocol.md §9-1：宿主桥能力（uid 映射 / 上行转发 /
+// 下行推送）实现在 browser-agent.cjs 里——那里已经有 microappGuest 与同一套 guest 校验口径。
+// 建窗后（createWindow）用它把 did-attach-webview 钩子挂到主窗口，模块加载末尾赋值。
+let browserAgentApi = null;
 
 // ── GPU 加速开关（plan-75-335）──
 // 调研结论：Electron 在 Windows 上默认启用 GPU 加速（本机实测 ANGLE/NVIDIA D3D11 已生效）；
@@ -179,6 +186,249 @@ function resolveFrontendDir() {
   return path.join(__dirname, "..", "client", "dist");
 }
 
+// ── plan-693-2868 §6.2 / §7 P0-3 / D24：微应用 app:// 协议 + CSP ──
+//
+// 为什么 CSP 必须由「协议响应头」给出，而不能挂在 http(s) webview 上（方案 §6.2 + §8 风险表
+// 「CSP 加错位置 → 破坏浏览器面板」）：
+//   1. 右侧浏览器面板的 webview 加载的是任意 http(s) 站点（BrowserPanel.tsx:726-732），它们与主窗口
+//      共用默认 session、共用同一套 webPreferences。若在主进程用 onHeadersReceived 统一注入严格 CSP，
+//      登录态、SPA 路由、页面内联脚本会整体失灵——而 webview 没有「这一条是微应用、那一条是普通网页」
+//      的身份，没法在响应头层面分流。
+//   2. 微应用必须断网（§4 D22：无审核，靠沙箱 + CSP 断网兜底），断网只能靠 `connect-src 'none'` /
+//      `script-src 'self'`。把 CSP 放进 app:// 的 Response 头，作用域天然收敛到「加载微应用的那一次
+//      导航」，浏览器面板一行都不受影响。
+//   3. 所以主进程在这里只做两件事：app:// 的响应头带 CSP；will-attach-webview 里只补 sandbox
+//      （见 createWindow 内该钩子）。宿主页面（file:// 前端）不注入 CSP，保持现状。
+const MICROAPP_CSP =
+  // plan-20261116-review-fixes：共享库与应用不同源，只放行本地 vendor，不开放外网。
+  "default-src 'self'; img-src 'self' app://vendor data: blob:; media-src 'self' blob:; " +
+  "style-src 'self' app://vendor 'unsafe-inline'; script-src 'self' app://vendor; " +
+  "font-src 'self' app://vendor data:; connect-src 'none'; " +
+  "frame-src 'none'; object-src 'none'; base-uri 'none'";
+// style-src 保留 'unsafe-inline' 是方案 D25 的明文决策：antd 5 走 CSS-in-JS 运行时插 <style>，
+// 去掉内联就等于所有第三方组件库不可用（§5.4 最后一行）。
+// connect-src 'none' 是微应用断网的唯一手段：即便页面里有 fetch/XHR/WebSocket 也会被浏览器拦下。
+
+// 微应用 webview 的独立 partition（方案 §6.2）。P0-6 的 <webview partition="persist:microapp">
+// 必须与此常量一致；协议按 session 注册，默认 session 上注册的 handler 不会自动继承到别的 partition。
+const MICROAPP_PARTITION = "persist:microapp";
+
+// 宿主桥 preload 的绝对路径（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §3）。
+// **只**注入给 src 以 app://microapp/ 开头的 webview，其余 webview 一律没有 preload；
+// 见 createWindow 里 will-attach-webview 的条件注入与那里的越权警告注释。
+const MICROAPP_PRELOAD_PATH = path.join(__dirname, "microapp-preload.cjs");
+
+/** `will-attach-webview` 的统一加固（主窗口 **与** 微应用独立窗口共用这一份口径）。
+ *
+ *  为什么抽成模块级函数：微应用可以在独立窗口里打开（microapp:openWindow），那个窗口里同样
+ *  有一个 `<webview>`。如果只有主窗口挂这个钩子，独立窗口里的 webview 就拿不到宿主桥 preload
+ *  （AI 调 microapp_call 会报 bridge-missing），同时它也绕过了 sandbox / 不注入 preload 的收敛。
+ *  两条路径必须逐字同一份规则，所以只能有一处实现。
+ */
+function hardenWebviewAttach(_event, webPreferences, params) {
+  // plan-693-2868 · docs/app1/11-host-bridge-protocol.md §9-1：宿主桥 preload **只**给微应用注入。
+  // 顺序是先无条件 delete、再按来源决定是否注入——这样 <webview preload="..."> 属性
+  // （渲染层/页面都可控）在任何情况下都不会生效。
+  delete webPreferences.preload;
+  webPreferences.nodeIntegration = false;
+  webPreferences.nodeIntegrationInSubFrames = false;
+  webPreferences.contextIsolation = true;
+  webPreferences.backgroundThrottling = false;
+  // plan-693-2868 §6.2 / §7 P0-4 / D24：webview 一律进 Chromium 渲染器沙箱。
+  // 微应用是无审核来源的第三方页面（§4 D22），除 CSP 断网外还需要进程级隔离兜底；
+  // 浏览器面板本来就没有 preload、没有 Node 能力，加 sandbox 不改变它的功能面。
+  webPreferences.sandbox = true;
+
+  // ⚠ 高危判定（写错即越权，务必保持原样）：
+  // 只认**严格前缀、区分大小写**的 app://microapp/。
+  // 不要改成 includes / 正则 / toLowerCase 之类：那样
+  //   src = "http://evil.example/app://microapp/x"（includes 命中）
+  //   src = "APP://MICROAPP/x"（忽略大小写命中）
+  // 这类普通网页也会走到下面的注入分支，浏览器面板里的任意 http 站点就直接拿到
+  // window.microapp（exec / 读文件全通），宿主通道等于对公网开放。
+  // 空 src、app://vendor/、http(s)://、file://、about:blank 全部走「不注入」分支
+  // （即上面那行 delete 生效，与改动前行为完全一致）。
+  if (String((params && params.src) || "").startsWith("app://microapp/")) {
+    // 微应用：注入只暴露 window.microapp 四项能力的 preload（electron/microapp-preload.cjs）。
+    // 上面已设置的 sandbox / contextIsolation / nodeIntegration 全部保留，注入不放宽任何一条。
+    webPreferences.preload = MICROAPP_PRELOAD_PATH;
+  }
+  // 非微应用：不做额外拦截（浏览器面板要能加载任意 http(s)），preload 已被删除
+}
+
+/** 扩展名 → Content-Type（方案 §7 P0-3 列举的 12 类，其余按二进制下发）。 */
+const MICROAPP_MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+};
+
+function microAppContentType(filePath) {
+  return MICROAPP_MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+}
+
+/**
+ * 单个路径段的合法性。方案 §7 P0-3 要求「禁 `..`、禁绝对路径」。
+ * 注意：这里用「白名单式」的段校验而不是「拼完再查字符串前缀」——`path.resolve` 对
+ * `..`、`C:\`、`/` 的处理因平台而异，先掐死段内的分隔符/盘符/父目录引用最可靠。
+ */
+function isSafeMicroAppSegment(seg) {
+  if (typeof seg !== "string" || seg.length === 0) return false;
+  if (seg === "." || seg === "..") return false;          // 父目录/当前目录引用
+  if (seg.includes("/") || seg.includes("\\")) return false; // 段内夹分隔符（含 Windows 反斜杠）
+  if (seg.includes("\0")) return false;                   // NUL 截断
+  if (path.isAbsolute(seg)) return false;                 // 绝对路径
+  if (/^[A-Za-z]:/.test(seg)) return false;               // 盘符（非 Windows 上 isAbsolute 判不出 "C:"）
+  return true;
+}
+
+/** target 是否仍在 root 之内（用 path.relative 判定，跨盘符/大小写/分隔符都安全）。 */
+function isInsideRoot(root, target) {
+  const rel = path.relative(path.resolve(root), path.resolve(target));
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+}
+
+/** 协议层的错误响应（不带 CSP：错误页不需要执行任何东西）。 */
+function microAppError(status, message) {
+  return new Response(message, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * 注册 `app://` 协议（必须在 app ready 之后调用）。
+ *
+ * 只服务两个命名空间（方案 §6.2 / §6.3 / §7 P0-3）：
+ *   app://microapp/<appId>/<version>/<path...>   → <libraryRoot>/<appId>/<version>/<path...>
+ *   app://vendor/<name>/<version>/<path...>      → <libraryRoot>/vendor/<name>/<version>/<path...>
+ *
+ * 状态码约定：400 命名空间/路径不完整、403 越出根目录、404 文件不存在。
+ */
+function registerMicroAppProtocol() {
+  const libraryRoot = microApp.resolveMicroAppRoot();
+
+  const handler = async (request) => {
+    let url;
+    try {
+      url = new URL(request.url);
+    } catch {
+      return microAppError(400, "bad url");
+    }
+
+    // scheme 已声明为 standard，`app://microapp/...` 的 host 就是我们用来分命名空间的段
+    const namespace = url.hostname;
+    if (namespace !== "microapp" && namespace !== "vendor") {
+      return microAppError(400, "unsupported namespace: " + namespace);
+    }
+
+    // 先逐段百分号解码再校验：`%2e%2e` 解码后就是 `..`，若先判后解码等于留了后门
+    const segments = [];
+    for (const raw of url.pathname.split("/")) {
+      if (!raw) continue; // 折叠重复斜杠与末尾斜杠
+      let seg;
+      try {
+        seg = decodeURIComponent(raw);
+      } catch {
+        return microAppError(400, "bad escape");
+      }
+      if (!isSafeMicroAppSegment(seg)) return microAppError(403, "forbidden segment");
+      segments.push(seg);
+    }
+    // 至少要凑齐 <id>/<version>/<file>；只有目录没有文件名的请求一律 400（不做 index.html 隐式补全，
+    // 入口文件由 manifest 显式声明，行为可预期）
+    if (segments.length < 3) return microAppError(400, "incomplete path");
+
+    const [id, version, ...rest] = segments;
+    const baseDir =
+      namespace === "microapp"
+        ? path.join(libraryRoot, id, version)
+        // plan-693-2868：共享库目录用 .vendor（点前缀）——microapp_list 会跳过点目录，
+        // 否则共享第三方库会被当成一个合法 appId 扫进微应用列表。
+        : path.join(libraryRoot, ".vendor", id, version);
+
+    // 越界防护（1/2，逻辑路径）：逐段 path.resolve 后必须仍在 baseDir 内。
+    // 段校验已挡掉 `..` 与绝对路径，这里再兜一层 path.resolve 的规范化差异（尾随点、超长段等）。
+    let target = path.resolve(baseDir);
+    for (const seg of rest) {
+      target = path.resolve(target, seg);
+      if (!isInsideRoot(baseDir, target)) return microAppError(403, "out of root");
+    }
+
+    // 越界防护（2/2，真实路径）：软链接可以把 baseDir 内的文件指向根外，必须用 realpath 复核。
+    // 任何一步 realpath 失败（目录/文件不存在）都按 404 处理，不泄露磁盘结构。
+    let realBase;
+    let realTarget;
+    try {
+      realBase = await fs.promises.realpath(baseDir);
+      realTarget = await fs.promises.realpath(target);
+    } catch {
+      return microAppError(404, "not found");
+    }
+    if (!isInsideRoot(realBase, realTarget)) return microAppError(403, "out of root");
+
+    let stat;
+    let buffer;
+    try {
+      stat = await fs.promises.stat(realTarget);
+      if (!stat.isFile()) return microAppError(404, "not found");
+      buffer = await fs.promises.readFile(realTarget);
+    } catch {
+      return microAppError(404, "not found");
+    }
+
+    return new Response(buffer, {
+      status: 200,
+      headers: {
+        "Content-Type": microAppContentType(realTarget),
+        // 方案 D24：CSP 只在这个 Response 头上出现
+        "Content-Security-Policy": MICROAPP_CSP,
+        // plan-20261116-review-fixes：模块脚本和字体跨本地源仍需 CORS，许可仅授给微应用页面。
+        ...(namespace === "vendor" ? { "Access-Control-Allow-Origin": "app://microapp" } : {}),
+        "Cache-Control": "no-store",
+      },
+    });
+  };
+
+  protocol.handle("app", handler);
+  // 微应用 webview 跑在独立 partition（§6.2），协议注册是按 session 生效的，默认 session 的
+  // handler 不会继承过去；同步给 microapp partition 注册一份，否则 P0-6 的微应用页会直接
+  // ERR_UNKNOWN_URL_SCHEME。失败只记日志，不影响浏览器面板与主窗口。
+  try {
+    session.fromPartition(MICROAPP_PARTITION).protocol.handle("app", handler);
+  } catch (err) {
+    logErr("[chatcoder] microapp partition 协议注册失败:", err && err.message);
+  }
+  log("[chatcoder] app:// 协议已注册，库根:", libraryRoot);
+}
+
+// 方案 §7 P0-3 / §6.2：scheme 特权必须在 app ready **之前**声明（Electron 硬约束，ready 后再调无效），
+// 因此放在模块顶层的执行流里，而不是 whenReady 回调内。
+//   standard: true   → 有 host/path 语义，`app://microapp/id/ver/x` 才能被解析成命名空间 + 路径，
+//                      同时拿到正常的 URL/相对路径/同源（'self'）判定
+//   secure: true     → 视为安全上下文（CSP 的 'self'、Workers、加密 API 才有意义）
+//   supportFetchAPI  → 微应用内部用 fetch 读同源资源时不会抛「不支持的 scheme」（跨域仍被 CSP connect-src 拦）
+//   corsEnabled      → plan-20261116-review-fixes：vendor 模块与字体需要按响应头执行本地跨源检查
+//   stream: true     → Response 以流式 Body 返回，大文件（vendor 库）不必整块进内存
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "app",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
+]);
+
 // ── 启动后端 ──
 async function startBackend() {
   try {
@@ -204,6 +454,10 @@ async function startBackend() {
         CHATCODER_PORT: String(BACKEND_PORT),
         CORS_ALLOW_ALL: "true",
         PYTHONUNBUFFERED: "1",
+        // plan-693-2868 §6.1 / D27：把库根显式下发，Python 侧不再各自猜路径（缺失时它回落
+        // ~/.chatcoder/microapps 并记日志）。与 app:// 协议 handler 用同一个解析函数，保证
+        // 「后端写的目录」就是「协议读的目录」。
+        CHATCODER_MICROAPP_ROOT: microApp.resolveMicroAppRoot(),
       },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -1259,13 +1513,18 @@ function createWindow() {
 
   // plan-20261015-browser-agent：右侧浏览器面板的 webview 一律是普通网页沙箱——
   // 剥离预载与 Node 集成；创建时即关闭后台节流（面板隐藏/窗口最小化时 AI 仍可在后台操作页面）。
-  mainWindow.webContents.on("will-attach-webview", (_event, webPreferences) => {
-    delete webPreferences.preload;
-    webPreferences.nodeIntegration = false;
-    webPreferences.nodeIntegrationInSubFrames = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.backgroundThrottling = false;
-  });
+  // 具体规则（含微应用宿主桥 preload 的条件注入）在模块级 hardenWebviewAttach 里，
+  // 微应用独立窗口复用同一份实现。
+  mainWindow.webContents.on("will-attach-webview", hardenWebviewAttach);
+
+  // plan-693-2868 · docs/app1/11-host-bridge-protocol.md §6：宿主桥需要「uid → guest webContents」
+  // 映射与上行转发，实现在 browser-agent.cjs（与 panelGuest 共用同一套 guest 校验口径）。
+  // 必须建窗后立刻挂：did-attach-webview 只对「已注册监听的宿主」生效，挂晚了这一次 attach 就漏了。
+  try {
+    if (browserAgentApi) browserAgentApi.hookMainWindow(mainWindow.webContents);
+  } catch (err) {
+    logErr("[chatcoder] 宿主桥 hook 挂载失败:", err && err.message);
+  }
 
   // 窗口重新获得焦点：交由 OS 与 Chromium 自动恢复文档焦点，绝不手动抢焦点
   mainWindow.on("focus", () => {
@@ -1278,6 +1537,9 @@ function createWindow() {
     // plan-31-151 S3：伪最大化状态已移除，closed 只需清理 motion settle timer 与主窗口引用。
     if (_motionSettleTimer) { clearTimeout(_motionSettleTimer); _motionSettleTimer = null; }
     stopResizeSettle();
+    // 微应用独立窗口跟随主窗口一起收：否则关掉主窗口后本应用只剩一个微应用窗口，
+    // 既没有入口也没有退出路径（window-all-closed 也不会触发）。
+    closeAllMicroAppWindows();
     mainWindow = null;
   });
 }
@@ -1365,6 +1627,212 @@ ipcMain.handle("plugins:list", () => {
     }
   } catch { /* ignore */ }
   return out;
+});
+
+// ── plan-external-microapps · docs/app1/13-external-microapps.md ──
+// 外置微应用宿主：扫描 ~/.chatcoder/microapps-ext/<appId>/microapp.json，按声明拉起进程、
+// 轮询 health 判定就绪，并提供一条 HTTP 调用通道给 AI。与内置微应用（app:// + 宿主桥）并存。
+const { createExternalMicroapps } = require("./external-microapps.cjs");
+const externalMicroapps = createExternalMicroapps({
+  log: (...args) => log("[microapps-ext]", ...args),
+  logErr: (...args) => logErr("[microapps-ext]", ...args),
+});
+
+ipcMain.handle("microappsExt:list", () => {
+  try { return { ok: true, apps: externalMicroapps.list() }; }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+ipcMain.handle("microappsExt:start", async (_event, id) => {
+  try { return await externalMicroapps.start(id); }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+ipcMain.handle("microappsExt:stop", (_event, id) => {
+  try { return externalMicroapps.stop(id); }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+ipcMain.handle("microappsExt:status", (_event, id) => {
+  try { return { ok: true, status: externalMicroapps.statusOf(id) }; }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+ipcMain.handle("microappsExt:call", async (_event, id, method, args) => {
+  try { return await externalMicroapps.call(id, method, args); }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+
+// ── 微应用独立窗口（拓展页 / 已安装列表 / 右侧面板「在新窗口打开」）──
+//
+// 为什么需要独立窗口：微应用此前只能开在右侧面板的标签里，而右侧面板按会话分桶——
+// 用户不在任何会话里（首页 / 设置页）时就看不到它，表现为「点了没反应」。
+// 独立窗口是应用级窗口，与会话解耦：打开就能看到界面。
+//
+// 两种承载方式，按来源分流：
+//  · 外置微应用（自带前后端）：直接 loadURL 它自己的 http 地址，不注入宿主桥——它有自己的后端；
+//  · 内置微应用（app:// + 宿主桥）：加载本应用前端里的 microapp.html 外壳，外壳里放一个
+//    `<webview partition="persist:microapp">`，与右侧面板里的承载方式逐字一致（同一份
+//    hardenWebviewAttach 规则、同一个分区），所以宿主桥照常工作。
+//    窗口里的实例 uid 由渲染层派生为 `<标签uid>-w`（见 client/src/utils/microappWindow.ts），
+//    它与面板里的那个标签是两个独立实例，互不抢地址；上行请求仍由**主窗口**渲染层转后端
+//    （uid → sessionId 的绑定在那边，会话上下文因此不丢）。
+const microAppWindows = new Map(); // `builtin:<appId>` / `external:<appId>` → BrowserWindow
+
+function microAppWindowKey(kind, appId) {
+  return (kind === "external" ? "external:" : "builtin:") + String(appId || "");
+}
+
+/** 已经开着就唤醒它（最小化时先还原），符合「重复打开要聚焦已有窗口」的预期。 */
+function focusMicroAppWindow(win) {
+  if (!win || win.isDestroyed()) return false;
+  try {
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+  } catch { return false; }
+  return true;
+}
+
+function closeAllMicroAppWindows() {
+  for (const win of Array.from(microAppWindows.values())) {
+    try { if (!win.isDestroyed()) win.close(); } catch { /* 退出路径尽力而为 */ }
+  }
+  microAppWindows.clear();
+}
+
+/** 打开（或聚焦）一个微应用独立窗口。opts 形状见 client/src/types/global.d.ts 的 MicroAppWindowOpts。 */
+function openMicroAppWindow(opts) {
+  const o = opts && typeof opts === "object" ? opts : {};
+  const external = o.kind === "external";
+  const appId = String(o.appId || "").trim();
+  if (!appId) return { ok: false, error: "缺少 appId" };
+  if (external && !/^https?:\/\//i.test(String(o.url || ""))) {
+    return { ok: false, error: "外置微应用地址无效：" + String(o.url || "") };
+  }
+  const key = microAppWindowKey(external ? "external" : "builtin", appId);
+  if (focusMicroAppWindow(microAppWindows.get(key))) return { ok: true, key, reused: true };
+
+  const name = String(o.name || appId).trim() || appId;
+  let win;
+  try {
+    win = new BrowserWindow({
+      width: 1100,
+      height: 780,
+      minWidth: 480,
+      minHeight: 360,
+      title: name + " · 微应用",
+      autoHideMenuBar: true,
+      // 全屏是用户明确要求的（F11 切换，Esc 退出；见下方 before-input-event）
+      fullscreenable: true,
+      backgroundColor: "#16181d",
+      show: false,
+      icon: resolveIconPath(),
+      webPreferences: external
+        // 外置微应用是第三方页面：不给 preload、不开 Node，与面板 webview 同等沙箱
+        ? { contextIsolation: true, nodeIntegration: false, sandbox: true }
+        // 内置微应用的窗口外壳是本应用自己的页面：需要 chatcoderAPI（宿主桥 IPC / 全屏控制）
+        : { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: false, webviewTag: true },
+    });
+  } catch (err) {
+    return { ok: false, error: "创建窗口失败：" + ((err && err.message) || err) };
+  }
+
+  microAppWindows.set(key, win);
+
+  // 与主窗口同一份 webview 加固：内置窗口里的 webview 必须拿到宿主桥 preload，
+  // 外置窗口里没有 webview，挂了也无副作用。
+  win.webContents.on("will-attach-webview", hardenWebviewAttach);
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(String(url || ""))) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    logErr("[chatcoder] 微应用窗口加载失败:", code, desc, url);
+    // 外置微应用的前端地址来自 15s TTL 的清单：进程若在这段时间里退出，窗口就会拿到一个
+    // 已经死掉的地址。这里必须让用户看见，否则只剩一个白窗口。
+    //  -3 = ERR_ABORTED（正常导航被打断），子框架失败也不算窗口失败，两种情况都不提示。
+    if (!isMainFrame || code === -3) return;
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("microapp:windowLoadFailed", { key, appId, name, code, desc, url });
+      }
+    } catch { /* 主窗口已关：应用正在退出，没人需要这条提示 */ }
+  });
+  // 全屏：F11 切换；已全屏时 Esc 退出（外置微应用页面没有宿主 UI，快捷键是唯一通用入口）。
+  // 内置窗口里 `<webview>` 铺满整个窗口，键盘事件进的是**guest** 而不是宿主 webContents，
+  // 所以同一个处理函数必须挂在两处：宿主（焦点在页面其它区域时）+ 每个 guest
+  // （`did-attach-webview` 补挂，焦点进了微应用页面才算覆盖到）。
+  const onFullscreenKey = (event, input) => {
+    if (!input || input.type !== "keyDown") return;
+    try {
+      if (input.key === "F11") {
+        event.preventDefault();
+        win.setFullScreen(!win.isFullScreen());
+      } else if (input.key === "Escape" && win.isFullScreen()) {
+        event.preventDefault();
+        win.setFullScreen(false);
+      }
+    } catch { /* 窗口销毁竞态 */ }
+  };
+  win.webContents.on("before-input-event", onFullscreenKey);
+  win.webContents.on("did-attach-webview", (_e, guest) => {
+    // guest 销毁时它的监听随之失效，不需要手动解绑
+    try { guest.on("before-input-event", onFullscreenKey); } catch { /* guest 已分离 */ }
+  });
+  // 全屏态回传：内置窗口的外壳据此切换按钮图标与说明（外置页面没有渲染层可收）
+  const pushFullscreen = () => {
+    try { if (!win.isDestroyed()) win.webContents.send("microapp:windowFullscreen", win.isFullScreen()); } catch { /* 未就绪忽略 */ }
+  };
+  win.on("enter-full-screen", pushFullscreen);
+  win.on("leave-full-screen", pushFullscreen);
+
+  win.on("closed", () => {
+    microAppWindows.delete(key);
+    // 通知主窗口渲染层释放该窗口实例的宿主桥绑定（uid 绑定不释放会一直占着那张表）
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("microapp:windowClosed", { key, appId });
+    } catch { /* 主窗口已关：应用正在退出，无需清理 */ }
+  });
+
+  if (!external) {
+    // 登记为微应用宿主窗口：它里面的 webview 也是微应用 guest，AI 的 microapp_call 要能找到它
+    try { if (browserAgentApi) browserAgentApi.hookMicroappHostWindow(win.webContents); }
+    catch (err) { logErr("[chatcoder] 微应用窗口宿主登记失败:", (err && err.message) || err); }
+  }
+
+  const query = {
+    appId,
+    version: String(o.version || ""),
+    entry: String(o.entry || ""),
+    uid: String(o.uid || ""),
+    sessionId: o.sessionId == null ? "" : String(o.sessionId),
+    name,
+  };
+  if (external) {
+    win.loadURL(String(o.url));
+  } else {
+    const file = path.join(resolveFrontendDir(), "microapp.html");
+    if (fs.existsSync(file)) {
+      win.loadFile(file, { query });
+    } else {
+      // 开发态（未跑过 build）：与主窗口同一套降级——走 vite dev server
+      win.loadURL("http://localhost:5173/microapp.html?" + new URLSearchParams(query).toString());
+    }
+  }
+  win.once("ready-to-show", () => {
+    try { if (!win.isDestroyed()) win.show(); } catch { /* 已销毁 */ }
+  });
+  return { ok: true, key, reused: false };
+}
+
+ipcMain.handle("microapp:openWindow", (_event, opts) => {
+  try { return openMicroAppWindow(opts); }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+});
+
+/** 内置微应用窗口外壳的「全屏」按钮（外置页面没有渲染层，走 F11）。 */
+ipcMain.handle("microapp:windowFullscreenToggle", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return { ok: false, fullscreen: false };
+  win.setFullScreen(!win.isFullScreen());
+  return { ok: true, fullscreen: win.isFullScreen() };
 });
 
 // ── plan-20261017-goal12 项 12：Cordis 兼容插件宿主（dsh 插件协议）──
@@ -1984,7 +2452,9 @@ ipcMain.on("pty:kill", (_event, id) => {
 
 // ── 内置浏览器 · AI 驱动（plan-20261015-browser-agent）──
 // 面板 webview 的后台节流、CDP 网络/弹窗接管、隐藏态截图与新窗口转标签，详见 browser-agent.cjs。
-require("./browser-agent.cjs")({ getMainWindow: () => mainWindow, log, logErr });
+// plan-693-2868 · docs/app1/11-host-bridge-protocol.md：微应用宿主桥（uid 映射 / 上行转发 /
+// 下行推送）也在同一模块里，建窗时通过返回的 hookMainWindow 挂上。
+browserAgentApi = require("./browser-agent.cjs")({ getMainWindow: () => mainWindow, log, logErr });
 
 // ── IPC:webview 元素标注与开发者工具 ──
 ipcMain.on("webview:annotate", (_event, payload) => {
@@ -2071,6 +2541,13 @@ function pushUpdateState(state) {
   }
 }
 
+/** plan-20261024-update-channel：下载通道测速 / 优选结果推给渲染进程（关于页的通道卡片） */
+function pushUpdateChannels(snapshot) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("app:updateChannels", snapshot); } catch {}
+  }
+}
+
 /** 本地打包的 CHANGELOG.md 路径（打包后位于 resources 或应用根） */
 function localChangelogPath() {
   const candidates = [
@@ -2134,6 +2611,7 @@ function updateDirectFetch(url, init) {
 
 const updateManager = createUpdateManager({
   pushState: pushUpdateState,
+  pushChannels: pushUpdateChannels,
   meta: { read: readUpdateMeta, write: writeUpdateMeta },
   feeds: { mirror: MIRROR_FEED, github: GITHUB_FEED },
   updatesBaseUrl: UPDATES_BASE_URL,
@@ -2168,6 +2646,10 @@ ipcMain.handle("app:cancelUpdateDownload", () => updateManager.cancelDownload())
 ipcMain.handle("app:switchUpdateSource", () => updateManager.switchToPrimary());
 ipcMain.handle("app:getUpdateSettings", () => updateManager.getSettings());
 ipcMain.handle("app:setUpdateSettings", (_e, patch) => updateManager.setSettings(patch));
+// plan-20261024-update-channel：关于页的下载通道（查测速结果 / 重新测速 / 手动指定）
+ipcMain.handle("app:getUpdateChannels", () => updateManager.getChannels());
+ipcMain.handle("app:measureUpdateChannels", () => updateManager.measureChannels({ force: true }));
+ipcMain.handle("app:setUpdateChannel", (_e, id) => updateManager.setChannel(id));
 ipcMain.handle("app:installUpdate", () => updateManager.install());
 ipcMain.handle("app:getVersion", () => app.getVersion());
 
@@ -2263,6 +2745,98 @@ ipcMain.handle("app:getWhatsNew", async (_e, opts) => {
   return { ok: true, source, releases: picked };
 });
 
+// ── plan-693-2868 §3.4 / §6.4 / D20 / D32 / D34 / D36 / D37：微应用社区发布与撤回 ──
+// 为什么放在主进程而不是后端：PAT 只在主进程内存与 safeStorage 档里（D20），
+// 后端（Python）一条 PAT 也碰不到，「PAT 不出现在 Python 日志」这条验收才成立。
+// 这里只做「用户侧」的动作：中转上传 + 提 issue + 轮询 issue 关闭；
+// 真正写共享仓库 apps.json 的是社区仓库里的 accept.yml（D32/D38），桌面端没有那份权限（D37）。
+const communityGithub = require("./community-github.cjs");
+
+/** 发布进度统一走一个事件名，渲染层订阅一次即可（stage/percent/attempt 等）。 */
+function sendCommunityProgress(payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("community:publish-progress", payload);
+  } catch { /* 窗口未就绪时丢弃进度，不影响发布本身 */ }
+}
+
+/**
+ * 把模块抛出的结构化错误转成可序列化结果。
+ * 只透出 code 与 message：token 原文既不在 message 里（模块侧已保证），也不单独回传。
+ */
+function communityFail(e) {
+  return {
+    ok: false,
+    code: (e && e.code) || "UNKNOWN",
+    message: String((e && e.message) || e || "未知错误"),
+  };
+}
+
+ipcMain.handle("community:token-status", () => {
+  try {
+    const st = communityGithub.getTokenStatus();
+    return { ok: true, saved: st.saved === true, encrypted: st.encrypted === true };
+  } catch (e) { return communityFail(e); }
+});
+// 收 token 后立即加密落盘，返回值只有 {saved, encrypted}——不把 token 回传渲染层
+ipcMain.handle("community:set-token", (_e, token) => {
+  try {
+    const st = communityGithub.setToken(token);
+    return { ok: true, saved: st.saved === true, encrypted: st.encrypted === true };
+  } catch (e) { return communityFail(e); }
+});
+ipcMain.handle("community:clear-token", () => {
+  try {
+    communityGithub.clearToken();
+    return { ok: true, saved: false, encrypted: false };
+  } catch (e) { return communityFail(e); }
+});
+ipcMain.handle("community:get-repo", () => {
+  try { return { ok: true, repo: communityGithub.getRepo() }; } catch (e) { return communityFail(e); }
+});
+// 空串 = 关闭社区入口（§7 P5-8）；这里保存规范化后的 owner/repo
+ipcMain.handle("community:set-repo", (_e, repo) => {
+  try { return { ok: true, repo: communityGithub.setRepo(repo) }; } catch (e) { return communityFail(e); }
+});
+
+// 发布：先算哈希再上传中转包，最后提 [upload] issue 并等 Actions 关闭它（D40）
+ipcMain.handle("community:publish", async (_e, opts) => {
+  const input = opts && typeof opts === "object" ? opts : {};
+  try {
+    const result = await communityGithub.publish({
+      ...input,
+      onProgress: (p) => sendCommunityProgress({ ...p, appId: input.appId, version: input.version }),
+    });
+    // 超时（TIMEOUT）不是失败：issue 已提交，只是 Actions 还没跑完，界面按「稍后查看」提示
+    return { ok: true, ...result };
+  } catch (e) {
+    return communityFail(e);
+  }
+});
+
+// 撤回：提 [withdraw] issue；Actions 只移除 apps.json 条目，包保留（D35）
+ipcMain.handle("community:withdraw", async (_e, opts) => {
+  const input = opts && typeof opts === "object" ? opts : {};
+  try {
+    const result = await communityGithub.withdraw({
+      ...input,
+      onProgress: (p) => sendCommunityProgress({ ...p, appId: input.appId, version: input.version, action: "withdraw" }),
+    });
+    return { ok: true, ...result };
+  } catch (e) {
+    return communityFail(e);
+  }
+});
+
+// 单独轮询某个 issue（渲染层重开对话框 / 用户点「刷新状态」时用）
+ipcMain.handle("community:poll-issue", async (_e, issueNumber, opts) => {
+  try {
+    const snapshot = await communityGithub.pollIssue(issueNumber, opts && typeof opts === "object" ? opts : {});
+    return { ok: true, ...snapshot };
+  } catch (e) {
+    return communityFail(e);
+  }
+});
+
 // ── 确保单实例 ──
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -2279,6 +2853,13 @@ if (!gotLock) {
 // ── 应用生命周期 ──
 app.whenReady().then(async () => {
   log("[chatcoder] app ready, isPackaged =", app.isPackaged);
+  // plan-693-2868 §7 P0-3 / §6.2：先注册 app:// 协议再建窗口——窗口一创建就可能加载含微应用的
+  // 页面，晚注册会让首个 navigations 拿到 ERR_UNKNOWN_URL_SCHEME。
+  try {
+    registerMicroAppProtocol();
+  } catch (err) {
+    logErr("[chatcoder] app:// 协议注册失败:", err && err.message);
+  }
   // R4：任务完成系统通知。Windows 下必须先设 AppUserModelID，否则 Notification 被系统
   //   静默丢弃（没报错也不弹）；取值与 package.json 的 build.appId / 快捷方式保持一致。
   if (process.platform === "win32") {
@@ -2376,6 +2957,12 @@ app.on("before-quit", () => {
 });
 app.on("will-quit", () => { killBackend(); });
 process.on("exit", () => { killBackend(); });
+
+// plan-external-microapps：外置微应用是独立进程，退出时必须连子进程一起收，
+// 否则用户机器上会留下占端口的孤儿进程（内置形态没有这个问题）。
+app.on("before-quit", () => {
+  try { externalMicroapps.stopAll(); } catch (err) { logErr("[microapps-ext] 退出前停止失败:", (err && err.message) || err); }
+});
 
 function killBackend() {
   if (backendProcess) {

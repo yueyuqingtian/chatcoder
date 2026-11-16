@@ -7,13 +7,14 @@
  * 计划、验证、评估问题与尝试记录收在“详情”里按需展开；展开区有高度上限并在内部滚动，
  * 不把消息流压没。补充说明输入移到面板底部，与主代理输入框同一位置、同一视觉。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type WorkflowAttemptOut } from "../../api/client";
 import { AttemptHistory } from "../workflow/WorkflowPanel";
 import { IssueList } from "../workflow/WorkflowGate";
 import { subscribeTick } from "../chat/useRunningTicker";
 import { useChatStore } from "../../store/chat";
 import { PluginSlot } from "../../plugins/registry";
+import { changedFilesOf } from "../chat/timeline";
 import { parseUtc } from "../../utils/time";
 import { IconCheck, IconChevronDown, IconPause, IconSpinner, IconStop, IconX } from "../icons";
 import { useVisibleChat } from "../../store/visibleChat";
@@ -252,6 +253,14 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
   const meta = useVisibleChat((s) => (threadId != null ? s.subagentMeta[threadId] : undefined), visible);
   const sessionId = useChatStore((s) => s.currentSessionId);
   const liveCount = useVisibleChat((s) => (threadId != null ? s.subagentMessages[threadId]?.length ?? 0 : 0), visible);
+  const liveMessages = useVisibleChat((s) => (threadId != null ? s.subagentMessages[threadId] : undefined), visible);
+  const liveTokens = useVisibleChat((s) => (threadId != null ? s.subagentTokens[threadId] ?? 0 : 0), visible);
+  /* plan-20261116-subagent-live-stats：头部「变更文件 / tokens」改为运行期实时值。
+   *  后端的 files_touched 与 task.token_usage 都只在子代理收尾时才回填（前者解析最终汇报文本、
+   *  后者在 _finish_done 里写 task），运行期 REST 恒返回 0——用户此前只能等子代理跑完才看到数字。
+   *  这里改为：文件数看本线程消息里的实际写盘工具，tokens 用 store 按 usage.update 累加的值；
+   *  收尾后仍以服务端权威值兜底（取两者较大，避免中途估算比最终值偏大时数字回跳）。 */
+  const liveFiles = useMemo(() => (liveMessages ? changedFilesOf(liveMessages).length : 0), [liveMessages]);
   const state = subagentState(meta?.status);
   const running = state === "running";
   const failed = state === "failed";
@@ -366,8 +375,9 @@ export function SubagentPanel({ threadId, agentName, visible = true }: {
           <Collapse open={factsOpen} lazy className="in-gap">
             <div className="subagent-panel-details">
               <span>{liveCount} 条消息</span>
-              <span>{meta?.filesCount ?? 0} 个变更文件</span>
-              <span>{(meta?.tokens ?? 0).toLocaleString()} tokens</span>
+              {/* plan-20261116-subagent-live-stats：运行期实时值优先，收尾后以服务端权威值兜底（取较大避免回跳） */}
+              <span>{Math.max(liveFiles, meta?.filesCount ?? 0)} 个变更文件</span>
+              <span>{Math.max(liveTokens, meta?.tokens ?? 0).toLocaleString()} tokens</span>
             </div>
           </Collapse>
         </div>

@@ -133,6 +133,11 @@ def estimate_message_tokens(msg: ChatMessage) -> int:
     # reasoning_content：思考模式的历史推理内容，出站时原样回传，必须计入。
     if msg.reasoning_content:
         total += rough_token_estimate(str(msg.reasoning_content))
+    # plan-20261109-compact-structure：原始签名及密文块也是请求体积，不能因内部字段不序列化而漏算。
+    for block in msg.thinking_blocks or []:
+        total += rough_token_estimate(str(block.get("signature") or block.get("data") or ""))
+        if not msg.reasoning_content:
+            total += rough_token_estimate(str(block.get("thinking") or ""))
     if msg.tool_calls:
         for tc in msg.tool_calls:
             args = tc.get("arguments", {})
@@ -271,6 +276,10 @@ def estimate_message_tokens_from_model(msg) -> int:
 
     content = msg.content
     if isinstance(content, dict):
+        for block in content.get("thinking_blocks") or []:
+            total += rough_token_estimate(str(block.get("signature") or block.get("data") or ""))
+            if not content.get("text"):
+                total += rough_token_estimate(str(block.get("thinking") or ""))
         if content.get("skill_load_snapshots"):
             from app.orchestration.ta3_skill_snapshots import normalize, section
             total += sum(rough_token_estimate(section(x)) for x in normalize(content["skill_load_snapshots"]))
@@ -377,7 +386,7 @@ def estimate_outbound_tokens_db(messages: list) -> int:
     """估算 DB Message 列表**真实发往模型**的 token 数（plan-527-2218）。
 
     与 `messages_token_total`（全量 raw 口径）的区别是镜像了出站前的两次变换：
-    - 旧工具回合的 thinking 会被 `compaction.strip_stale_reasoning` 剥离，只留结构开销；
+    - 所有未压缩的 thinking 均计入，避免低估需要完整回传推理链的模型；
     - 工具结果按 `output_paging.present_for_model` 的字节预算截断后才进 prompt。
 
     压缩触发判断、压缩后占用核算、重建预算统一用这个口径，才能与上游返回的
@@ -388,27 +397,9 @@ def estimate_outbound_tokens_db(messages: list) -> int:
 
     if not messages:
         return 0
-    # 旧 reasoning 分界线：与 strip_stale_reasoning 同一语义（尾部数第 N 个工具回合）
-    try:
-        from app.orchestration.compaction import _REASONING_KEEP_TOOL_ROUNDS
-
-        keep_rounds = _REASONING_KEEP_TOOL_ROUNDS
-    except Exception:  # noqa: BLE001
-        keep_rounds = 3
-    seen = 0
-    cutoff = 0
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].msg_type == MsgType.TOOL_CALL.value:
-            seen += 1
-            if seen >= keep_rounds:
-                cutoff = i
-                break
-
+    # plan-20261109-compact-structure：协议可能要求完整推理链，不能假设旧回合已被剥离。
     total = 0
     for i, m in enumerate(messages):
-        if i < cutoff and m.msg_type == MsgType.THINKING.value:
-            total += _MESSAGE_OVERHEAD  # 剥离后仅剩消息结构开销
-            continue
         if m.msg_type == MsgType.TOOL_RESULT.value:
             content = m.content if isinstance(m.content, dict) else {}
             tool = str(content.get("tool") or "")

@@ -46,9 +46,13 @@ export function normalizeApprovalMode(mode: string | null | undefined): Approval
  *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹引用）。 */
 export interface ComposerRefDraft {
   project_label?: string;
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session";
+  /** plan-693-2868（P1）：新增 "microapp"（微应用引用，值为 appId）——
+   *  与 ComposerCore.ComposerRef、client.ComposerRefOut 三处必须同步。 */
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
   value: string;
   label: string;
+  /** plan-693-2868（P1）：微应用引用记下版本，重开输入框后「查看界面」仍能按同版本打开 */
+  version?: string;
 }
 
 export interface ComposerDraft {
