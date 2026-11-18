@@ -10,6 +10,7 @@ from typing import Any
 
 from app.orchestration.approval import approval_manager
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
+from app.services.attachment_service import resolve_upload
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def _normalize_option(opt: Any) -> str:
     """模型可能把选项写成 {label, description} 对象（schema 要求字符串）——
     统一压成展示文本，避免前端把对象当 React 子元素渲染导致整页崩溃。"""
     if isinstance(opt, str):
-        return opt
+        return opt.strip()
     if isinstance(opt, dict):
         def pick(keys: tuple[str, ...]) -> str:
             for k in keys:
@@ -37,13 +38,8 @@ def _normalize_option(opt: Any) -> str:
         desc = pick(("description", "desc", "detail", "hint"))
         if label and desc:
             return f"{label} — {desc}"
-        if label or desc:
-            return label or desc
-        try:
-            return json.dumps(opt, ensure_ascii=False)
-        except (TypeError, ValueError):
-            return str(opt)
-    return str(opt)
+        return label
+    return ""
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -73,8 +69,8 @@ def _pick_option_list(item: dict) -> list[Any] | None:
     """取第一个「确实是数组」的选项键（保持键名多样性的同时不伪造空列表）。"""
     for key in _OPTION_KEYS:
         value = item.get(key)
-        if isinstance(value, list):
-            return value
+        if isinstance(value, list) and (options := [v for opt in value if (v := _normalize_option(opt))]):
+            return list(dict.fromkeys(options))
     return None
 
 
@@ -92,21 +88,61 @@ def _normalize_questions(questions: list[Any]) -> list[Any]:
         if isinstance(q, dict):
             item = dict(q)
             opts = _pick_option_list(item)
-            if isinstance(opts, list):
-                item["options"] = [_normalize_option(o) for o in opts]
-                for key in _OPTION_KEYS:
-                    if key != "options":
-                        item.pop(key, None)
+            had_option_list = any(isinstance(item.get(key), list) for key in _OPTION_KEYS)
+            for key in _OPTION_KEYS:
+                if key in item:
+                    item.pop(key)
+            if had_option_list:
+                item["options"] = opts or []
             for key in _MULTI_KEYS:
                 if key in item:
                     item["multiple"] = _as_bool(item.pop(key), False)
                     break
-            if "allowCustom" in item and "allow_custom" not in item:
-                item["allow_custom"] = _as_bool(item.pop("allowCustom"), True)
+            if "allowCustom" in item or "allow_custom" in item:
+                item["allow_custom"] = not opts or _as_bool(item.get("allow_custom", item.get("allowCustom")), True)
+                item.pop("allowCustom", None)
             out.append(item)
         else:
             out.append(q)
     return out
+
+
+def validate_question_reply(questions: list[dict], answer: Any, references: Any) -> tuple[dict, list[dict]]:
+    """plan-20261118-runtime-question-cache：每题独立校验，持久化前以本地文件元信息为准。"""
+    if not isinstance(answer, dict) or (references is not None and not isinstance(references, dict)):
+        raise ValueError("回答格式无效，请重新提交")
+    references = references or {}
+    keys = {str(i) for i in range(len(questions))}
+    if (answer.keys() | references.keys()) - keys:
+        raise ValueError("题号已变化，请重新提交当前提问")
+    canonical = {}
+    attachments = []
+    for index, question in enumerate(questions):
+        key = str(index)
+        value = answer.get(key, "")
+        multiple = question.get("multiple") is True
+        values = value if multiple and isinstance(value, list) else [value]
+        if not all(isinstance(v, str) for v in values):
+            raise ValueError(f"第 {index + 1} 题回答格式无效")
+        values = list(dict.fromkeys(v.strip() for v in values if v.strip()))
+        files = references.get(key, [])
+        if not isinstance(files, list) or any(not isinstance(ref, dict) for ref in files):
+            raise ValueError(f"第 {index + 1} 题附件格式无效")
+        options = question.get("options") or []
+        if options and question.get("allow_custom") is False and (
+            files or any(v not in options for v in values)
+        ):
+            raise ValueError(f"第 {index + 1} 题仅接受预设选项")
+        if not values and not files:
+            raise ValueError(f"请回答第 {index + 1} 题")
+        canonical[key] = values if multiple else (values[0] if values else "")
+        seen = set()
+        for ref in files:
+            attachment = resolve_upload(ref)
+            if attachment["file_id"] not in seen:
+                seen.add(attachment["file_id"])
+                attachments.append({**attachment, "question_index": index})
+    return canonical, attachments
 
 
 class AskUserQuestionTool(Tool):
@@ -182,6 +218,16 @@ class AskUserQuestionTool(Tool):
         # v36 紧急修复：规范化选项——模型常把 options 写成 [{label, description}] 对象数组，
         # 旧前端把对象当 React 子元素渲染会抛 React #31 并整页崩溃（用户实测）。
         questions = _normalize_questions(questions)
+        invalid = [str(i + 1) for i, q in enumerate(questions)
+                   if not isinstance(q, dict) or not isinstance(q.get("question"), str)
+                   or not q["question"].strip()]
+        if invalid:
+            return ToolResult(
+                ok=False, output="", error_code="ARG_INVALID",
+                error=f"第 {'、'.join(invalid)} 题题干为空或格式无效。请为每题填写清晰的 question 字符串后重新提问。",
+            )
+        for q in questions:
+            q["question"] = q["question"].strip()
 
         approval_id = approval_manager.new_id()
         detail = {
@@ -211,9 +257,15 @@ class AskUserQuestionTool(Tool):
                 ok=False, output="",
                 error="未收到有效回答，请基于合理假设继续",
             )
+        attachments = detail.get("answer_attachments") or []
+        attachment_lines = []
+        for item in attachments:
+            hint = "此文件类型无法直接解析" if item["type"] == "file" else "可用附件读取工具按路径读取"
+            attachment_lines.append(f"- 第 {item['question_index'] + 1} 题：{item['filename']}，路径 `{item['path']}`。{hint}。")
         return ToolResult(
             ok=True,
             output="用户回答:\n" + json.dumps(answer, ensure_ascii=False, indent=2)
+            + ("\n\n回答附件：\n" + "\n".join(attachment_lines) if attachment_lines else "")
             + (
                 # plan-598-2517：明确告知模型这部分问题**从未展示给用户**，不要当作已问过
                 f"\n\n注意：本次共提交 {_requested} 个问题，超过单次上限 {_MAX_QUESTIONS}，"
@@ -221,5 +273,6 @@ class AskUserQuestionTool(Tool):
                 "因此没有对应回答。若仍需这些信息，请另起一次提问。"
                 if _dropped else ""
             ),
-            data={"answer": answer, "dropped_questions": _dropped},
+            data={"answer": answer, "dropped_questions": _dropped,
+                  **({"attachments": attachments} if attachments else {})},
         )

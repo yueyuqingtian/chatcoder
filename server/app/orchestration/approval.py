@@ -142,7 +142,8 @@ class ApprovalManager:
             async with self._lock:
                 self._pending.pop(approval_id, None)
 
-    def resolve(self, approval_id: str, approved: bool, answer: dict | None = None) -> bool:
+    def resolve(self, approval_id: str, approved: bool, answer: dict | None = None,
+                answer_attachments: list[dict] | None = None) -> bool:
         """解析审批。返回是否成功匹配到 pending(供 ws 判 404)。
 
         v2.2: answer 为结构化回答（ask_user_question 工具），
@@ -151,11 +152,14 @@ class ApprovalManager:
         pa = self._pending.get(approval_id)
         if pa is None:
             return False
+        fut = pa.ensure_future()
+        if fut.done():
+            return False
         if answer is not None:
             pa.detail["answer"] = answer
-        fut = pa.ensure_future()
-        if not fut.done():
-            fut.set_result(approved)
+        if answer_attachments:
+            pa.detail["answer_attachments"] = answer_attachments
+        fut.set_result(approved)
         return True
 
     def get_detail(self, approval_id: str) -> dict | None:
@@ -174,6 +178,7 @@ class ApprovalManager:
         for approval_id, pa in self._pending.items():
             detail = dict(pa.detail or {})
             detail.pop("answer", None)
+            detail.pop("answer_attachments", None)
             kind = "question" if detail.get("kind") == "question" else "tool_call"
             out.append({
                 "approval_id": approval_id,

@@ -7,6 +7,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.core.user_config_io import run_config_io
 from app.services import permission_profile_service as svc
 
 router = APIRouter(prefix="/permission-profiles", tags=["permission-profiles"])
@@ -23,20 +24,20 @@ class ProfileUpsert(BaseModel):
 
 @router.get("", response_model=list[dict])
 async def list_profiles():
-    return svc.list_profiles()
+    return await run_config_io(svc.list_profiles)
 
 
 @router.post("", response_model=dict)
 async def upsert_profile(body: ProfileUpsert):
     try:
-        return svc.upsert_profile(body.model_dump())
+        return await run_config_io(svc.upsert_profile, body.model_dump())
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
 
 @router.delete("/{name}", response_model=dict)
 async def delete_profile(name: str):
-    ok = svc.delete_profile(name)
+    ok = await run_config_io(svc.delete_profile, name)
     if not ok:
         raise HTTPException(404, "该模式不存在或为内置模式（内置模式仅支持覆盖，不支持删除）")
     return {"ok": True}

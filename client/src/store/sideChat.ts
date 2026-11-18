@@ -8,6 +8,7 @@
  *  - 打开时：REST 拉取消息与 turn（以数据库为准）；
  *  - 运行中：该子会话自己的 WebSocket 事件（流式增量写入缓冲，turn 相关事件触发 REST 对账）。
  * turn 的运行状态始终以 turn 列表为准（running 即运行中），事件只作为刷新信号，避免事件乱序导致状态漂移。 */
+import { questionAttachmentRefs, rejectQuestionSubmission, type QuestionAttachments } from "./questionDrafts";
 import { create } from "zustand";
 import { api, type ComposerRefOut, type MessageOut, type TurnOut } from "../api/client";
 import { WsClient } from "../api/ws";
@@ -48,7 +49,8 @@ interface SideChatState {
   refreshSide: (sessionId: number) => Promise<void>;
   sendSide: (sessionId: number, payload: SendSidePayload) => Promise<void>;
   stopSide: (sessionId: number) => Promise<void>;
-  respondSide: (sessionId: number, approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>) => void;
+  respondSide: (sessionId: number, approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>,
+    files?: QuestionAttachments) => boolean;
   clearSideError: (sessionId: number) => void;
   setSideContext: (sessionId: number, text: string) => void;
 }
@@ -205,8 +207,14 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
         });
         return;
       }
+      case "ack": {
+        const ref = String(p.ref ?? "");
+        if (ref && p.resolved === false) rejectQuestionSubmission(ref, String(p.error ?? "回答提交失败，请重试。"));
+        return;
+      }
       case "approval.response": {
         const approvalId = String(p.approval_id ?? "");
+        pendingActions.clearByApprovalId(approvalId);
         patch(sessionId, (c) => {
           const queue = c.approvalQueue.filter((a) => a.approvalId !== approvalId);
           return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
@@ -318,17 +326,25 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
       }
     },
 
-    respondSide: (sessionId, approvalId, approved, remember = false, answer) => {
-      sockets.get(sessionId)?.send("approval.response", {
+    respondSide: (sessionId, approvalId, approved, remember = false, answer, files) => {
+      const socket = sockets.get(sessionId);
+      if (!socket?.connected) {
+        patch(sessionId, () => ({ error: "会话连接尚未恢复，请稍后重试。" }));
+        return false;
+      }
+      socket.send("approval.response", {
         approval_id: approvalId, approved, remember, remember_scope: "session",
         ...(answer ? { answer } : {}),
+        ...(files ? { answer_attachments: questionAttachmentRefs(files) } : {}),
       });
+      if (answer) return true;
       patch(sessionId, (c) => {
         const queue = c.approvalQueue.filter((a) => a.approvalId !== approvalId);
         return { approvalQueue: queue, pendingApproval: queue[0] ?? null };
       });
       // 会话隔离修复：同步摘掉侧栏等待索引里的这一条，避免回执丢失后侧边会话一直显示等待。
       pendingActions.clearByApprovalId(approvalId);
+      return true;
     },
 
     clearSideError: (sessionId) => patch(sessionId, () => ({ error: null })),

@@ -13,26 +13,18 @@ import logging
 import mimetypes
 import uuid
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from app.core.config import settings
-from app.services.doc_parser import MAX_FILE_SIZE, is_document, is_image, is_spreadsheet, is_text
+from app.services.attachment_service import describe_upload, run_attachment_io, uploads_root, valid_filename
+from app.services.doc_parser import MAX_FILE_SIZE
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 from app.gateway.routers.preview import router as preview_router
 router.include_router(preview_router)
-
-
-def uploads_root() -> Path:
-    """上传根目录（启动时确保存在）。"""
-    root = Path(settings.uploads_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
 
 
 def _safe_join(root: Path, rel: str) -> Path | None:
@@ -56,46 +48,33 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
     - url: 静态访问地址（前端预览用）
     - size / mime_type / type: 元信息
     """
-    data = await file.read()
+    data = await file.read(MAX_FILE_SIZE + 1)
     if len(data) > MAX_FILE_SIZE:
         raise HTTPException(413, f"文件过大: {len(data) // 1024}KB, 超过 {MAX_FILE_SIZE // 1024 // 1024}MB 限制")
     filename = (file.filename or "unknown").strip()
-    if not filename or filename in {".", ".."} or any(c in filename for c in ("/", "\\", ":", "\x00")):
+    if not valid_filename(filename):
         raise HTTPException(400, "非法文件名")
+    return await run_attachment_io(_store_upload, filename, data)
 
-    # plan-20261106-file-drop：上传准入不依赖内容解析能力，压缩包等原样保存，按需再读取。
-    file_type = "file"
-    for kind, matches in (("image", is_image), ("spreadsheet", is_spreadsheet),
-                          ("document", is_document), ("text", is_text)):
-        if matches(filename):
-            file_type = kind
-            break
 
+def _store_upload(filename: str, data: bytes) -> dict:
     file_id = uuid.uuid4().hex[:16]
-    root = uploads_root()
-    target = root / file_id / filename
+    target = uploads_root() / file_id / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
-
-    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    result = {
-        "file_id": file_id,
-        "filename": filename,
-        "path": f"{file_id}/{filename}",
-        "url": f"/api/uploads/{file_id}/{quote(filename)}",
-        "size": len(data),
-        "mime_type": mime_type,
-        "type": file_type,
-    }
-    logger.info("[upload] %s (%d bytes, type=%s) → %s", filename, len(data), file_type, result["path"])
+    result = describe_upload(file_id, filename, len(data))
+    logger.info("[upload] %s (%d bytes, type=%s) → %s", filename, len(data), result["type"], result["path"])
     return result
 
 
 @router.get("/uploads/{file_id}/{filename}")
 async def serve_upload(file_id: str, filename: str) -> FileResponse:
     """静态服务上传的文件（前端预览 / 下载）。"""
-    root = uploads_root()
-    target = _safe_join(root, f"{file_id}/{filename}")
+    return await run_attachment_io(_upload_response, file_id, filename)
+
+
+def _upload_response(file_id: str, filename: str) -> FileResponse:
+    target = _safe_join(uploads_root(), f"{file_id}/{filename}")
     if target is None or not target.is_file():
         raise HTTPException(404, "文件不存在")
     mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"

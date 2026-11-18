@@ -24,7 +24,9 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.core.config import settings
+from app.models.providers.usage_normalization import openai_usage
 from app.models.base import ModelProvider
 from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
@@ -200,6 +202,7 @@ class WorkBuddyProvider(ModelProvider):
             body["tools"] = request.tools
             body["tool_choice"] = "auto"
         self._apply_thinking(body, request)
+        record_wire_prefix("workbuddy", body)
         # pruneRequestBody（对齐 CLI：undefined/null/'' 剔除）
         return {k: v for k, v in body.items() if v not in (None, "", {})}
 
@@ -260,15 +263,7 @@ class WorkBuddyProvider(ModelProvider):
             return False
         usage = payload.get("usage")
         if isinstance(usage, dict):
-            details = usage.get("completion_tokens_details") or {}
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            monitor["usage"] = Usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-                cached_input_tokens=int(prompt_details.get("cached_tokens") or 0),
-                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-            )
+            monitor["usage"] = openai_usage(usage)
         choices = payload.get("choices") or []
         if not choices:
             return False

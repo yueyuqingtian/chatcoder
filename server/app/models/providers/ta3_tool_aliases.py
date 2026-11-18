@@ -276,11 +276,13 @@ def _restore_write(args: dict) -> dict:
 def _restore_option(opt) -> object:
     if not isinstance(opt, dict):
         return opt
-    label = str(opt.get("label") or opt.get("value") or "").strip()
-    desc = str(opt.get("description") or "").strip()
+    label = next((opt[key].strip() for key in ("label", "value", "text", "title", "name")
+                  if isinstance(opt.get(key), str) and opt[key].strip()), "")
+    desc = opt.get("description")
+    desc = desc.strip() if isinstance(desc, str) else ""
     if label and desc:
         return f"{label} — {desc}"
-    return label or desc or opt
+    return label or opt
 
 
 def _restore_ask_user(args: dict) -> dict:
@@ -293,17 +295,18 @@ def _restore_ask_user(args: dict) -> dict:
             restored.append(q)
             continue
         item: dict = {}
-        text = str(q.get("question") or "").strip()
-        desc = str(q.get("description") or "").strip()
+        text, desc = q.get("question"), q.get("description")
+        text = text.strip() if isinstance(text, str) else ""
+        desc = desc.strip() if isinstance(desc, str) else ""
         # 本项目问卷卡只展示 question 正文：背景说明并入正文，用户才能看到
-        item["question"] = f"{text}\n{desc}" if text and desc else (text or desc)
+        item["question"] = f"{text}\n{desc}" if text and desc else text
         # 选项键名兜底：模型偶尔把选项写成 choices / answers，不认出来卡片就没有可点选项
-        opts = q.get("options")
-        if not isinstance(opts, list):
-            opts = next((q.get(k) for k in ("choices", "answer_options", "answers")
-                         if isinstance(q.get(k), list)), None)
-        if isinstance(opts, list):
-            item["options"] = [_restore_option(o) for o in opts]
+        for key in ("options", "choices", "answer_options", "answers"):
+            if isinstance(q.get(key), list):
+                restored_options = [_restore_option(o) for o in q[key]]
+                if any(isinstance(o, str) and o.strip() for o in restored_options):
+                    item["options"] = restored_options
+                    break
         if "allowCustom" in q or "allow_custom" in q:
             item["allow_custom"] = _as_bool(q.get("allowCustom", q.get("allow_custom")), True)
         # 官方 ask_user 的 multiple（多选）：前端支持多选题型，必须保留，否则模型问的多选题

@@ -16,7 +16,10 @@ from contextlib import asynccontextmanager
 import httpx
 from openai import APIConnectionError, APIError, APITimeoutError, AsyncOpenAI
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.core.config import settings
+from app.models.providers.usage_normalization import openai_usage
+from app.models.providers.prompt_cache import official_host, openai_cache_key
 from app.models.base import ModelProvider, mark_first_token
 from app.models.providers.temperature_policy import (
     is_temperature_rejected,
@@ -203,6 +206,10 @@ class OpenAICompatibleProvider(ModelProvider):
         if value is not None:
             kwargs["temperature"] = value
 
+    def _apply_prompt_cache(self, kwargs: dict, request: ChatRequest) -> None:
+        if official_host(self._base_url, "api.openai.com") and (key := openai_cache_key(request.session_id)):
+            kwargs.setdefault("extra_body", {})["prompt_cache_key"] = key
+
     async def _create_compat(self, kwargs: dict):
         """v23.1: 思考参数的兼容性重试（保留思考深度配置，自动降级字段）。
 
@@ -322,6 +329,8 @@ class OpenAICompatibleProvider(ModelProvider):
             kwargs["reasoning_effort"] = request.reasoning_effort
         # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
         self._apply_thinking(kwargs, request)
+        self._apply_prompt_cache(kwargs, request)
+        record_wire_prefix("openai", kwargs)
 
         try:
             stream = await self._create_compat(kwargs)
@@ -340,26 +349,15 @@ class OpenAICompatibleProvider(ModelProvider):
         thinking_parts: list[str] = []  # v4.3: 收集推理/思考内容
         tool_calls_map: dict[int, dict] = {}  # index → {id, name, arguments}
         finish_reason = "stop"
-        usage_data = {"prompt": 0, "completion": 0, "total": 0}
+        usage_data = Usage()
 
         try:
             async with self._managed_stream(stream) as chunks:
                 async for chunk in chunks:
                     # v4.5: 无论是否有 choices 都检查 usage
-                    if chunk.usage:
-                        _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
-                        _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
-                        usage_data = {
-                            "prompt": chunk.usage.prompt_tokens or 0,
-                            "completion": chunk.usage.completion_tokens or 0,
-                            "total": chunk.usage.total_tokens or 0,
-                            # v1.2: 提取缓存输入 token（OpenAI prompt_cache_hit_tokens / DeepSeek cached_tokens）
-                            "cached": (getattr(_prompt_details, 'cached_tokens', 0) or
-                                       getattr(chunk.usage, 'prompt_cache_hit_tokens', 0) or
-                                       getattr(chunk.usage, 'cached_tokens', 0) or 0),
-                            # v1.2: 提取推理 token（completion_tokens_details.reasoning_tokens）
-                            "reasoning": getattr(_completion_details, 'reasoning_tokens', 0) or 0,
-                        }
+                    raw_usage = chunk.usage or getattr(chunk, "usageMetadata", None)
+                    if raw_usage:
+                        usage_data = openai_usage(raw_usage)
                     if not chunk.choices:
                         continue
 
@@ -439,13 +437,7 @@ class OpenAICompatibleProvider(ModelProvider):
             content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            usage=Usage(
-                prompt_tokens=usage_data.get("prompt", 0),
-                completion_tokens=usage_data.get("completion", 0),
-                total_tokens=usage_data.get("total", 0),
-                cached_input_tokens=usage_data.get("cached", 0),
-                reasoning_tokens=usage_data.get("reasoning", 0),
-            ),
+            usage=usage_data,
             model=request.model or self._default_model,
             thinking=thinking,  # v4.3
         )
@@ -470,6 +462,8 @@ class OpenAICompatibleProvider(ModelProvider):
             kwargs["reasoning_effort"] = request.reasoning_effort
         # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
         self._apply_thinking(kwargs, request)
+        self._apply_prompt_cache(kwargs, request)
+        record_wire_prefix("openai", kwargs)
 
         try:
             stream = await self._create_compat(kwargs)
@@ -507,6 +501,8 @@ class OpenAICompatibleProvider(ModelProvider):
             kwargs["reasoning_effort"] = request.reasoning_effort
         # v21: thinking 模式（DeepSeek/GLM 系）——发 thinking 参数并移除 temperature
         self._apply_thinking(kwargs, request)
+        self._apply_prompt_cache(kwargs, request)
+        record_wire_prefix("openai", kwargs)
 
         try:
             s = await self._create_compat(kwargs)
@@ -525,20 +521,9 @@ class OpenAICompatibleProvider(ModelProvider):
         async with self._managed_stream(s) as chunks:
             async for chunk in chunks:
                 # v4.5: 无论是否有 choices 都检查 usage（某些网关把 usage 放在最后有 choices 的 chunk）
-                if chunk.usage:
-                    _prompt_details = getattr(chunk.usage, 'prompt_tokens_details', None)
-                    _completion_details = getattr(chunk.usage, 'completion_tokens_details', None)
-                    _cached = (getattr(_prompt_details, 'cached_tokens', None) or
-                               getattr(chunk.usage, 'prompt_cache_hit_tokens', None) or
-                               getattr(chunk.usage, 'cached_tokens', None) or 0)
-                    _reasoning = getattr(_completion_details, 'reasoning_tokens', None) or 0
-                    usage_data = Usage(
-                        prompt_tokens=chunk.usage.prompt_tokens or 0,
-                        completion_tokens=chunk.usage.completion_tokens or 0,
-                        total_tokens=chunk.usage.total_tokens or 0,
-                        cached_input_tokens=_cached,
-                        reasoning_tokens=_reasoning,
-                    )
+                raw_usage = chunk.usage or getattr(chunk, "usageMetadata", None)
+                if raw_usage:
+                    usage_data = openai_usage(raw_usage)
                 if not chunk.choices:
                     continue
 

@@ -4,6 +4,7 @@
  * - 处于 ConvoScopeProvider（侧边会话）：会话相关字段读取侧边仓库（sideChat.ts），动作绑定到该子会话。
  * 与会话无关的全局字段（模型、项目、会话列表等）两种情况都读取主仓库。 */
 import { createContext, useContext, type ReactNode } from "react";
+import type { QuestionAttachments } from "../../store/questionDrafts";
 import { useChatStore } from "../../store/chat";
 import { useSideChatStore, type SideConvo } from "../../store/sideChat";
 import type { ComposerRefOut } from "../../api/client";
@@ -23,7 +24,7 @@ const SCOPED_KEYS = new Set<string>([
   "pendingApproval", "approvalQueue", "respondApproval",
   "flowError", "clearFlowError", "isCompacting", "subagentMeta", "pendingSubagents", "pendingPlan",
   "plansByTurn", "hiddenTurnErrors", "dismissTurnError", "debugState",
-  "sendTurn", "stopSessionExecution", "cancelTurn", "questionDraft", "setQuestionDraft",
+  "sendTurn", "stopSessionExecution", "cancelTurn",
   "queuedInputs", "updateQueuedInput", "flushQueuedInput", "usage",
   "composerBrowserRefs", "removeComposerBrowserRef", "clearComposerBrowserRefs", "refreshMessages",
 ]);
@@ -56,10 +57,10 @@ function sideActions(sid: number): Record<string, unknown> {
       cancelTurn: () => { void side().stopSide(sid); },
       clearComposerBrowserRefs: NOOP,
       refreshMessages: () => side().refreshSide(sid),
-      respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>) => {
-        side().respondSide(sid, approvalId, approved, remember, answer);
+      respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>,
+        _scope?: "session" | "global", files?: QuestionAttachments) => {
+        return side().respondSide(sid, approvalId, approved, remember, answer, files);
       },
-      setQuestionDraft: NOOP,
       clearFlowError: () => side().clearSideError(sid),
       dismissTurnError: NOOP,
       updateQueuedInput: NOOP,
@@ -93,7 +94,6 @@ function sideField(c: SideConvo | undefined, sid: number, key: string): unknown 
     case "plansByTurn": return EMPTY_OBJ;
     case "hiddenTurnErrors": return EMPTY_ARR;
     case "debugState": return null;
-    case "questionDraft": return null;
     case "queuedInputs": return EMPTY_ARR;
     case "usage": return null;
     case "composerBrowserRefs": return EMPTY_ARR;

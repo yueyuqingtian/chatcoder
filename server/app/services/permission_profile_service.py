@@ -30,10 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
-import time
-from contextlib import contextmanager
 from pathlib import Path
+
+from app.core.user_config_io import config_transaction, write_config
 
 logger = logging.getLogger(__name__)
 
@@ -165,130 +164,13 @@ def _read_cfg() -> dict:
     return {}
 
 
-# ── 读改写互斥 ────────────────────────────────────────────────────────────
-# 【为什么是线程锁而不是 asyncio.Lock】本模块的 upsert/delete 都是**同步函数**，
-# 由 gateway 的 async 路由直接调用（`permission_profiles.py:32` 未走线程池）。同步函数里
-# 不能 await，`asyncio.Lock` 在这个调用形态下拿不到；而 read→改动→整文件覆盖 的临界区
-# 一旦交错，后写的进程会用自己读到的旧快照覆盖掉别人刚写进去的 profile（实测丢配置）。
-# 因此用 `threading.Lock`：它能同时覆盖「事件循环线程里并发调用」与「线程池/worker 进程内
-# 并发调用」两种形态（同进程内多个 asyncio task 顺序执行同步代码，本就不会交错，锁主要防
-# 线程池；跨进程另见文件锁）。
-_CFG_LOCK = threading.RLock()
 
-# 跨进程互斥：`msvcrt.locking` 只在 Windows 可用、`fcntl` 只在 POSIX 可用，二者都是标准库，
-# 不引入新依赖。锁加在**独立的 .lock 文件**上而不是配置文件本身——配置文件会被 os.replace
-# 换掉（inode/句柄失效），锁文件本身永不替换，才能长期持有稳定的字节区间锁。
-# 拿不到平台实现时（理论上不会）退化为「只有进程内锁」，并在日志里留痕。
-_LOCK_SUFFIX = ".lock"
-_LOCK_TIMEOUT_S = 5.0
-# 写临时文件的后缀：与 feature_map_service.save_map 同思路（临时文件 + os.replace）
-_TMP_SUFFIX = ".tmp"
-
-
-def _lock_path() -> Path:
-    return _CFG_PATH.with_name(_CFG_PATH.name + _LOCK_SUFFIX)
-
-
-@contextmanager
-def _file_lock():
-    """跨进程互斥（阻塞式，带超时）。拿不到锁只记日志，**不阻断**本次写入。
-
-    为什么允许降级：权限模式配置的写入是低频用户操作，一次锁竞争
-    失败就抛错会让「保存模式」直接报 500；这里选择「尽力串行 + 留痕」，配合原子替换
-    （读到的永远是完整的旧文件或完整的新文件）已经能保证文件不损坏。真正丢更新的窗口
-    只在两个进程同一瞬间写同一键时出现，概率远低于此前的无锁实现。
-    """
-    path = _lock_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+b")  # noqa: SIM115 —— 需跨上下文持有，不能 with 一起退出
-    except OSError:
-        logger.debug("[permission_profile] 打开锁文件失败，退化为仅进程内互斥", exc_info=True)
-        yield
-        return
-
-    locked = False
-    try:
-        # 锁需要落在**已存在的字节区间**上：Windows 的 msvcrt.locking 对空文件的锁定请求
-        # 会失败，那样每次写都要白等满 _LOCK_TIMEOUT_S 才退化——比不加锁还慢。
-        # 锁文件只用于加锁，内容无意义，写一个占位字节即可。
-        try:
-            if handle.seek(0, os.SEEK_END) == 0:
-                handle.write(b"\0")
-                handle.flush()
-        except OSError:
-            logger.debug("[permission_profile] 初始化锁文件失败（继续尝试加锁）", exc_info=True)
-
-        deadline = time.monotonic() + _LOCK_TIMEOUT_S
-        while True:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    # 非阻塞模式（LK_NBLCK）自旋重试：阻塞模式（LK_LOCK）超时行为在不同
-                    # Windows 版本上不一致，且会卡死整个写路径。
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-                break
-            except (OSError, ImportError):
-                if time.monotonic() >= deadline:
-                    logger.debug(
-                        "[permission_profile] 等待配置文件锁超时（%.1fs），继续写入", _LOCK_TIMEOUT_S,
-                    )
-                    break
-                time.sleep(0.02)
-        yield
-    finally:
-        if locked:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                logger.debug("[permission_profile] 释放配置文件锁失败", exc_info=True)
-        try:
-            handle.close()
-        except OSError:
-            pass
-
-
-@contextmanager
 def _cfg_transaction():
-    """配置文件的「读 → 改 → 写」临界区：进程内锁 + 跨进程文件锁。"""
-    with _CFG_LOCK, _file_lock():
-        yield
+    return config_transaction(_CFG_PATH)
 
 
 def _write_cfg(data: dict) -> None:
-    """整文件写回，改**原子替换**（临时文件 + os.replace）。
-
-    为什么必须原子替换：此前直接 `write_text` 先截断再写，写到一半崩溃/被杀就留下半截 JSON，
-    下次 `_read_cfg` 解析失败返回 `{}` —— 用户所有自定义模式一次性消失（且无任何报错）。
-    临时文件与目标同目录（os.replace 跨盘会退化成复制，不原子），写完再替换。
-    """
-    _CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _CFG_PATH.with_name(_CFG_PATH.name + _TMP_SUFFIX)
-    try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, _CFG_PATH)
-    except OSError:
-        logger.warning("[permission_profile] 写入用户配置失败 %s", _CFG_PATH, exc_info=True)
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    write_config(_CFG_PATH, data)
 
 
 def _load_custom() -> list[dict]:

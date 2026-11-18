@@ -14,10 +14,13 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
+from app.models.providers.usage_normalization import anthropic_usage
+from app.models.providers.prompt_cache import mark_anthropic_cache, official_host
 from app.models.base import ModelProvider, mark_first_token
 from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
-from app.models.schemas import ChatRequest, ChatResponse, Usage
+from app.models.schemas import ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +316,9 @@ class AnthropicProvider(ModelProvider):
             ]
         from app.orchestration.history_sequence import finish_anthropic_wire
         payload["messages"] = finish_anthropic_wire(payload["messages"], payload.get("thinking"))
+        if official_host(self._base_url, "api.anthropic.com"):
+            mark_anthropic_cache(payload)
+        record_wire_prefix("anthropic", payload)
         return payload
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
@@ -358,16 +364,6 @@ class AnthropicProvider(ModelProvider):
                     "arguments": block.get("input", {}),
                 })
 
-        usage_raw = data.get("usage") or {}
-        prompt_t = int(usage_raw.get("input_tokens", 0))
-        completion_t = int(usage_raw.get("output_tokens", 0))
-        # v1.2: Anthropic 缓存 token 提取
-        cache_creation_t = int(usage_raw.get("cache_creation_input_tokens", 0))
-        cache_read_t = int(usage_raw.get("cache_read_input_tokens", 0))
-        # adaptive thinking 的思考量在 output_tokens_details.thinking_tokens
-        _details = usage_raw.get("output_tokens_details") or {}
-        reasoning_t = int(_details.get("thinking_tokens", 0) or 0)
-
         # Anthropic 用 stop_reason=tool_use 表示本轮有工具调用，对齐 OpenAI 的
         # finish_reason=tool_calls（agent_loop 的畸形流检测按该值判断）
         _stop_reason = data.get("stop_reason") or "stop"
@@ -378,13 +374,7 @@ class AnthropicProvider(ModelProvider):
             content="\n".join(text_parts),
             tool_calls=tool_calls,
             finish_reason=_stop_reason,
-            usage=Usage(
-                prompt_tokens=prompt_t,
-                completion_tokens=completion_t,
-                total_tokens=prompt_t + completion_t + cache_creation_t + cache_read_t,
-                cached_input_tokens=cache_read_t,
-                reasoning_tokens=reasoning_t,
-            ),
+            usage=anthropic_usage(data.get("usage") or {}),
             model=request.model or self._default_model,
             thinking="\n".join(thinking_parts) or None,
             thinking_blocks=[b for b in content_blocks if b.get("type") in ("thinking", "redacted_thinking")],
@@ -459,11 +449,7 @@ class AnthropicProvider(ModelProvider):
                     raise RuntimeError(f"model gateway error (HTTP 400): {body_text[:500]}")
                 resp.raise_for_status()
                 event_type = ""
-                prompt_t = 0
-                completion_t = 0
-                cache_creation_t = 0
-                cache_read_t = 0
-                reasoning_t = 0
+                usage_raw: dict = {}
                 # plan-20261017-claude-tools: Anthropic 流式工具调用由
                 # content_block_start(tool_use) → input_json_delta(partial_json) → stop
                 # 三段组成，此前只解析 text/thinking 增量，tool_calls 恒为空列表。
@@ -537,18 +523,9 @@ class AnthropicProvider(ModelProvider):
                                 # 对齐 OpenAI 的 tool_calls 语义（agent_loop 与前端按此判断）
                                 finish_reason = "tool_calls" if _sr == "tool_use" else _sr
                             u = chunk.get("usage") or {}
-                            if u.get("output_tokens"):
-                                completion_t = int(u["output_tokens"])
-                            _details = u.get("output_tokens_details") or {}
-                            if _details.get("thinking_tokens"):
-                                reasoning_t = int(_details["thinking_tokens"])
+                            usage_raw.update(u)
                         elif event_type == "message_start":
-                            msg = chunk.get("message") or {}
-                            u = msg.get("usage") or {}
-                            if u.get("input_tokens"):
-                                prompt_t = int(u["input_tokens"])
-                            cache_creation_t = int(u.get("cache_creation_input_tokens", 0))
-                            cache_read_t = int(u.get("cache_read_input_tokens", 0))
+                            usage_raw.update((chunk.get("message") or {}).get("usage") or {})
                         elif event_type == "message_stop":
                             break
                 tool_calls: list[dict] = []
@@ -569,13 +546,7 @@ class AnthropicProvider(ModelProvider):
                     })
                 yield {
                     "type": "done",
-                    "usage": Usage(
-                        prompt_tokens=prompt_t,
-                        completion_tokens=completion_t,
-                        total_tokens=prompt_t + completion_t + cache_creation_t + cache_read_t,
-                        cached_input_tokens=cache_read_t,
-                        reasoning_tokens=reasoning_t,
-                    ),
+                    "usage": anthropic_usage(usage_raw),
                     "finish_reason": finish_reason,
                     "tool_calls": tool_calls,
                     "thinking_blocks": list(signed_thinking.values()),

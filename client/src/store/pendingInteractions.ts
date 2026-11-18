@@ -10,6 +10,7 @@
  *  detail 在作答 / 取消时立即清除（见 clearRequest），不会长期滞留。
  */
 import { create } from "zustand";
+import { clearQuestionDraft } from "./questionDrafts";
 
 export type PendingKind = "approval" | "question";
 
@@ -89,6 +90,9 @@ export const pendingActions = {
           detail: { ...(all[sid]?.[it.approval_id]?.detail ?? {}), ...it.detail, ...(kind === "question" ? { kind } : {}) },
         };
       }
+      for (const id of Object.keys(all[sid] ?? {})) {
+        if (!bucket[id]) clearQuestionDraft(id);
+      }
       if (Object.keys(bucket).length) next[sid] = bucket;
       else delete next[sid];
     }
@@ -138,6 +142,7 @@ export const pendingActions = {
     if (!sessionId || !approvalId) return;
     changedAt.set(approvalId, ++revision);
     resolvedIds.add(approvalId);
+    clearQuestionDraft(approvalId);
     usePendingInteractions.setState((s) => {
       const bucket = s.pendingBySession[sessionId];
       if (!bucket || !bucket[approvalId]) return {};
@@ -157,6 +162,7 @@ export const pendingActions = {
     if (!approvalId) return;
     changedAt.set(approvalId, ++revision);
     resolvedIds.add(approvalId);
+    clearQuestionDraft(approvalId);
     usePendingInteractions.setState((s) => {
       let changed = false;
       const next: PendingBySession = {};

@@ -28,7 +28,10 @@ from pathlib import Path
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.core.config import settings
+from app.models.providers.prompt_cache import mark_anthropic_cache
+from app.models.providers.usage_normalization import openai_usage, anthropic_usage
 from app.models.base import ModelProvider
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
@@ -652,54 +655,6 @@ def _identity(model_name: str, meta: dict) -> str:
     return model_identity(_model_record(model_name, meta))
 
 
-# ─────────────────── Anthropic 前后缀缓存打点（plan-598-2482） ───────────────────
-# 官方客户端在三个「末尾块」位置打 cache_control:{type:'ephemeral'}：
-#   system 唯一文本块、历史最后一条消息的最后一个 content block、tools 末项
-# （dist/main/chat/anthropicAdapter.js:261-282、:288-290、:336-339）。
-# 前缀缓存要求标记位置稳定，所以只打末尾，不在中间或每条消息上打。
-_CACHE_CONTROL = {"type": "ephemeral"}
-
-
-def _mark_tail_with_cache_control(entries: list) -> list:
-    """给列表最后一项打 cache_control（浅拷贝，不改原对象）。"""
-    if not isinstance(entries, list) or not entries:
-        return entries
-    marked = [dict(e) if isinstance(e, dict) else e for e in entries]
-    last = marked[-1]
-    if isinstance(last, dict) and not last.get("cache_control"):
-        last["cache_control"] = dict(_CACHE_CONTROL)
-    return marked
-
-
-def _mark_message_tail(messages: list) -> list:
-    """给最后一条消息的最后一个 content block 打 cache_control。
-
-    plan-598-2482：官方 anthropicAdapter 的 contentToBlocks() 会把**字符串 content
-    一律包成 [{type:'text',text}]**，于是末块永远是可打点的 block；此前这里只处理
-    content 已是 list 的情况，字符串 content 被静默跳过，导致消息侧 cache_control
-    完全缺失（与官方少一处显式前缀缓存标记）。
-    """
-    if not isinstance(messages, list) or not messages:
-        return messages
-    out = list(messages)
-    last = out[-1]
-    if not isinstance(last, dict):
-        return messages
-    content = last.get("content")
-    # 字符串 content → 包成单个 text block（与官方 contentToBlocks 同口径）
-    if isinstance(content, str):
-        if not content:
-            return messages
-        patched = dict(last)
-        patched["content"] = [{"type": "text", "text": content}]
-        out[-1] = patched
-        content = patched["content"]
-    if isinstance(content, list) and content:
-        patched = dict(out[-1])
-        patched["content"] = _mark_tail_with_cache_control(content)
-        out[-1] = patched
-    return out
-
 
 def _resolve_alias_for_outbound(real_name: str) -> str | None:
     """真实执行名 → 上行名（官方内置名 / 拓展 MCP 名 / 官方 MCP 名）；无映射返 None。
@@ -1191,6 +1146,7 @@ class Ta3Provider(ModelProvider):
             body.pop("cache_control", None)
             body["messages"] = [{k: v for k, v in m.items() if k != "cache_control"}
                                 for m in body.get("messages") or []]
+        record_wire_prefix("ta3-deepseek" if self._deepseek else "ta3-openai", body)
         return body
 
     def _parse_openai_frame(self, line: str, monitor) -> bool:
@@ -1217,17 +1173,9 @@ class Ta3Provider(ModelProvider):
             logger.warning("[ta3] OpenAI协议收到网关错误帧: %s", err_msg)
             return True
         # usage（含 reasoning/cached 明细）
-        usage = payload.get("usage")
+        usage = payload.get("usage") or payload.get("usageMetadata")
         if isinstance(usage, dict):
-            details = usage.get("completion_tokens_details") or {}
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            monitor["usage"] = Usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-                cached_input_tokens=int(prompt_details.get("cached_tokens") or 0),
-                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-            )
+            monitor["usage"] = openai_usage(usage)
         choices = payload.get("choices") or []
         if not choices:
             return False
@@ -1387,7 +1335,7 @@ class Ta3Provider(ModelProvider):
             })
         # plan-598-2482：官方在 tools 末项打 cache_control（anthropicAdapter.js:338），
         # 用于显式前缀缓存；本项目此前完全没有该字段。
-        return _mark_tail_with_cache_control(out)
+        return out
 
     def _build_anthropic_body(self, request: ChatRequest, disguised: list[dict], *,
                               text: bool = False) -> dict:
@@ -1410,9 +1358,8 @@ class Ta3Provider(ModelProvider):
             _DEFAULT_MAX_TOKENS)
         body: dict = {
             "model": request.model or self._model_name,
-            "messages": _mark_message_tail(messages),
-            "system": ([{"type": "text", "text": system, "cache_control": dict(_CACHE_CONTROL)}]
-                       if system else _UNDEF),
+            "messages": messages,
+            "system": system or _UNDEF,
             "stream": not text,
             "temperature": _to_number(_opt(opts, "temperature"), _DEFAULT_TEMPERATURE),
             "top_p": _opt(opts, "topP", "top_p"),
@@ -1451,7 +1398,10 @@ class Ta3Provider(ModelProvider):
             body["tools"] = tools
         from app.orchestration.history_sequence import finish_anthropic_wire
         body["messages"] = finish_anthropic_wire(body["messages"], body.get("thinking"))
-        return _prune(body)
+        mark_anthropic_cache(body)
+        _prune(body)
+        record_wire_prefix("ta3-anthropic", body)
+        return body
 
     def _parse_anthropic_frame(self, line: str, monitor) -> bool:
         if not line.startswith("data:"):
@@ -1483,8 +1433,10 @@ class Ta3Provider(ModelProvider):
             # v28: Anthropic 协议的 input_tokens 在 message_start，补全 usage
             msg = payload.get("message") or {}
             usage = msg.get("usage") or {}
-            if isinstance(usage, dict) and usage.get("input_tokens"):
-                monitor["usage"].prompt_tokens = int(usage["input_tokens"])
+            if isinstance(usage, dict):
+                raw = monitor.setdefault("anthropic_usage", {"input_tokens": monitor["usage"].prompt_tokens})
+                raw.update({key: value for key, value in usage.items() if value is not None})
+                monitor["usage"] = anthropic_usage(raw)
         elif etype == "content_block_start":
             block = payload.get("content_block") or {}
             if block.get("type") == "tool_use":
@@ -1543,11 +1495,10 @@ class Ta3Provider(ModelProvider):
                 monitor["thinking_parts"].append(_th)
             # v28: output_tokens 在 message_delta 的 usage，与 message_start 的 input 合并
             usage = payload.get("usage") or {}
-            if isinstance(usage, dict) and usage.get("output_tokens"):
-                monitor["usage"].completion_tokens = int(usage["output_tokens"])
-                monitor["usage"].total_tokens = (
-                    monitor["usage"].prompt_tokens + monitor["usage"].completion_tokens
-                )
+            if isinstance(usage, dict):
+                raw = monitor.setdefault("anthropic_usage", {"input_tokens": monitor["usage"].prompt_tokens})
+                raw.update({key: value for key, value in usage.items() if value is not None})
+                monitor["usage"] = anthropic_usage(raw)
         elif etype == "ping":
             # v28: Anthropic 协议心跳帧——仅用于诊断网关是否仍在 keep-alive
             monitor["last_heartbeat_at"] = time.time()
@@ -1624,12 +1575,7 @@ class Ta3Provider(ModelProvider):
             if payload.get("stop_reason"):
                 monitor["finish_reason"] = str(payload["stop_reason"])
             if usage:
-                monitor["usage"] = Usage(
-                    prompt_tokens=int(usage.get("input_tokens") or 0),
-                    completion_tokens=int(usage.get("output_tokens") or 0),
-                    total_tokens=int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
-                    cached_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
-                )
+                monitor["usage"] = anthropic_usage(usage)
             return
         choice = (payload.get("choices") or [{}])[0] or {}
         msg = choice.get("message") or {}
@@ -1651,15 +1597,7 @@ class Ta3Provider(ModelProvider):
         if choice.get("finish_reason"):
             monitor["finish_reason"] = str(choice["finish_reason"])
         if usage:
-            details = usage.get("completion_tokens_details") or {}
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            monitor["usage"] = Usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-                cached_input_tokens=int(prompt_details.get("cached_tokens") or 0),
-                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-            )
+            monitor["usage"] = openai_usage(usage)
 
     async def _refresh_llm_key(self) -> str | None:
         """401 自愈：强制重取一次目录，拿该模型的最新 llm- key（官方 llmKeyRetry.js:92-157）。

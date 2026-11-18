@@ -81,6 +81,31 @@ def test_select_range_small_chain_returns_none():
     assert select_compactable_range([], retain_tokens=100) is None
 
 
+def test_cancelled_tool_without_result_does_not_block_compaction():
+    """plan-20261117-compact-trigger：历史中断调用不能让每条新消息都退回内存压缩。"""
+    pending = _mk(1, MsgType.TOOL_CALL.value, tool="ask_user_question", key="cancelled")
+    msgs = [pending, *_chain(n_user=8, calls_per_round=2, tool_chars=2000)]
+    span = select_compactable_range(msgs, retain_tokens=4000)
+    assert span is not None
+    assert span[0] == 0
+    assert span[1] < len(msgs) - 1
+    assert pending in msgs[:span[1] + 1]
+    assert _is_pairing_balanced(msgs, span[1] + 1)
+
+
+def test_missing_old_result_does_not_allow_splitting_existing_pair():
+    """plan-20261117-compact-trigger：允许历史缺结果，仍须保留已有工具配对的边界。"""
+    msgs = [
+        _mk(1, MsgType.TOOL_CALL.value, tool="ask_user_question", key="cancelled"),
+        _mk(2, MsgType.TEXT.value, text="继续处理"),
+        _mk(3, MsgType.TOOL_CALL.value, tool="fs_read", key="active"),
+        _mk(4, MsgType.TOOL_RESULT.value, text="文件内容", tool="fs_read", key="active"),
+    ]
+    assert _is_pairing_balanced(msgs, 2)
+    assert not _is_pairing_balanced(msgs, 3)
+    assert _is_pairing_balanced(msgs, 4)
+
+
 def test_transcript_contains_tools_and_files():
     msgs = [
         _mk(1, MsgType.TEXT.value, text="user hello"),

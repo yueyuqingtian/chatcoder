@@ -434,7 +434,10 @@ def build_api_copy(
             "folded": micro_folded,
             "reasoning_stripped": reasoning_stripped,
             "chars_saved": max(0, before_micro - after_micro),
-            "est_tokens_saved": max(0, estimate_messages_tokens(messages) - estimate_messages_tokens(api)),
+            "est_tokens_saved": (
+                max(0, estimate_messages_tokens(messages) - estimate_messages_tokens(api))
+                if micro_folded or reasoning_stripped else 0
+            ),
             "budget": None,
         }
     except Exception:  # noqa: BLE001 —— 记账失败不影响发请求

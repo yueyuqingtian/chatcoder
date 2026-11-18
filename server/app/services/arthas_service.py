@@ -1179,13 +1179,15 @@ def save_config(patch: dict) -> dict:
     """写入 Arthas 相关配置（与其它设置项同一文件，保留其它键）。"""
     path = Path(os.environ.get("CHATCODER_USER_CONFIG",
                                str(Path.home() / ".chatcoder" / "config.json")))
-    data = _user_config()
-    for key in _CONFIG_KEYS:
-        if key in patch and patch[key] is not None:
-            data[key] = str(patch[key]).strip()
+    from app.core.user_config_io import config_transaction, write_config
+
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        with config_transaction(path):
+            data = _user_config()
+            for key in _CONFIG_KEYS:
+                if key in patch and patch[key] is not None:
+                    data[key] = str(patch[key]).strip()
+            write_config(path, data)
     except OSError as e:
         return {"ok": False, "error": f"写入配置失败：{e}"}
     return {"ok": True}

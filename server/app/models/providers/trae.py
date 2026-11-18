@@ -26,7 +26,9 @@ from typing import Any
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.auth.trae.business import build_business_headers
+from app.models.providers.usage_normalization import openai_usage
 from app.models.base import ModelProvider
 from app.orchestration.history_sequence import prepare_history, validate_openai_wire
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
@@ -178,6 +180,7 @@ class TraeProvider(ModelProvider):
             "client_info": self._meta.get("client_info"),
             "streamlined_common_params": self._meta.get("common_params"),
         }
+        record_wire_prefix("trae", {"model": model_name, "messages": messages, "tools": request.tools})
         return {k: v for k, v in body.items() if v is not None}
 
     def _build_work_body(self, request: ChatRequest) -> dict[str, Any]:
@@ -231,6 +234,7 @@ class TraeProvider(ModelProvider):
             "user_info": user_info,
             "streamlined_common_params": self._meta.get("common_params"),
         }
+        record_wire_prefix("trae", {"model": model_name, "messages": messages, "tools": request.tools})
         return {k: v for k, v in body.items() if v is not None}
 
     def _convert_message(self, m: ChatMessage) -> dict:
@@ -335,15 +339,7 @@ class TraeProvider(ModelProvider):
 
         usage = payload.get("usage")
         if isinstance(usage, dict):
-            monitor["usage"] = Usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-                cached_input_tokens=int(
-                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
-                reasoning_tokens=int(
-                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0),
-            )
+            monitor["usage"] = openai_usage(usage)
 
         # 直接增量字段：text / content / delta
         for key in ("text", "content", "delta"):

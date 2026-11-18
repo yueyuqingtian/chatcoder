@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.attachment_service import run_attachment_io
 from app.core.config import settings
 from app.core.enums import MsgType, SenderType
 from app.gateway.ws import manager as ws_manager
@@ -169,7 +170,7 @@ async def _report_credential(db, provider, failure: CallFailure | None = None,
 async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schemas,
                              session_id, turn_id, step, agent_id, agent_name,
                              thread_id, cancel_event, reasoning_effort, thinking,
-                             workspace, effort, failed_creds: set[int]):
+                             workspace, effort, failed_creds: set[int], multimodal: bool = False):
     """一次已授权的重试：失败凭据可切换，再走与首次相同的流式管线。
 
     - R5：messages 用调用方传入的 api_messages（build_api_copy 后的同一份 payload），
@@ -205,7 +206,16 @@ async def _retry_stream_call(*, db, model, state: dict, api_messages, tool_schem
     _eff_l = (effort or "").strip().lower()
     _retry_thinking = False if _eff_l == "none" else (True if _eff_l else thinking)
     from app.orchestration.history_sequence import prepare_history
+    from app.orchestration.question_attachments import project_answer_images
     api_messages = prepare_history(api_messages)
+    # 与「用户直接发图」同一套判据：只看 multimodal。trae 通道的图片块降级由
+    # TraeProvider._convert_message 自己兜底（追加「请用 read_attachment 读取」提示），
+    # 调用处再拦一次会让 ta3 等多模态通道被误判成不能看图。
+    api_messages = await project_answer_images(
+        api_messages, images=multimodal,
+        read_tool=any(schema.get("function", {}).get("name") == "read_attachment"
+                      for schema in tool_schemas or ()),
+    )
     _retry_req = ChatRequest(
         messages=api_messages, model="",
         tools=tool_schemas or None,
@@ -1384,7 +1394,7 @@ async def run_agent_loop(
                             # 否则运行中「立即发送」带图消息图片被静默丢弃（此前只取 content 文本）。
                             if multimodal:
                                 from app.orchestration.context_manager import _load_inline_image_blocks
-                                _blocks, _notes = _load_inline_image_blocks(_atts)
+                                _blocks, _notes = await run_attachment_io(_load_inline_image_blocks, _atts)
                                 if _blocks:
                                     _suffix = f"\n（注入消息附带的 {len(_blocks)} 张图片已直接附在消息中，请直接查看）"
                             # 无论是否多模态都附上附件路径文本（read_attachment 可读），不丢信息
@@ -1433,9 +1443,13 @@ async def run_agent_loop(
                         turn_id, agent_window,
                     )
                     agent_window = 500000
-                # 修复重复/空 tool_call id（Gemini 等网关 400 根因），再配对/排序
-                messages = repair_tool_call_ids([m.model_copy(deep=True) for m in messages])
-                messages = ensure_tool_pairing(messages)
+                # plan-20261118-runtime-question-cache：正常配对直接复用历史，异常时才复制并修补。
+                from app.orchestration.history_sequence import HistorySequenceError, validate_tool_sequence
+                try:
+                    validate_tool_sequence(messages)
+                except HistorySequenceError:
+                    messages = repair_tool_call_ids([m.model_copy(deep=True) for m in messages])
+                    messages = ensure_tool_pairing(messages)
                 # v8 根治: 强制 assistant(tool_calls) 后紧跟 tool 结果，杜绝 400
                 messages = normalize_tool_sequence(messages)
                 # v16: build_api_copy 不再按占用占比折叠历史（隐式压缩已移除），
@@ -1653,6 +1667,14 @@ async def run_agent_loop(
 
             from app.orchestration.history_sequence import prepare_history
             api_messages = prepare_history(api_messages)
+            from app.orchestration.question_attachments import project_answer_images
+            # 同上：trae 的图片降级在 provider 内完成，这里只按 multimodal 判定。
+            api_messages = await project_answer_images(
+                api_messages,
+                images=multimodal,
+                read_tool=any(schema.get("function", {}).get("name") == "read_attachment"
+                              for schema in tool_schemas or ()),
+            )
             request = ChatRequest(
                 messages=api_messages, model="",
                 tools=tool_schemas or None,
@@ -1772,7 +1794,7 @@ async def run_agent_loop(
                                     thread_id=thread_id, cancel_event=cancel_event,
                                     reasoning_effort=reasoning_effort, thinking=_thinking_flag,
                                     workspace=workspace, effort=_att.effort,
-                                    failed_creds=_failed_creds,
+                                    failed_creds=_failed_creds, multimodal=multimodal,
                                 ),
                                 check=_health,
                                 intervals=_retry_waits,
@@ -1967,7 +1989,7 @@ async def run_agent_loop(
                                     thread_id=thread_id, cancel_event=cancel_event,
                                     reasoning_effort=reasoning_effort, thinking=_thinking_flag,
                                     workspace=workspace, effort=_att.effort,
-                                    failed_creds=_failed_creds,
+                                    failed_creds=_failed_creds, multimodal=multimodal,
                                 ),
                                 check=_health,
                                 intervals=_repair_waits,
@@ -2109,6 +2131,7 @@ async def run_agent_loop(
                     "context_window": agent_window,
                     "usage_source": _usage_source,
                     "cached_input_tokens": getattr(response.usage, 'cached_input_tokens', 0) or 0 if response.usage else 0,
+                    "cache_read_reported": bool(getattr(response.usage, "cache_read_reported", False)),
                     "reasoning_tokens": getattr(response.usage, 'reasoning_tokens', 0) or 0 if response.usage else 0,
                     "breakdown": _breakdown,
                     # v19: 前端圆环仅统计主代理占用，子代理不覆盖
@@ -3028,20 +3051,6 @@ async def run_agent_loop(
                     )
                     # plan-20261015-browser-agent：原 browser.mirror 镜像广播已移除——浏览器工具现在直接
                     # 驱动右侧面板里的真实网页（桌面端宿主自带可视化），不再需要“镜像一个 URL”。
-                    await message_service.create_message(
-                        db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
-                        sender_type=SenderType.AGENT.value, sender_id=agent_id,
-                        msg_type=MsgType.TOOL_RESULT.value,
-                        content={"tool": tool_name, "call_key": call_key,
-                                 "ok": result.ok, "output": _presented_output,
-                                 "error": result.error, "error_code": result.error_code, "duration_ms": _dur,
-                                 "agent_name": agent_name,
-                                 **({"change_stat": _change_stat} if _change_stat else {}),
-                                 **({"image": _tool_image} if _tool_image else {}),
-                                 **({"exit_note": _exit_note} if _exit_note else {}),
-                                 **({"returncode": _returncode} if _returncode is not None else {})},
-                        buffered=True,
-                    )
                     # 失败时把错误类别与恢复指引附在文本末尾，模型据此选择修正动作（落库的 error 字段保持原样）
                     _model_content = _presented_output if result.output else (result.error or "")
                     if not result.ok:
@@ -3064,9 +3073,27 @@ async def run_agent_loop(
                             logger.debug("[agent] 写后检查异常 tool=%s", tool_name, exc_info=True)
                         if _check_note:
                             _model_content = f"{_model_content}\n\n{_check_note}".strip()
+                    await message_service.create_message(
+                        db, session_id=session_id, turn_id=turn_id, thread_id=thread_id,
+                        sender_type=SenderType.AGENT.value, sender_id=agent_id,
+                        msg_type=MsgType.TOOL_RESULT.value,
+                        content={"tool": tool_name, "call_key": call_key,
+                                 "ok": result.ok, "output": _presented_output,
+                                 "error": result.error, "error_code": result.error_code, "duration_ms": _dur,
+                                 **({"model_content": _model_content} if _model_content != _presented_output else {}),
+                                 "agent_name": agent_name,
+                                 **({"change_stat": _change_stat} if _change_stat else {}),
+                                 **({"image": _tool_image} if _tool_image else {}),
+                                 **({"attachments": result.data["attachments"]}
+                                    if tool_name == "ask_user_question" and result.data.get("attachments") else {}),
+                                 **({"exit_note": _exit_note} if _exit_note else {}),
+                                 **({"returncode": _returncode} if _returncode is not None else {})},
+                        buffered=True,
+                    )
                     messages.append(ChatMessage(
                         role="tool", content=_model_content,
                         name=tool_name, tool_call_id=tc.get("id", ""),
+                        answer_attachments=result.data.get("attachments") if tool_name == "ask_user_question" else None,
                     ))
                     # fs_read 成功读取后登记：之后同文件同范围未变化时，可凭此结果回存根（见 tools/read_cache.py）
                     if tool_name == "fs_read" and result.ok:
@@ -3921,10 +3948,7 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     """
     from app.models.schemas import ChatResponse, Usage as UsageModel
     from app.orchestration.history_sequence import HistorySequenceError, structure_diagnostic
-    from app.orchestration.history_sequence import request_diagnostic_context
-    request_diagnostic_context.set({"session_id": session_id, "turn_id": turn_id,
-                                    "message_id": request.message_id, "provider": getattr(provider, "name", "unknown"),
-                                    "compaction_ids": [m.checkpoint_id for m in request.messages if m.checkpoint_id]})
+    from app.orchestration.history_sequence import prompt_route_context, request_diagnostic_context
     logger.info("[context-request] session=%s turn=%s message=%s provider=%s structure=%s",
                 session_id, turn_id, request.message_id, getattr(provider, "name", "unknown"),
                 structure_diagnostic(request.messages, protocol=getattr(provider, "name", "unknown")))
@@ -3949,6 +3973,14 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
     request.timing = {"start": _t_req}
     _t_first_evt: float | None = None
     _t_end: float | None = None
+    route_context = prompt_route_context.set((
+        thread_id, getattr(provider, "provider_row_id", None), getattr(provider, "credential_row_id", None),
+    ))
+    diagnostic_context = request_diagnostic_context.set({
+        "session_id": session_id, "turn_id": turn_id, "message_id": request.message_id,
+        "provider": getattr(provider, "name", "unknown"),
+        "compaction_ids": [m.checkpoint_id for m in request.messages if m.checkpoint_id],
+    })
     try:
         async for event in _anext_with_cancel(provider.stream_structured(request), cancel_event):
             # v6.4: 流式输出中检查中断信号，立即停止（竞速后为幂等兜底）
@@ -4088,6 +4120,9 @@ async def _stream_chat_and_broadcast(provider, request, *, session_id, turn_id, 
             logger.warning("[agent] turn=%s 流式调用失败，交给统一重试: %s",
                            turn_id, str(e)[:160])
             raise
+    finally:
+        request_diagnostic_context.reset(diagnostic_context)
+        prompt_route_context.reset(route_context)
 
     # v19: 剥离正文中的内联思考标签（部分网关把思考写进 content）
     # 超时、取消或流异常若发生在 done 前，尚未释放的开头也必须保留；

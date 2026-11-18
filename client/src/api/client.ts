@@ -234,6 +234,52 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return res.json();
 }
 
+interface PendingSettingsRead {
+  controller: AbortController;
+  request: Promise<unknown>;
+  consumers: number;
+}
+const pendingSettingsReads = new Map<string, PendingSettingsRead>();
+
+/** 同路径的设置请求共享网络读取。最后一个调用方退出时取消底层请求。 */
+function getSettings<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  let read = pendingSettingsReads.get(path);
+  if (!read) {
+    const controller = new AbortController();
+    const created: PendingSettingsRead = {
+      controller,
+      request: get<T>(path, controller.signal).finally(() => {
+        if (pendingSettingsReads.get(path) === created) pendingSettingsReads.delete(path);
+      }),
+      consumers: 0,
+    };
+    pendingSettingsReads.set(path, created);
+    read = created;
+  }
+  const shared = read;
+  shared.consumers++;
+  return new Promise<T>((resolve, reject) => {
+    const release = () => {
+      signal?.removeEventListener("abort", abort);
+      if (--shared.consumers === 0 && pendingSettingsReads.get(path) === shared) {
+        pendingSettingsReads.delete(path);
+        shared.controller.abort();
+      }
+    };
+    let active = true;
+    const finish = (deliver: () => void) => {
+      if (!active) return;
+      active = false;
+      release();
+      deliver();
+    };
+    const abort = () => finish(() => reject(signal?.reason));
+    signal?.addEventListener("abort", abort, { once: true });
+    void shared.request.then((data) => finish(() => resolve(data as T)), (error) => finish(() => reject(error)));
+  });
+}
+
 async function patch<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetchWithRetry(`${await baseForFetch()}${path}`, {
     method: "PATCH",
@@ -1365,7 +1411,7 @@ export const api = {
     agent_name: string;
     source?: string;  // v1.1: api_last=最后一次 API 真实占用 / est=本地估算
   }>(`/turns/sessions/${sessionId}/usage`),
-  getUsageStats: (params?: { start?: string; end?: string; days?: number; provider?: string }) => {
+  getUsageStats: (params?: { start?: string; end?: string; days?: number; provider?: string }, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (params?.start) q.set("start", params.start);
     if (params?.end) q.set("end", params.end);
@@ -1373,10 +1419,10 @@ export const api = {
     // plan-308-1542 需求6：按供应商筛选
     if (params?.provider) q.set("provider", params.provider);
     const qs = q.toString();
-    return get<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`);
+    return getSettings<UsageStatsOut>(`/usage/stats${qs ? `?${qs}` : ""}`, signal);
   },
   /** plan-20261021-usage-update：调用记录（分页，默认每页 20 条），区间 / 供应商口径同 getUsageStats */
-  getUsageRecords: (params?: { start?: string; end?: string; days?: number; provider?: string; page?: number; page_size?: number }) => {
+  getUsageRecords: (params?: { start?: string; end?: string; days?: number; provider?: string; page?: number; page_size?: number }, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (params?.start) q.set("start", params.start);
     if (params?.end) q.set("end", params.end);
@@ -1385,7 +1431,7 @@ export const api = {
     if (params?.page) q.set("page", String(params.page));
     if (params?.page_size) q.set("page_size", String(params.page_size));
     const qs = q.toString();
-    return get<UsageRecordsOut>(`/usage/records${qs ? `?${qs}` : ""}`);
+    return getSettings<UsageRecordsOut>(`/usage/records${qs ? `?${qs}` : ""}`, signal);
   },
 
   // ── 定时任务（plan-230-1144 M1.1：调度器落地）──
@@ -1470,7 +1516,7 @@ export const api = {
     post<{ ok: boolean; path: string; entries: number }>(`/memories/consolidate?session_id=${sessionId}&project_id=${projectId}`),
 
   // ── 模型 ──
-  listModels: () => get<ModelOut[]>("/models"),
+  listModels: (signal?: AbortSignal) => getSettings<ModelOut[]>("/models", signal),
   createModel: (data: {
     name: string; provider?: string; provider_id?: number; base_url?: string; intelligence_level?: number;
     context_window?: number; source_type?: string; is_active?: boolean; is_multimodal?: boolean;
@@ -1480,7 +1526,7 @@ export const api = {
   deleteModel: (id: number) => del<{ ok: boolean }>(`/models/${id}`),
 
   // ── 供应商 ──
-  listProviders: () => get<ProviderOut[]>("/providers"),
+  listProviders: (signal?: AbortSignal) => getSettings<ProviderOut[]>("/providers", signal),
   createProvider: (data: { name: string; base_url?: string; api_key?: string; api_format?: string; is_active?: boolean; ta3_alt_base_urls?: string[] }) =>
     post<ProviderOut>("/providers", data),
   updateProvider: (id: number, data: Record<string, unknown>) => patch<ProviderOut>(`/providers/${id}`, data),
@@ -1489,13 +1535,13 @@ export const api = {
   reorderProviders: (ids: number[]) =>
     post<{ ok: boolean; updated: number }>("/providers/reorder", { ids }),
   scanProviderModels: (id: number) => post<{ models: ScannedModel[] }>(`/providers/${id}/scan`, {}),
-  listProviderModels: (id: number) => get<ModelOut[]>(`/providers/${id}/models`),
+  listProviderModels: (id: number, signal?: AbortSignal) => getSettings<ModelOut[]>(`/providers/${id}/models`, signal),
   bulkSaveProviderModels: (id: number, models: Array<{
     name: string; is_active?: boolean; context_window?: number; is_multimodal?: boolean; reasoning_efforts?: string[];
   }>) => post<ModelOut[]>(`/providers/${id}/models`, { models }),
 
   // ── plan-248-1258 M2.2/M2.3: 供应商凭据（多 Key/多账号）与代理 ──
-  listProviderCredentials: (id: number) => get<ProviderCredentialOut[]>(`/providers/${id}/credentials`),
+  listProviderCredentials: (id: number, signal?: AbortSignal) => getSettings<ProviderCredentialOut[]>(`/providers/${id}/credentials`, signal),
   revealProviderCredentialKey: (credentialId: number) =>
     get<{ api_key: string }>(`/credentials/${credentialId}/reveal`),
   createProviderCredential: (id: number, data: {
@@ -1837,7 +1883,7 @@ export const api = {
   }>("/settings/ai-rules", data),
 
   // ── 全局设置（v2.2: 设置中心持久化统一）──
-  getGlobalSettings: () => get<GlobalSettingsOut>("/settings/global"),
+  getGlobalSettings: (signal?: AbortSignal) => getSettings<GlobalSettingsOut>("/settings/global", signal),
 
   // ── 工作流 ──
   listWorkflows: (sessionId: number) => get<WorkflowRunOut[]>(`/sessions/${sessionId}/workflows`),
@@ -1928,7 +1974,7 @@ export const api = {
    *  全局通道在断线重连与页面重载后会丢事件，靠这个接口重建跨会话等待索引。 */
   getPendingApprovals: () => get<PendingApprovalsOut>("/approvals/pending"),
   /** 问题7/8: 终端 Shell 存在性探测 + 候选等宽字体 */
-  getTerminalOptions: () => get<TerminalOptionsOut>("/settings/terminal/options"),
+  getTerminalOptions: (signal?: AbortSignal) => getSettings<TerminalOptionsOut>("/settings/terminal/options", signal),
 
   // ── 电脑操控（plan-334-1661）──
   getDesktopStatus: () => get<DesktopStatus>("/desktop/status"),

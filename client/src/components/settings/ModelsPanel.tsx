@@ -460,9 +460,14 @@ export function ModelsPanel() {
 
   const closeConfirm = () => setConfirmDialog((d) => ({ ...d, open: false }));
 
+  const listRequest = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
+    listRequest.current?.abort();
+    const controller = new AbortController();
+    listRequest.current = controller;
     try {
-      const list = await api.listProviders();
+      const list = await api.listProviders(controller.signal);
+      if (controller.signal.aborted) return;
       setProviders(list);
       setSelectedId((cur) => (cur != null && list.some((p) => p.id === cur) ? cur : (list[0]?.id ?? null)));
       // plan-81-345: 清掉已删除供应商的详情缓存与登录态残留——SQLite 会复用被删供应商的 id，
@@ -479,9 +484,15 @@ export function ModelsPanel() {
         return next;
       });
     } catch { /* ignore */ }
-    try { setIndependentModels((await api.listModels()).filter((m) => !m.provider_id)); } catch { /* ignore */ }
+    try {
+      const all = await api.listModels(controller.signal);
+      if (!controller.signal.aborted) setIndependentModels(all.filter((model) => !model.provider_id));
+    } catch { /* ignore */ }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => listRequest.current?.abort();
+  }, [load]);
 
   const selected = providers.find((p) => p.id === selectedId) || null;
   const isOAuth = !!selected && OAUTH_FORMATS.has(selected.api_format);
@@ -501,8 +512,12 @@ export function ModelsPanel() {
 
   // 选中供应商 → 拉取其模型与凭据。切换时保留旧详情直到新详情准备好，
   // 避免双栏右侧空白/高度跳变；requestId 防止慢响应回写到错误供应商。
+  const detailRequest = useRef<AbortController | null>(null);
   const loadDetail = useCallback(async (p: ProviderOut | null, force = false, silent = false) => {
     const requestId = ++detailRequestId.current;
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
     if (!p) {
       setDetailLoading(false);
       setProviderModels([]);
@@ -533,10 +548,10 @@ export function ModelsPanel() {
     setDetailProviderId(p.id);
     try {
       const [modelsResult, credentialsResult] = await Promise.allSettled([
-        api.listProviderModels(p.id),
-        api.listProviderCredentials(p.id),
+        api.listProviderModels(p.id, controller.signal),
+        api.listProviderCredentials(p.id, controller.signal),
       ]);
-      if (requestId !== detailRequestId.current) return;
+      if (controller.signal.aborted || requestId !== detailRequestId.current) return;
       // plan-565-2323 G2：失败的一侧不再折成空数组落库。此前任何一侧失败都被当成「空数据」写进
       // detailCache，之后非 force 刷新一直命中空缓存，界面长期显示「暂无账号」——而供应商其实
       // 还有账号（停用的账号原本也被后端过滤，两处叠加后彻底看不出问题）。
@@ -570,7 +585,10 @@ export function ModelsPanel() {
       if (requestId === detailRequestId.current) setDetailLoading(false);
     }
   }, []);
-  useEffect(() => { void loadDetail(selected); }, [selectedId, loadDetail]);
+  useEffect(() => {
+    void loadDetail(selected);
+    return () => detailRequest.current?.abort();
+  }, [selectedId, loadDetail]);
 
   // plan-116-456：kiro 的 Base URL 允许留空（端点按区域推导），但空值会让用户
   // 困惑（实测反馈），通用路径（如「测试连接」）也无从下手。详情打开且为空时按

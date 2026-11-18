@@ -272,6 +272,40 @@
 .composer-attachments { gap: 6px; padding: 0 0 8px; }
 .composer-attach-chip { height: 30px; padding: 0 6px 0 4px; border-radius: var(--r-ctl); background: var(--bg-hover); border: none; font-size: 12px; animation: mo-bounce-in var(--dur-spring) var(--spring-bouncy) both; }
 .composer-attach-chip .attach-chip-thumb { width: 22px; height: 22px; border-radius: var(--r-md); }
+.composer-attach-chip .attach-chip-name { display: flex; align-items: center; gap: 4px; padding: 0; min-width: 0; }
+.composer-attach-chip .attach-chip-name span { overflow: hidden; text-overflow: ellipsis; }
+.composer-attach-chip .attach-chip-name svg, .composer-attach-chip .attach-chip-name img { flex-shrink: 0; }
+.question-wizard-attachments .composer-attachments {
+  padding: 8px 10px 3px;
+  max-height: 100px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.question-wizard-attachments .composer-attach-chip {
+  height: var(--btn-h-xs);
+  background: var(--bg-active);
+}
+.question-wizard-attachments .composer-attach-chip .attach-chip-thumb {
+  width: 18px;
+  height: 18px;
+}
+.question-wizard-custom-line .btn-icon-only {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.question-wizard-custom-line .btn-icon-only:focus-visible {
+  background: var(--bg-active);
+  color: var(--text-1);
+}
+.composer-question-wizard .question-wizard-title-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.question-wizard-error { color: var(--error); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .composer-attach-chip .remove { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: var(--r-pill); }
 .composer-attach-chip .remove:hover { background: var(--bg-active); }
 

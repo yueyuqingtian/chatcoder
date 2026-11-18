@@ -310,26 +310,45 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                             },
                         })
                         continue
-                    # v2.2: answer 为 ask_user_question 的结构化回答
-                    _answer = payload.get("answer")
-                    if isinstance(_answer, dict):
-                        resolved = approval_manager.resolve(approval_id, approved, answer=_answer)
+                    is_question = _detail.get("kind") == "question"
+                    if approved and is_question:
+                        from app.orchestration.tools.ask_user import validate_question_reply
+                        from app.services.attachment_service import run_attachment_io
+
+                        try:
+                            answer, attachments = await run_attachment_io(
+                                validate_question_reply, _detail["questions"],
+                                payload.get("answer"), payload.get("answer_attachments"),
+                            )
+                        except ValueError as exc:
+                            manager.send(ws, {
+                                "event": "ack", "payload": {
+                                    "ref": approval_id, "resolved": False, "error": str(exc),
+                                },
+                            })
+                            continue
+                        resolved = approval_manager.resolve(approval_id, True, answer, attachments)
                     else:
                         resolved = approval_manager.resolve(approval_id, approved)
                     # v2.2 (对齐 zcode 3.12): 审批卡"始终允许"→ 生成工具级 exec_policy 规则
                     # v3.0 (plan-88): remember_scope 区分会话级/全局（global 规则 session_id=None）
-                    if approved and payload.get("remember"):
+                    if resolved and approved and not is_question and payload.get("remember"):
                         scope = "global" if payload.get("remember_scope") == "global" else "session"
                         await _remember_approval(approval_id, _owner_sid or session_id, scope)
                 manager.send(ws, {
-                    "event": "ack", "payload": {"ref": approval_id, "resolved": resolved},
+                    "event": "ack", "payload": {
+                        "ref": approval_id, "resolved": resolved,
+                        **({} if resolved else {"error": "此提问或审批已结束，请刷新待处理项。"}),
+                    },
                 })
+                if not resolved:
+                    continue
                 # 回执广播到审批所属会话（不是提交方连接），保证发起会话的 UI 能关掉卡片，
                 # 并把 session_id 放进 payload 供多通道按会话过滤。
                 _broadcast_sid = _owner_sid or session_id
                 await manager.broadcast(_broadcast_sid, {
                     "event": "approval.response",
-                    "payload": {**payload, "session_id": _broadcast_sid},
+                    "payload": {"approval_id": approval_id, "approved": approved, "session_id": _broadcast_sid},
                 })
 
             elif event == "approval.explain":

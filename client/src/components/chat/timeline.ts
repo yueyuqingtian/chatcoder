@@ -11,7 +11,7 @@
  * - 思考内容（thinking）不进入主消息流文本，由 ThinkingBlock 独立消费
  */
 import { normalizeToolName } from "./toolLabels";
-import type { MessageOut } from "../../api/client";
+import type { AttachmentInfo, MessageOut } from "../../api/client";
 import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
@@ -42,6 +42,7 @@ export interface ToolLeaf {
   changeStat: { path: string; additions: number; deletions: number } | null;
   /** plan-20261015-browser-agent：截图类工具结果的预览图（落库在工具结果消息里，刷新后仍在原位） */
   image: ToolImage | null;
+  questionAttachments?: (AttachmentInfo & { question_index: number })[];
   /** plan-flow-redesign：良性退出码 1 的中性状态说明（如「无匹配（退出码 1）」） */
   exitNote?: string | null;
   returncode?: number | null;
@@ -399,6 +400,9 @@ function buildLeaf(call: MessageOut, result?: MessageOut): ToolLeaf {
       ? { path: statRaw.path, additions: Number(statRaw.additions ?? 0), deletions: Number(statRaw.deletions ?? 0) }
       : null,
     image: rc.image && typeof (rc.image as { url?: unknown }).url === "string" ? (rc.image as ToolImage) : null,
+    questionAttachments: Array.isArray(rc.attachments) ? rc.attachments.filter(
+      (item) => item && typeof item.question_index === "number" && typeof item.file_id === "string",
+    ) : undefined,
     exitNote: typeof rc.exit_note === "string" ? rc.exit_note : null,
     returncode: typeof rc.returncode === "number" ? rc.returncode : null,
   };

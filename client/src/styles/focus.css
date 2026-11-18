@@ -50,9 +50,11 @@ button:focus-visible,
   border-color: var(--text-2);
 }
 /* focus-within 容器同步聚焦态（中性色） */
-.approval-tool-selector:focus-within,
-.question-wizard-custom-row:focus-within {
+.approval-tool-selector:focus-within {
   border-color: var(--text-2);
+}
+.question-wizard-custom-row:focus-within {
+  border-color: color-mix(in srgb, var(--text-2) 55%, var(--border));
 }
 
 /* ── 3. 文本输入控件不吃全局焦点装饰（含键盘导航） ── */

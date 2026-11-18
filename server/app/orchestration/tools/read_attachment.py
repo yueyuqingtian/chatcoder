@@ -14,6 +14,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.safe_path import safe_resolve
+from app.services.attachment_service import run_attachment_io
 from app.services.doc_parser import extract_plain_text, is_image
 
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB
@@ -76,6 +77,9 @@ class ReadAttachmentTool(Tool):
         }
 
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
+        return await run_attachment_io(self._read, args, ctx)
+
+    def _read(self, args: dict, ctx: ToolContext) -> ToolResult:
         rel = str(args.get("path", "") or "").strip()
         if not rel:
             return ToolResult(ok=False, output="path is required")
@@ -92,11 +96,9 @@ class ReadAttachmentTool(Tool):
             if ws_target is not None and ws_target.is_file():
                 target = ws_target
         if target is None:
-            import asyncio
-
             from app.orchestration.tools.path_hints import missing_path_hint
 
-            hint = await asyncio.to_thread(missing_path_hint, ctx.workspace_root, rel, want_dir=False)
+            hint = missing_path_hint(ctx.workspace_root, rel, want_dir=False)
             return ToolResult(
                 ok=False,
                 output=f"附件路径非法或不存在: {rel}（工作区外的文件请用 fs_read 读取）{hint}",

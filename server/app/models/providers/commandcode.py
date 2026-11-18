@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.core.config import settings
 from app.models.base import ModelProvider
 from app.models.providers.temperature_policy import request_temperature
@@ -102,7 +103,12 @@ class CommandCodeProvider(ModelProvider):
 
             if role in ("system", "developer"):
                 if m.content:
-                    system_parts.append(m.content)
+                    if out_messages:
+                        out_messages.append({"role": "user", "content": [{
+                            "type": "text", "text": f"<system-reminder>\n{m.content}\n</system-reminder>",
+                        }]})
+                    else:
+                        system_parts.append(m.content)
                 continue
 
             if role == "tool":
@@ -288,6 +294,7 @@ class CommandCodeProvider(ModelProvider):
         if tools:
             params["tools"] = tools
 
+        record_wire_prefix("commandcode", params)
         today = datetime.now().strftime("%Y-%m-%d")
         return {
             "threadId": thread_id,
@@ -432,13 +439,16 @@ class CommandCodeProvider(ModelProvider):
                                 tot_tok = u_dict.get("totalTokens") or (in_tok + out_tok)
                                 in_details = u_dict.get("inputTokenDetails") or {}
                                 out_details = u_dict.get("outputTokenDetails") or {}
-                                cached = in_details.get("cacheReadTokens") or u_dict.get("cachedInputTokens") or 0
+                                cached = in_details.get("cacheReadTokens")
+                                if cached is None:
+                                    cached = u_dict.get("cachedInputTokens")
                                 reasoning = out_details.get("reasoningTokens") or u_dict.get("reasoningTokens") or 0
                                 usage = Usage(
                                     prompt_tokens=in_tok,
                                     completion_tokens=out_tok,
                                     total_tokens=tot_tok,
-                                    cached_input_tokens=cached,
+                                    cached_input_tokens=cached or 0,
+                                    cache_read_reported=cached is not None,
                                     reasoning_tokens=reasoning,
                                 )
 

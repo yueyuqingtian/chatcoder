@@ -2,12 +2,47 @@
 import logging
 import json
 from functools import wraps
-from collections import deque
+from collections import OrderedDict, deque
 from contextvars import ContextVar
+from hashlib import blake2b
+from itertools import takewhile
 
 logger = logging.getLogger(__name__)
 request_diagnostic_context = ContextVar("context_request", default={})
+prompt_route_context = ContextVar("prompt_route", default=())
 _recent_diagnostics = deque(maxlen=100)
+_prefixes: OrderedDict = OrderedDict()
+
+
+def record_wire_prefix(protocol: str, body: dict) -> None:
+    """诊断模式下比较最终协议载荷。只记录前缀长度和首个变化的段落类型。"""
+    context = request_diagnostic_context.get()
+    session = context.get("session_id")
+    if not session or not logger.isEnabledFor(logging.DEBUG):
+        return
+    route = (session, *prompt_route_context.get(), protocol, body.get("model"))
+    settings = {key: body[key] for key in ("thinking", "reasoning_effort", "output_config", "tool_choice")
+                if key in body}
+    parts = [("request_settings", settings), ("tools", body.get("tools")), ("system", body.get("system"))]
+    parts.extend((row.get("role") or "message", row) for row in body.get("messages") or ())
+    digests = [(kind, blake2b(json.dumps(value, ensure_ascii=False, default=str).encode(), digest_size=16).digest())
+               for kind, value in parts]
+    previous = _prefixes.get(route)
+    _prefixes[route] = digests
+    _prefixes.move_to_end(route)
+    if len(_prefixes) > 64:
+        _prefixes.popitem(last=False)
+    if previous is None:
+        return
+    common = sum(1 for _ in takewhile(lambda pair: pair[0] == pair[1], zip(previous, digests)))
+    delta = {
+        "stage": "cache_prefix", "protocol": protocol, **context,
+        "matching_sections": common,
+        "first_changed_section": digests[common][0] if common < len(digests)
+        else ("removed" if common < len(previous) else None),
+    }
+    _recent_diagnostics.append(delta)
+    logger.debug("[cache-prefix] %s", json.dumps(delta))
 
 
 class HistorySequenceError(ValueError):
@@ -17,20 +52,20 @@ class HistorySequenceError(ValueError):
 def validate_tool_sequence(messages):
     seen, pending = set(), set()
     for m in messages:
-        row = m if isinstance(m, dict) else m.model_dump()
-        role = row.get("role")
+        if isinstance(m, dict):
+            role, key, calls = m.get("role"), m.get("tool_call_id"), m.get("tool_calls")
+        else:
+            role, key, calls = m.role, m.tool_call_id, m.tool_calls
         if role == "tool":
-            key = row.get("tool_call_id")
             if not key or key not in pending:
                 raise HistorySequenceError("历史工具结果缺少唯一对应的调用，请从完整轮次重新创建分支")
             pending.remove(key)
             continue
         if pending:
             raise HistorySequenceError("历史工具调用尚未配齐结果，无法发送，请从完整轮次重新创建分支")
-        calls = row.get("tool_calls") or []
         if calls and role != "assistant":
             raise HistorySequenceError("历史工具调用的消息角色异常")
-        for call in calls:
+        for call in calls or ():
             key = call.get("id")
             if not key or key in seen:
                 raise HistorySequenceError("历史工具调用编号缺失或重复")

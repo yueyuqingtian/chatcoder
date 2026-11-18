@@ -4,6 +4,7 @@ import { useChatStore } from "../src/store/chat.ts";
 import { api, type PendingApprovalItem } from "../src/api/client.ts";
 import { wsClient, globalWsClient, type ServerEvent } from "../src/api/ws.ts";
 import { waitingOf } from "../src/utils/sessionWaiting.ts";
+import { updateQuestionDraft, useQuestionDrafts } from "../src/store/questionDrafts.ts";
 
 // plan-20261103-interactions：运行真实仓库及同步分支，传输层用可控回调复现交错时序。
 Object.defineProperty(globalThis, "requestAnimationFrame", { value: () => 1, configurable: true });
@@ -61,8 +62,15 @@ store.respondApproval("q1", true);
 assert.equal(useChatStore.getState().pendingApproval?.approvalId, "q1", "连接未就绪时保留提问与答案重试入口");
 assert.equal(hasPending(1), true);
 connected = true;
-store.respondApproval("q1", true, false, { answer: "A" });
+updateQuestionDraft("q1", () => ({ custom: { "0": "A" }, submitting: true }));
+store.respondApproval("q1", true, false, { "0": "A" });
+assert.equal(useChatStore.getState().pendingApproval?.approvalId, "q1", "成功回执前保留问题");
+store.handleWs("ack", { ref: "q1", resolved: false, error: "附件失效" }, true);
+assert.equal(useQuestionDrafts.getState().q1.custom["0"], "A", "拒绝回执保留草稿");
+assert.equal(useQuestionDrafts.getState().q1.error, "附件失效");
+store.handleWs("ack", { ref: "q1", resolved: true }, true);
 assert.equal(useChatStore.getState().pendingApproval?.approvalId, "q2");
+assert.equal(useQuestionDrafts.getState().q1, undefined, "成功回执移除草稿");
 store.respondApproval("q2", true);
 assert.equal(waitingOf({ id: 1, has_running: true }, hasPending), false, "回答后运行未结束也立即摘掉问号");
 pendingActions.noteRequest(1, "q2", "question", question("q2").detail);

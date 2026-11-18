@@ -19,6 +19,11 @@ import { isBusy } from "../../perf/bus";
 import { scrollActiveMenuOption } from "../../utils/menuScroll";
 import { questionEnterIndex } from "./questionKeyboard";
 import { getPastedFiles } from "./composerPaste";
+import { ComposerAttachments, uploadComposerFiles } from "./ComposerAttachments";
+import {
+  emptyQuestionDraft, rejectQuestionSubmission, startQuestionSubmission, updateQuestionDraft, useQuestionDrafts,
+  type QuestionAnswer, type QuestionAnswers, type QuestionAttachments,
+} from "../../store/questionDrafts";
 // plan-693-2868 P1 收尾：引用 chip 的发送后生命周期（送达清空 / 失败保留），规则在纯函数里
 import { refsAfterSend, deliveredFromQueue } from "./composerRefsLifecycle";
 import { notify } from "../../store/toast";
@@ -57,11 +62,10 @@ import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
-import { useChatStore, persistLastReasoning, patchSession, findSession, useCurrentSession, type UsageDetail, type QuestionAnswer } from "../../store/chat";
+import { useChatStore, persistLastReasoning, patchSession, findSession, useCurrentSession, type UsageDetail } from "../../store/chat";
 import { useScoped } from "./convoScope";
 import { firstVisiblePending } from "../../store/pendingInteractions";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
-import { usePanelStore } from "../../store/panel";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
 import { useMicroAppsStore } from "../../store/microapps";
 import { useI18n } from "../../store/i18n";
@@ -960,19 +964,6 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     e.stopPropagation();
   };
 
-  /** 会话 229: 打开输入框附件预览（图片用全局查看器，非图片进入右侧查看器） */
-  const openAttachmentPreview = (att: AttachmentInfo) => {
-    if (att.type !== "image" && !att.mime_type.startsWith("image/")) {
-      usePanelStore.getState().openResource({source:"upload",file_id:att.file_id,filename:att.filename},useChatStore.getState().currentSessionId);
-      return;
-    }
-    const imgs = attachments.filter((a) => a.type === "image" || a.mime_type.startsWith("image/"));
-    if (imgs.length === 0) return;
-    const list = imgs.map((a) => ({ url: resolveFileUrl(a.url), name: a.filename, size: a.size }));
-    const idx = imgs.indexOf(att);
-    openGallery(list, idx < 0 ? 0 : idx);
-  };
-
   const addFiles = useCallback(
     async (fileList: FileList | File[]) => {
       const arr = Array.from(fileList);
@@ -981,16 +972,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       pendingUploads.current++;
       setUploading(true);
       try {
-        const uploaded: AttachmentInfo[] = [];
-        const failures: string[] = [];
-        for (const f of arr) {
-          try {
-            const res = await api.uploadFile(f);
-            uploaded.push(res);
-          } catch (error) {
-            failures.push(`${f.name}：${error instanceof Error ? error.message : "上传失败，请重试"}`);
-          }
-        }
+        const { uploaded, failures } = await uploadComposerFiles(arr);
         if (uploaded.length > 0) {
           // plan-20261106-file-drop：连续拖入或选择文件时，已完成的上传不能覆盖其他批次附件。
           setAttachments((prev) => [...prev, ...uploaded]);
@@ -1632,6 +1614,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     <div
       className={`composer${dragOver ? " drag-over" : ""}${isHome ? " composer-home" : ""}`}
       onDragOver={(e) => {
+        if (isQuestionMode) return;
         e.preventDefault();
         setDragOver(true);
       }}
@@ -1661,10 +1644,11 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           旧的全屏遮罩弹窗（.approval-overlay）已删除。 */}
       {isQuestionMode ? (
         <QuestionWizardBox
+          key={effectivePendingApproval!.approvalId}
           approvalId={effectivePendingApproval!.approvalId}
           detail={effectivePendingApproval!.detail}
           onCancel={() => respondApproval(effectivePendingApproval!.approvalId, false)}
-          onSubmit={(answers) => respondApproval(effectivePendingApproval!.approvalId, true, false, answers)}
+          onSubmit={(answers, files) => respondApproval(effectivePendingApproval!.approvalId, true, false, answers, "session", files)}
         />
       ) : isApprovalMode ? (
         <ApprovalCard
@@ -1746,47 +1730,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
             </div>
           )}
 
-          {(attachments.length > 0 || uploading) && (
-            <div className="composer-attachments">
-              {attachments.map((att, idx) => (
-                <Tooltip key={att.file_id ?? idx} content={att.filename}>
-                  <div
-                    className={`composer-attach-chip${att.type === "image" ? " image" : ""}`}
-                    onClick={() => openAttachmentPreview(att)}
-                  >
-                    {att.type === "image" ? (
-                      <img
-                        src={resolveFileUrl(att.url)}
-                        alt={att.filename}
-                        className="attach-chip-thumb"
-                      />
-                    ) : (
-                      <IconPaperclip size={11} />
-                    )}
-                    <span
-                      className="attach-chip-name"
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e)=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openAttachmentPreview(att);}}}
-                    >
-                      {att.filename}
-                    </span>
-                    <Tooltip content="移除附件">
-                      <button
-                        className="remove"
-                        aria-label={`移除附件 ${att.filename}`}
-                        onClick={(e) => { e.stopPropagation(); setAttachments((prev) => prev.filter((_, i) => i !== idx)); }}
-                        type="button"
-                      >
-                        <IconX size={10} />
-                      </button>
-                    </Tooltip>
-                  </div>
-                </Tooltip>
-              ))}
-              {uploading && <span className="composer-attach-uploading" role="status">附件上传中…</span>}
-            </div>
-          )}
+          <ComposerAttachments files={attachments} sessionId={currentSessionId} uploading={uploading}
+            onRemove={(index) => setAttachments((prev) => prev.filter((_, i) => i !== index))} />
           {/* plan-671: 目标胶囊——输入框内顶部（排队胶囊上方），复用胶囊语言（对齐 zcode 低打扰）。
               plan-676: 首页变体仅 label+文本+移除（无轮次计数/完成打勾——会话未创建无续跑语义） */}
           {/* plan-128-518：目标待命——已选「目标」模式但还没发送，提示“下一条消息就是目标”，可点 × 退出 */}
@@ -2454,20 +2399,32 @@ function QuestionWizardBox({
   approvalId: string;
   detail: Record<string, unknown>;
   onCancel: () => void;
-  onSubmit: (answers: Record<string, unknown>) => void;
+  onSubmit: (answers: QuestionAnswers, files: QuestionAttachments) => boolean;
 }) {
-  // plan-238-1188: 作答草稿持久化到 store（按 approvalId 键控）。
-  // 此前 answers/stepIndex/customText 全为组件本地 state，切到设置页会卸载
-  // ComposerCore，返回后已选答案与当前题号全部丢失。
-  const questionDraft = useScoped("questionDraft");
-  const setQuestionDraft = useScoped("setQuestionDraft");
-
-  const draft = questionDraft && questionDraft.approvalId === approvalId ? questionDraft : null;
-  const stepIndex = draft?.stepIndex ?? 0;
-  const answers = draft?.answers ?? {};
-  const [customText, setCustomText] = useState("");
+  const draft = useQuestionDrafts((state) => state[approvalId]) ?? emptyQuestionDraft;
+  const sessionId = useScoped("currentSessionId");
+  const { answers, uploading, submitting, error } = draft;
+  const stepIndex = draft.step;
+  const questionKey = String(stepIndex);
+  const customText = draft.custom[questionKey] ?? "";
+  const files = draft.files[questionKey] ?? [];
   const customInputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const wizardRef = useRef<HTMLDivElement>(null);
+  const setCustomText = (text: string) => updateQuestionDraft(approvalId, (current) => ({
+    custom: { ...current.custom, [questionKey]: text }, error: "",
+  }));
+  const addFiles = async (selected: File[]) => {
+    if (!selected.length || submitting) return;
+    updateQuestionDraft(approvalId, (current) => ({ uploading: current.uploading + 1, error: "" }));
+    const { uploaded, failures } = await uploadComposerFiles(selected);
+    if (!useQuestionDrafts.getState()[approvalId]) return;
+    updateQuestionDraft(approvalId, (current) => ({
+      files: { ...current.files, [questionKey]: [...(current.files[questionKey] ?? []), ...uploaded] },
+      uploading: current.uploading - 1,
+      ...(failures.length ? { error: failures.join("；") } : {}),
+    }));
+  };
   // plan-278-1391: 选项浮窗——单行截断的长选项在悬停/键盘聚焦时完整展示。
   const [optTip, setOptTip] = useState<
     { text: string; top: number; left: number; maxWidth: number; placement: "top" | "bottom" } | null
@@ -2504,7 +2461,7 @@ function QuestionWizardBox({
   const hideOptTip = () => setOptTip(null);
 
   const writeDraft = (next: { stepIndex: number; answers: Record<string, QuestionAnswer> }) => {
-    setQuestionDraft({ approvalId, stepIndex: next.stepIndex, answers: next.answers });
+    updateQuestionDraft(approvalId, () => ({ step: next.stepIndex, answers: next.answers }));
   };
 
   const questions = (Array.isArray(detail.questions) ? detail.questions : []) as Array<{
@@ -2528,7 +2485,7 @@ function QuestionWizardBox({
    *  1) 多选题始终保留一行「补充自定义输入」（勾选项之外还能自己写）；
    *  2) 模型只提开放式问题、不给选项时也必须有输入行——否则选项区整块不渲染，
    *     卡片只剩「忽略」可用（用户实测）。 */
-  const showCustom = multiple || allowCustom || currentOptions.length === 0;
+  const showCustom = allowCustom || currentOptions.length === 0;
   /** 当前题已存的答案：单选/自定义输入是字符串，多选是「勾选选项 + 自定义补充」的数组 */
   const rawAnswer = answers[String(stepIndex)];
   const answerList = Array.isArray(rawAnswer)
@@ -2537,16 +2494,9 @@ function QuestionWizardBox({
   /** 已勾选的选项——按选项原始顺序排列，勾选/回填的位置都稳定 */
   const pickedOptions = currentOptions.filter((opt) => answerList.includes(opt));
   /** 答案里的自定义补充（不在选项内的文本） */
-  const answerCustom = answerList.filter((x) => !currentOptions.includes(x)).join("\n");
+  const answerCustom = customText;
   /** 单选等价物：选中项或自定义文本（多选态下不参与导航） */
   const currentAnswer = multiple ? "" : (answerList[0] ?? "");
-
-  useEffect(() => {
-    // 切题 / 回填：把该题已存的答案搬回输入框（多选与单选共用一个文本框）
-    setCustomText(answerCustom);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stepIndex, multiple, answerCustom]);
-
 
   /** 自定义回答高度随内容自适应（上限见 CSS 的 max-height）。
    *  原生支持 field-sizing（见 supportsFieldSizing）时高度由浏览器按内容算，这里直接跳过；
@@ -2587,27 +2537,47 @@ function QuestionWizardBox({
     return extra ? [...ordered, extra] : ordered;
   };
   /** 当前题是否已有可提交的答案：单选看选中项或自定义文本，多选看勾选项与自定义补充 */
-  const hasAnswer = multiple
+  const hasAnswer = files.length > 0 || (multiple
     ? pickedOptions.length > 0 || customText.trim() !== ""
-    : !!(customText.trim() || currentAnswer);
+    : !!(customText.trim() || currentAnswer));
   /** 提交一题：末题提交回答，其余跳到下一题（提交成功路径会清空草稿） */
   const commitAnswer = (value: QuestionAnswer) => {
-    const updated = { ...answers, [String(stepIndex)]: value };
+    const current = useQuestionDrafts.getState()[approvalId] ?? emptyQuestionDraft;
+    if (current.uploading || current.submitting) return;
+    const updated = { ...current.answers, [questionKey]: value };
     if (stepIndex < total - 1) {
       writeDraft({ stepIndex: stepIndex + 1, answers: updated });
-    } else {
-      writeDraft({ stepIndex, answers: updated });
-      setTimeout(() => onSubmit(updated), 180);
+      return;
+    }
+    const missing = questions.findIndex((_, index) => {
+      const key = String(index);
+      const answer = updated[key];
+      return !current.files[key]?.length && !(Array.isArray(answer) ? answer.length : answer?.trim());
+    });
+    if (missing >= 0) {
+      writeDraft({ stepIndex: missing, answers: updated });
+      return;
+    }
+    writeDraft({ stepIndex, answers: updated });
+    startQuestionSubmission(approvalId);
+    if (!onSubmit(updated, current.files)) {
+      rejectQuestionSubmission(approvalId, "会话连接尚未恢复，请稍后重试。");
     }
   };
 
   const handlePickOption = (opt: string) => {
+    if (submitting || uploading > 0) return;
     // 多选：只切换勾选、不跳题——用户还要继续勾其它项或补充自定义输入，由底栏按钮提交
     if (multiple) {
       const picked = pickedOptions.includes(opt)
         ? pickedOptions.filter((x) => x !== opt)
         : [...pickedOptions, opt];
       writeDraft({ stepIndex, answers: { ...answers, [String(stepIndex)]: buildMultiAnswer(picked, customText) } });
+      return;
+    }
+    if (files.length > 0) {
+      setCustomText("");
+      writeDraft({ stepIndex, answers: { ...answers, [questionKey]: opt } });
       return;
     }
     setCustomText("");
@@ -2621,19 +2591,19 @@ function QuestionWizardBox({
       return;
     }
     const text = customText.trim() || currentAnswer;
-    if (!text) return;
-    setCustomText("");
+    if (!text && !files.length) return;
     commitAnswer(text);
   };
 
-  /** 键盘：Tab / Shift+Tab、↑↓ 切换高亮项，回车确认高亮项（与底部「Tab / 上下键切换 · 回车确认」一致）。
+  /** 键盘：Tab / Shift+Tab、↑↓ 切换高亮项，回车确认高亮项（与底部「上下键切换 · 回车确认」一致）。
    *  只在焦点落在页面本身或卡片内时接管；焦点在侧栏输入框、设置页、弹窗等处时不抢按键。
    *  挂到 window 上：提问卡出现后不必先点一下卡片，键盘即可操作。 */
   const kbHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
   kbHandlerRef.current = (e: KeyboardEvent) => {
     const ae = document.activeElement;
     if (ae && ae !== document.body && !wizardRef.current?.contains(ae)) return;
-    if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey || optionCount === 0) return;
+    if (ae?.closest("[data-question-control]") || (e.key === "Tab" && ae !== document.body)) return;
     // 自定义回答已含换行：上下键交给光标在多行文本内移动，不抢占选项导航
     if ((e.key === "ArrowUp" || e.key === "ArrowDown") && ae === customInputRef.current && customText.includes("\n")) return;
     const hl = questionEnterIndex(kbIndex, optionCount, customIdx, ae === customInputRef.current);
@@ -2651,7 +2621,7 @@ function QuestionWizardBox({
       if (e.repeat) return; // 按住回车的自动重复不连续确认多道题
       if (hl < customIdx) {
         handlePickOption(currentOptions[hl]);
-      } else if (multiple ? hasAnswer : customText.trim()) {
+      } else if (multiple ? hasAnswer : (files.length > 0 || customText.trim())) {
         // 多选：停在自定义行回车即提交（勾选项 + 自定义补充）；单选沿用「有输入才提交」
         handleNextCustom();
       } else {
@@ -2669,7 +2639,21 @@ function QuestionWizardBox({
   const taskTag = String(detail.task_tag || detail.agent_name || "问答偏好");
 
   return (
-    <div className="composer-question-wizard" ref={wizardRef}>
+    <div className="composer-question-wizard" ref={wizardRef}
+      onDragOver={(event) => {
+        if (!showCustom || !event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!showCustom) return;
+        const dropped = splitDroppedEntries(event.dataTransfer);
+        if (dropped.dirs.length) {
+          updateQuestionDraft(approvalId, () => ({ error: "请选择文件作为回答附件。" }));
+        }
+        void addFiles(dropped.files);
+      }}>
       <div className="question-wizard-header">
         <div className="question-wizard-title-group">
           <span className="question-wizard-tag">{taskTag}</span>
@@ -2682,13 +2666,14 @@ function QuestionWizardBox({
         <div className="question-wizard-pager">
           {/* 题型标注：多选题（ta3 官方 multiple）与单选在交互上完全不同，卡片必须自带说明 */}
           <span className={`question-wizard-mode${multiple ? " is-multiple" : ""}`}>
-            {multiple ? "多选" : "单选"}
+            {currentOptions.length ? (multiple ? "多选" : "单选") : "开放题"}
           </span>
           <Tooltip content="上一题">
             <button
               type="button"
               className="question-wizard-pager-btn"
-              disabled={stepIndex === 0}
+              data-question-control
+              disabled={submitting || stepIndex === 0}
               onClick={() => writeDraft({ stepIndex: Math.max(0, stepIndex - 1), answers })}
               aria-label="上一题"
             >
@@ -2702,7 +2687,8 @@ function QuestionWizardBox({
             <button
               type="button"
               className="question-wizard-pager-btn"
-              disabled={stepIndex >= total - 1}
+              data-question-control
+              disabled={submitting || stepIndex >= total - 1}
               onClick={() => writeDraft({ stepIndex: Math.min(total - 1, stepIndex + 1), answers })}
               aria-label="下一题"
             >
@@ -2724,6 +2710,7 @@ function QuestionWizardBox({
                 type="button"
                 className={`question-wizard-opt-btn${isSelected ? " selected" : ""}${kbIndex === optIdx ? " is-kb" : ""}`}
                 onClick={() => handlePickOption(opt)}
+                disabled={submitting || uploading > 0}
                 aria-pressed={multiple ? isSelected : undefined}
                 onMouseEnter={(e) => showOptTip(e, opt)}
                 onMouseLeave={hideOptTip}
@@ -2744,45 +2731,88 @@ function QuestionWizardBox({
 
           {showCustom && (
             <div className={`question-wizard-custom-row${kbIndex === customIdx ? " is-kb" : ""}`}>
-              <span className="question-wizard-opt-num">{currentOptions.length + 1}.</span>
-              {/* 回车确认由卡片级键盘处理统一负责（见 kbHandlerRef），这里只把高亮移到自定义行 */}
-              {/* 多行文本：回车确认（卡片级键盘处理），Shift+回车换行 */}
-              <textarea
-                ref={customInputRef}
-                className="question-wizard-custom-input"
-                rows={1}
-                placeholder={multiple ? "可补充自定义输入，回车确认，Shift+回车换行…" : "输入自定义回答，回车确认，Shift+回车换行…"}
-                value={customText}
-                onChange={(e) => {
-                  setCustomText(e.target.value);
-                  setKbIndex(customIdx);
-                }}
-                onFocus={() => setKbIndex(customIdx)}
-              />
+              {/* plan-20261118-question-answer-layout：附件和正文共用边界，切题时按题更新折叠内容。 */}
+              <Collapse key={questionKey} open={files.length > 0 || uploading > 0} lazy className="question-wizard-attachments">
+                <ComposerAttachments files={files} sessionId={sessionId} uploading={uploading > 0}
+                  onRemove={submitting ? undefined : (index) => updateQuestionDraft(approvalId, (current) => ({
+                    files: { ...current.files, [questionKey]: (current.files[questionKey] ?? []).filter((_, i) => i !== index) },
+                    error: "",
+                  }))} />
+              </Collapse>
+              <div className="question-wizard-custom-line">
+                <label className="question-wizard-custom-editor">
+                  {currentOptions.length > 0 && (
+                    <span className="question-wizard-opt-num" aria-hidden="true">{currentOptions.length + 1}.</span>
+                  )}
+                  <textarea
+                    ref={customInputRef}
+                    className="question-wizard-custom-input"
+                    rows={1}
+                    aria-label="自定义回答"
+                    placeholder={currentOptions.length === 0 ? "输入回答" : multiple ? "补充说明" : "输入自定义回答"}
+                    value={customText}
+                    disabled={submitting}
+                    onPaste={(event) => {
+                      const pasted = getPastedFiles(event.clipboardData);
+                      if (pasted.length) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        void addFiles(pasted);
+                      }
+                    }}
+                    onChange={(e) => {
+                      const text = e.target.value;
+                      setCustomText(text);
+                      writeDraft({ stepIndex, answers: {
+                        ...answers, [questionKey]: multiple ? buildMultiAnswer(pickedOptions, text) : text,
+                      } });
+                      setKbIndex(customIdx);
+                    }}
+                    onFocus={() => setKbIndex(customIdx)}
+                  />
+                </label>
+                <Tooltip content="添加回答附件">
+                  <Button type="button" variant="ghost" size="xs" iconOnly data-question-control
+                    icon={<IconPaperclip size={14} />} aria-label="添加回答附件" disabled={submitting}
+                    onClick={() => fileInputRef.current?.click()} />
+                </Tooltip>
+              </div>
+              <input ref={fileInputRef} type="file" multiple hidden
+                onChange={(event) => {
+                  const selected = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                  void addFiles(selected);
+                }} />
             </div>
           )}
         </div>
       )}
+      {error && <div className="question-wizard-error" role="alert">{error}</div>}
 
       <div className="question-wizard-footer">
         <div className="question-wizard-hint">
-          <span>{multiple ? "Tab / 上下键切换 · 回车勾选（可多选）" : "Tab / 上下键切换 · 回车确认"}</span>
+          <span>{currentOptions.length > 0 ? (multiple ? "上下键切换 · 回车勾选" : "上下键切换 · 回车确认") : "回车确认"}</span>
+          {showCustom && <span>Shift+回车换行</span>}
         </div>
         <div className="question-wizard-actions">
-          <button
+          <Button
             type="button"
-            className="btn-ghost"
-            style={{ fontSize: "11.5px", padding: "4px 10px" }}
+            variant="ghost"
+            size="sm"
             onClick={onCancel}
+            disabled={submitting}
+            data-question-control
           >
             忽略
-          </button>
+          </Button>
           {/* plan-20261020-pts：原借用计划卡私有按钮类 .plan-inline-confirm（已随计划卡重做删除），改用统一按钮 */}
           <Button
             variant="primary"
             size="sm"
             onClick={handleNextCustom}
-            disabled={!hasAnswer}
+            disabled={!hasAnswer || uploading > 0 || submitting}
+            loading={submitting}
+            data-question-control
           >
             {stepIndex < total - 1 ? "继续" : "提交回答"}
           </Button>

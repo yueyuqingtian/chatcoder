@@ -116,9 +116,11 @@ export function GeneralPanel() {
   // 终端 Shell：后端按本机实际安装情况给出可用性，未安装的置灰并标注
   const [shells, setShells] = useState<TerminalShellOption[] | null>(null);
   useEffect(() => {
-    api.getTerminalOptions()
-      .then((o) => setShells(o.shells?.length ? o.shells : null))
-      .catch(() => setShells(null));
+    const controller = new AbortController();
+    api.getTerminalOptions(controller.signal)
+      .then((o) => { if (!controller.signal.aborted) setShells(o.shells?.length ? o.shells : null); })
+      .catch(() => { if (!controller.signal.aborted) setShells(null); });
+    return () => controller.abort();
   }, []);
   const shellOptions = useMemo<SelectOption[]>(() => {
     const list: Array<{ value: string; label: string; available: boolean }> =
@@ -158,10 +160,11 @@ export function GeneralPanel() {
   // 加载失败时禁止写回：此时界面只是默认值，任何改动若落盘都会覆盖已保存的配置（如 HTTP 代理）
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoadError("");
     try {
-      const g = await api.getGlobalSettings();
+      const g = await api.getGlobalSettings(signal);
+      if (signal?.aborted) return;
       setCfg({
         terminal_shell: g.terminal_shell || "auto",
         terminal_font: g.terminal_font || DEFAULT_TERMINAL_FONT,
@@ -183,10 +186,14 @@ export function GeneralPanel() {
       setRgSource(g.ripgrep_source);
       setLoaded(true);
     } catch (e) {
-      setLoadError(String(e));
+      if (!signal?.aborted) setLoadError(String(e));
     }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
   /** 改动即保存——本地 state 立即更新，300ms 防抖后写后端（连续拖动只落一次） */
   const patch = (p: Partial<typeof cfg>) => {

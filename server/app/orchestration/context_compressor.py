@@ -9,7 +9,7 @@
 
 对齐 deepseek-harness 的关键设计：
 1. region 选择（select_compactable_range）：保留最近 retain_tokens，向前对齐
-   tool_call/tool_result 配对边界，绝不拆散工具回合；
+   tool_call/tool_result 配对边界，绝不拆散已有工具配对；
 2. 阴影定价：压缩结果记录 shadowed_ids / shadowed_tokens / saved_tokens，
    前端据此渲染压缩卡片（压缩了哪些消息、省了多少 token）；
 3. 结构化 checkpoint：COMPACTION_PROMPT 9 段 + <compacted-summary> 帧 +
@@ -79,9 +79,11 @@ def _collect_attachment_lines(messages: list) -> list[str]:
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     for m in messages:
-        if m.msg_type != MsgType.TEXT.value:
-            continue
         content = m.content if isinstance(m.content, dict) else {}
+        if m.msg_type != MsgType.TEXT.value and not (
+            m.msg_type == MsgType.TOOL_RESULT.value and content.get("tool") == "ask_user_question"
+        ):
+            continue
         atts = content.get("attachments") or []
         if not isinstance(atts, list):
             continue
@@ -154,8 +156,8 @@ def select_compactable_range(messages: list, retain_tokens: int) -> tuple[int, i
     """按 token 预算 + tool 配对边界选择压缩范围（参照 deepseek-harness region.ts）。
 
     从尾部向前累计 token 至 retain_tokens 得初始切点 k0，再向后移动切点
-    找到第一个"配对平衡"位置 k：压缩区 [0, k-1] 内每个 tool_call 都有
-    配对的 tool_result、保留区 [k:] 内没有孤立的 tool_result。
+    找到第一个"配对平衡"位置 k：已有 tool_call/tool_result 不跨区，
+    保留区 [k:] 内没有孤立的 tool_result，历史中断调用可进入压缩区。
 
     Args:
         messages: 按时间正序的消息列表（DB Message）。
@@ -192,8 +194,8 @@ def select_compactable_range(messages: list, retain_tokens: int) -> tuple[int, i
 def _is_pairing_balanced(messages: list, k: int) -> bool:
     """切点 k 是否配对平衡。
 
-    1. 压缩区 [0,k-1] 内每个 tool_call 都必须在压缩区内配对闭合
-       （result 落在保留区 = 配对被切断，不合法）；
+    1. 压缩区 [0,k-1] 内 tool_call 已存在的结果不能落在保留区
+       （历史中断后没有结果的调用不构成跨区配对）；
     2. 保留区 [k:] 内每个 tool_result 的配对 call 也必须在保留区内且在其前
        （call 落在压缩区 = 保留区出现孤立 result，不合法）。
     """
@@ -211,7 +213,12 @@ def _is_pairing_balanced(messages: list, k: int) -> bool:
             open_ids.add(_call_key(m))
         elif m.msg_type == MsgType.TOOL_RESULT.value:
             open_ids.discard(_call_key(m))
-    if open_ids:
+    # plan-20261117-compact-trigger：中断的 ask_user_question 等调用可能永远没有结果。
+    # 把它们当成跨区配对会使所有后续切点失效，只能内存压缩，下一轮又载入全部旧历史。
+    # 只拦截结果真实存在于保留区的调用，仍由下方检查防止保留区出现孤立结果。
+    retained_result_ids = {_call_key(m) for m in messages[k:]
+                           if m.msg_type == MsgType.TOOL_RESULT.value}
+    if open_ids & retained_result_ids:
         return False
     call_keys: set[str] = set()
     for m in messages[k:]:

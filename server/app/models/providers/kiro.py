@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from app.orchestration.history_sequence import record_wire_prefix
 from app.models.base import ModelProvider
 from app.models.providers.tool_args import parse_tool_args
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
@@ -548,9 +549,12 @@ class KiroProvider(ModelProvider):
         from app.orchestration.history_sequence import prepare_history, validate_kiro_wire
         for msg in prepare_history(request.messages):
             if msg.role in ("system", "developer"):
-                if msg.content:
+                if not msg.content:
+                    continue
+                if not turns and not pending_results:
                     system_parts.append(msg.content)
-                continue
+                    continue
+                msg = ChatMessage(role="user", content=f"<system-reminder>\n{msg.content}\n</system-reminder>")
 
             if msg.role == "user":
                 # 工具结果与用户输入同轮：挂到本条 user 消息上（Anthropic 语义）
@@ -698,7 +702,12 @@ class KiroProvider(ModelProvider):
         profile_arn = self._profile_arn()
         if profile_arn:
             payload["profileArn"] = profile_arn
-        return validate_kiro_wire(payload)
+        validated = validate_kiro_wire(payload)
+        if logger.isEnabledFor(logging.DEBUG):
+            record_wire_prefix("kiro", {
+                "model": model_id, "tools": request.tools, "messages": [*history, state["currentMessage"]],
+            })
+        return validated
 
     # ─────────────────────────── 事件解析 ───────────────────────────
 

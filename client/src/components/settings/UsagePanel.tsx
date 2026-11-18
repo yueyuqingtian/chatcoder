@@ -113,25 +113,29 @@ export function UsagePanel() {
   // ── 概览数据：筛选或刷新变化时拉取；用序号丢弃过期响应，快速连点不会让旧结果覆盖新结果 ──
   useEffect(() => {
     if (!rangeReady) return;
+    const controller = new AbortController();
     const seq = ++statsSeq.current;
     setStatsLoading(true);
     setStatsError(null);
-    api.getUsageStats(rangeParams)
-      .then((s) => { if (seq === statsSeq.current) setStats(s); })
-      .catch((e) => { if (seq === statsSeq.current) setStatsError(String(e)); })
-      .finally(() => { if (seq === statsSeq.current) setStatsLoading(false); });
+    api.getUsageStats(rangeParams, controller.signal)
+      .then((s) => { if (!controller.signal.aborted && seq === statsSeq.current) setStats(s); })
+      .catch((e) => { if (!controller.signal.aborted && seq === statsSeq.current) setStatsError(String(e)); })
+      .finally(() => { if (!controller.signal.aborted && seq === statsSeq.current) setStatsLoading(false); });
+    return () => controller.abort();
   }, [rangeParams, rangeReady, tick]);
 
   // ── 调用记录：只在「调用记录」视图下拉取；翻页 / 筛选 / 刷新都会触发 ──
   useEffect(() => {
     if (tab !== "records" || !rangeReady) return;
+    const controller = new AbortController();
     const seq = ++recSeq.current;
     setRecLoading(true);
     setRecError(null);
-    api.getUsageRecords({ ...rangeParams, page, page_size: RECORDS_PAGE_SIZE })
-      .then((r) => { if (seq === recSeq.current) setRecords(r); })
-      .catch((e) => { if (seq === recSeq.current) setRecError(String(e)); })
-      .finally(() => { if (seq === recSeq.current) setRecLoading(false); });
+    api.getUsageRecords({ ...rangeParams, page, page_size: RECORDS_PAGE_SIZE }, controller.signal)
+      .then((r) => { if (!controller.signal.aborted && seq === recSeq.current) setRecords(r); })
+      .catch((e) => { if (!controller.signal.aborted && seq === recSeq.current) setRecError(String(e)); })
+      .finally(() => { if (!controller.signal.aborted && seq === recSeq.current) setRecLoading(false); });
+    return () => controller.abort();
   }, [tab, rangeParams, rangeReady, page, tick]);
 
   const applyFilters = useCallback((patch: Partial<Filters>) => {

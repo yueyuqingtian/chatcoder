@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.attachment_service import run_attachment_io
 from app.core.config import settings
 from app.models.schemas import ChatMessage
 from app.orchestration.approval_policy import (
@@ -107,6 +108,7 @@ def _attachment_abs_path(rel: str) -> str:
 class ContextBundle:
     system: str
     developer_parts: list[str] = field(default_factory=list)
+    turn_parts: list[str] = field(default_factory=list)
     history: list[ChatMessage] = field(default_factory=list)
     checkpoints: list[ChatMessage] = field(default_factory=list)
     instruction: str = ""
@@ -161,9 +163,11 @@ class ContextBundle:
         # 模型倾向续写旧内容。显式声明"上一任务已结束、以下是新指令"可显著降低该倾向。
         if self.task_boundary and self.history:
             messages.append(ChatMessage(role="system", content=self.task_boundary))
-        if self.instruction or self.instruction_blocks:
+        if self.instruction or self.instruction_blocks or self.turn_parts:
+            reminder = _ta3_system_reminder("\n\n".join(self.turn_parts))
+            instruction = "\n\n".join(part for part in (reminder, self.instruction) if part)
             messages.append(ChatMessage(
-                role="user", content=self.instruction, context_kind="current_task",
+                role="user", content=instruction, context_kind="current_task",
                 content_blocks=self.instruction_blocks,
                 skill_load_snapshots=self.instruction_skill_snapshots,
             ))
@@ -1672,7 +1676,7 @@ async def build_main_context(
             _browser_on = browser_tools_enabled()
         system_prompt = build_main_system_prompt(enable_subagents=enable_subagents,
                                                  plan_flow_enabled=_is_plan_mode,
-                                                 language=_reply_lang,
+                                                 language=_reply_lang if _lang_source in ("global", "project") else "auto",
                                                  language_source=_lang_source,
                                                  desktop_enabled=bool(getattr(settings, "desktop_enabled", False)),
                                                  browser_enabled=_browser_on,
@@ -1705,17 +1709,16 @@ async def build_main_context(
     # 其他供应商保持原有行为（逐字节不变）。
     if ta3_meta is None:
         if goal and goal.get("text"):
-            bundle.developer_parts.append(
+            bundle.turn_parts.append(
                 f"## Current Goal\n{goal['text'][:2000]}\n"
                 f"（目标模式激活：持续朝该目标工作；完成前先对照目标逐条核验证据（运行测试/读取结果），"
                 f"确认达成后调用 {goal_tool_name}，未达成就继续推进，不要提前宣告完成；已续跑 {goal.get('turns_used', 0)} 轮）"
             )
-        else:
-            bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
+        bundle.developer_parts.append("## Current Goal\n以对话末尾的最新用户消息为本轮目标。")
         # 1.1 Reply Language（plan-19-82）：显式语言锚点，紧随 Current Goal。
         # 语言纪律已作为系统提示首尾双锚注入，这里再在注意力最高处落一行单锚，降低漂移。
         from app.orchestration.prompts.language import build_language_pin_line
-        bundle.developer_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
+        bundle.turn_parts.append(build_language_pin_line(_reply_lang, source=_lang_source))
     elif goal and goal.get("text"):
         # plan-601-2495：官方目标续轮把「当前目标 + 结束方式」放在 role=user 的运行时消息里
         # （goalRoundDriver.js:129-165：完成调 update_goal(complete)）。chatcoder 没有
@@ -1893,14 +1896,14 @@ async def build_main_context(
         # plan-601-2495：计划多轮继承是 chatcoder 计划模式的机制保证（功能必需），
         # ta3 下改放当轮 user 消息的 <system-reminder>
         if ta3_meta is None:
-            bundle.developer_parts.append(_ph)
+            bundle.turn_parts.append(_ph)
         else:
             _ta3_reminders.append(_ph)
     # plan-601-2495：Session Memory（turn 摘要）在 ta3 下去掉——历史消息已完整回放，
     # 官方没有这一段，重复注入只增加噪声。
     mem_summary = await _session_memory_summary(db, session.id) if ta3_meta is None else ""
     if mem_summary:
-        bundle.developer_parts.append(f"## Session Memory\n{mem_summary}")
+        bundle.turn_parts.append(f"## Session Memory\n{mem_summary}")
     # plan-230-1144 M4.1: 传 project_id——三层记忆（会话→项目→全局）合并注入
     # plan-537-2256：记忆关闭时必须同时停住「写」与「读」。此前开关只在自动提取一处生效，
     # 关闭后旧记忆仍会每轮注入；这里补上读取侧门禁。
@@ -1912,9 +1915,14 @@ async def build_main_context(
         if ta3_meta is not None:
             # plan-601-2495：官方「自由对话」（工作区显式为空串）不注入记忆段；chatcoder 无项目
             # 会话仍有全局 / 会话记忆，保留注入以免丢功能（项目目录插值按 default 分区）。
-            _ta3_sys["memory"] = await _build_ta3_memory_injection(
+            memory_prompt = await _build_ta3_memory_injection(
                 db, session.id, project_id=getattr(project, "id", None), workspace=workspace,
             )
+            # plan-20261118-runtime-question-cache：记忆说明保持稳定，动态索引跟随本轮输入。
+            instructions, separator, memory_index = memory_prompt.partition("\n\n<system-reminder>\n")
+            _ta3_sys["memory"] = instructions
+            if separator:
+                _ta3_reminders.append(memory_index.removesuffix("\n</system-reminder>"))
             memories = ""
         else:
             memories = await _load_memories(
@@ -1924,7 +1932,7 @@ async def build_main_context(
                 task_keywords=_task_keywords(user_message),
             )
         if memories:
-            bundle.developer_parts.append(
+            bundle.turn_parts.append(
                 "## Your Memory (from previous tasks)\n"
                 f"{memories}\n"
                 # plan-537-2256：三行固定纪律（借 ZCode 的做法）。不加这三行时，模型容易把旧笔记
@@ -2028,7 +2036,7 @@ async def build_main_context(
             # 否则「历史估算没超限、整包请求却超窗」。工具 schema 在重建阶段拿不到，
             # 用 95% 上限预留 5% 给它。
             _est_fixed = rough_token_estimate(bundle.system) + sum(
-                rough_token_estimate(p) for p in bundle.developer_parts)
+                rough_token_estimate(p) for p in (*bundle.developer_parts, *bundle.turn_parts))
             _est_fixed += sum(rough_token_estimate(m.content or "") for m in bundle.checkpoints)
             if ta3_meta is not None:
                 # plan-601-2495：ta3 的官方段与 user 侧提醒不在 developer_parts 里，同样占窗口
@@ -2198,7 +2206,7 @@ async def build_main_context(
                     # 模型被迫再次走工具读图却只拿到元信息。限制复用注入常量。
                     _img_blocks = None
                     if multimodal and atts and isinstance(atts, list):
-                        _img_blocks, _ = _load_inline_image_blocks(atts)
+                        _img_blocks, _ = await run_attachment_io(_load_inline_image_blocks, atts)
                         if not _img_blocks:
                             _img_blocks = None
                     text = f"{text}\n{att_note}" if att_note else text
@@ -2259,7 +2267,7 @@ async def build_main_context(
                 call_key = m.content.get("call_key", "") or f"call_{m.id}"
                 output = m.content.get("output", "") or ""
                 error = m.content.get("error", "") or ""
-                result_text = output or error or "(无输出)"
+                result_text = m.content.get("model_content") or output or error or "(无输出)"
                 # plan-522-2209：历史重建与实时路径共用同一份呈现口径（output_paging.present_for_model）。
                 # 此前这里写死 16000 字符硬截断，压缩/重建后模型看到的输出比刚跑完时更短、且无法续读——
                 # 与 agent_loop 那段「两处用同一份文本」的承诺直接冲突。
@@ -2276,6 +2284,7 @@ async def build_main_context(
                     content=result_text,
                     name=tool_name,
                     tool_call_id=call_key,
+                    answer_attachments=m.content.get("attachments") if tool_name == "ask_user_question" else None,
                 ))
         # 循环结束：暂存的 agent 文本（无后续 tool_call）作为独立 assistant 消息
         _flush_agent_text()
@@ -2346,7 +2355,7 @@ async def build_main_context(
     if refs_text:
         _refs_part = f"## 本轮引用（用户显式点名，优先满足）\n{refs_text}"
         if ta3_meta is None:
-            bundle.developer_parts.append(_refs_part)
+            bundle.turn_parts.append(_refs_part)
         else:
             # plan-601-2495：本轮引用是当轮意图（官方 <context-skills> 同样放在 user 消息里，
             # contextEnrichment.js:193-242），ta3 下放当轮 user 消息
@@ -2370,7 +2379,7 @@ async def build_main_context(
                 + "\n".join(att_lines)
             )
             if multimodal:
-                blocks, notes = _load_inline_image_blocks(attachments)
+                blocks, notes = await run_attachment_io(_load_inline_image_blocks, attachments)
                 if blocks:
                     bundle.instruction_blocks = blocks
                     hint += (
@@ -2405,7 +2414,7 @@ async def build_main_context(
                     "（不要改写、不要加引号）。"
                 )
             if ta3_meta is None:
-                bundle.developer_parts.append(hint)
+                bundle.turn_parts.append(hint)
             else:
                 # plan-601-2495：附件属于当轮用户输入，ta3 下放当轮 user 消息
                 _ta3_reminders.append(_ta3_rewrite_tool_names(hint, ("read_attachment",)))

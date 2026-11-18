@@ -75,81 +75,74 @@ async def usage_stats(
     # ── 时间区间（本地日期，闭区间）──
     start_d, end_d, today, t_start, t_end = _resolve_range(start, end, days)
 
-    rows = (
-        (await db.execute(
-            select(UsageRecord).where(
-                UsageRecord.created_at >= t_start,
-                UsageRecord.created_at < t_end,
-            )
-        )).scalars().all()
-    )
-
-    # ── 历史行供应商名回填（model_id → Model → Provider）──
-    ids = {r.model_id for r in rows if r.model_id is not None}
-    model_map: dict[int, tuple[str, str]] = {}
-    if ids:
-        mrows = (await db.execute(select(Model).where(Model.id.in_(ids)))).scalars().all()
-        pid_set = {m.provider_id for m in mrows if m.provider_id is not None}
-        prov = {}
-        if pid_set:
-            prows = (await db.execute(select(Provider).where(Provider.id.in_(pid_set)))).scalars().all()
-            prov = {p.id: p.name for p in prows}
-        model_map = {m.id: (m.name, prov.get(m.provider_id, "")) for m in mrows}
-
-    def resolve(r) -> tuple[str, str, str, str]:
-        """返回 (key, model, provider, display_name)。"""
-        if r.model_id is not None:
-            key = str(r.model_id)
-            name = r.model_name or (model_map.get(r.model_id, ("", ""))[0] if r.model_id in model_map else "")
-            provider_name = r.provider_name or (model_map.get(r.model_id, ("", ""))[1] if r.model_id in model_map else "")
-        else:
-            key = f"name::{r.model_name or '未知模型'}"
-            name = r.model_name or "未知模型"
-            provider_name = r.provider_name or ""
-        display = f"{provider_name}/{name}" if provider_name else (name or "未知模型")
-        return key, name, provider_name, display
-
-    # plan-308-1542 需求6：先算出"本次区间内出现过的全部供应商"（不受 provider 筛选影响），
-    # 供前端下拉框展示可选项；再进行实际筛选。
-    all_providers = sorted({resolve(r)[2] for r in rows if resolve(r)[2]})
+    # plan-20261118-runtime-question-cache：同一次投影服务区间统计和全量热力图，避免全量 ORM 和重复读库。
+    name = func.coalesce(func.nullif(UsageRecord.model_name, ""), Model.name, "")
+    provider_name = func.coalesce(func.nullif(UsageRecord.provider_name, ""), Provider.name, "")
+    stmt = select(
+        UsageRecord.id, UsageRecord.created_at, UsageRecord.model_id, name, provider_name,
+        UsageRecord.prompt_tokens, UsageRecord.completion_tokens, UsageRecord.reasoning_tokens,
+        UsageRecord.cached_tokens,
+    ).outerjoin(Model, Model.id == UsageRecord.model_id).outerjoin(Provider, Provider.id == Model.provider_id)
     want = (provider or "").strip()
-    if want:
-        rows = [r for r in rows if resolve(r)[2] == want]
-
-    # ── 汇总 ──
+    all_providers: set[str] = set()
     total = {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
+    calls = 0
     by_model: dict[str, dict] = {}
-    daily_map: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # date -> [tokens, calls]
-    daily_by_model: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # key -> date -> tokens
-    # plan-20261022-release-ci：单日区间（默认的「今天」）逐日趋势只有一个点、整张图是空的，
-    # 改为按小时汇总，前端画成 24 小时分布
+    daily_map: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    daily_by_model: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     single_day = start_d == end_d
-    hourly_map: dict[int, list[int]] = defaultdict(lambda: [0, 0])  # hour -> [tokens, calls]
-    hourly_by_model: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))  # key -> hour -> tokens
+    hourly_map: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    hourly_by_model: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    all_map: dict[str, int] = defaultdict(int)
     info: dict[str, dict] = {}
-    for r in rows:
-        total["prompt"] += r.prompt_tokens or 0
-        total["completion"] += r.completion_tokens or 0
-        total["reasoning"] += r.reasoning_tokens or 0
-        total["cached"] += r.cached_tokens or 0
-        key, name, provider, display = resolve(r)
-        slot = by_model.setdefault(key, {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0, "calls": 0})
-        slot["prompt"] += r.prompt_tokens or 0
-        slot["completion"] += r.completion_tokens or 0
-        slot["reasoning"] += r.reasoning_tokens or 0
-        slot["cached"] += r.cached_tokens or 0
-        slot["calls"] += 1
-        info[key] = {"model": name, "provider_name": provider, "display_name": display}
-        d = _local_date_str(r.created_at)
-        tokens = (r.prompt_tokens or 0) + (r.completion_tokens or 0)
-        daily_map[d][0] += tokens
-        daily_map[d][1] += 1
-        daily_by_model[key][d] += tokens
-        if single_day:
-            h = _local_hour(r.created_at)
-            hourly_map[h][0] += tokens
-            hourly_map[h][1] += 1
-            hourly_by_model[key][h] += tokens
+    latest: dict[str, tuple[datetime, int]] = {}
+
+    rows = await db.stream(stmt)
+    try:
+        async for batch in rows.partitions(2048):
+            for rid, dt, mid, mname, pname, p, c, reason, cached in batch:
+                comparable = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                in_range = t_start <= comparable < t_end
+                if in_range and pname:
+                    all_providers.add(pname)
+                if want and pname != want:
+                    continue
+                local = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone()
+                d = local.date().isoformat()
+                p, c, reason, cached = p or 0, c or 0, reason or 0, cached or 0
+                tokens = p + c
+                all_map[d] += tokens
+                if not in_range:
+                    continue
+                calls += 1
+                total["prompt"] += p
+                total["completion"] += c
+                total["reasoning"] += reason
+                total["cached"] += cached
+                key = str(mid) if mid is not None else f"name::{mname or '未知模型'}"
+                slot = by_model.get(key)
+                if slot is None:
+                    slot = by_model[key] = dict.fromkeys((*total, "calls"), 0)
+                slot["prompt"] += p
+                slot["completion"] += c
+                slot["reasoning"] += reason
+                slot["cached"] += cached
+                slot["calls"] += 1
+                if key not in latest or (comparable, rid) >= latest[key]:
+                    latest[key] = (comparable, rid)
+                    shown_name = mname or ("未知模型" if mid is None else "")
+                    display = f"{pname}/{shown_name}" if pname else (shown_name or "未知模型")
+                    info[key] = {"model": shown_name, "provider_name": pname, "display_name": display}
+                daily_map[d][0] += tokens
+                daily_map[d][1] += 1
+                daily_by_model[key][d] += tokens
+                if single_day:
+                    h = local.hour
+                    hourly_map[h][0] += tokens
+                    hourly_map[h][1] += 1
+                    hourly_by_model[key][h] += tokens
+    finally:
+        await rows.close()
 
     by_model_out = [
         {"key": k, **info[k], **v, "total": v["prompt"] + v["completion"]}
@@ -174,33 +167,6 @@ async def usage_stats(
         if t > 0
     ]
 
-    # ── 全历史逐日聚合（热力图 + 峰值 + 连续天数）──
-    # plan-308-1542 需求6：与区间口径保持一致——选定供应商时，热力图/峰值/连续天数
-    # 也只统计该供应商，否则"筛了供应商但热力图没变"会让用户以为筛选没生效。
-    all_rows = (
-        await db.execute(
-            select(UsageRecord.created_at, UsageRecord.prompt_tokens, UsageRecord.completion_tokens,
-                   UsageRecord.model_id, UsageRecord.model_name, UsageRecord.provider_name)
-        )
-    ).all()
-    all_prov_ids = {r[3] for r in all_rows if r[3] is not None}
-    all_model_map: dict[int, str] = {}
-    if all_prov_ids:
-        _mrows = (await db.execute(select(Model).where(Model.id.in_(all_prov_ids)))).scalars().all()
-        _pids = {m.provider_id for m in _mrows if m.provider_id is not None}
-        _prov = {}
-        if _pids:
-            _prows = (await db.execute(select(Provider).where(Provider.id.in_(_pids)))).scalars().all()
-            _prov = {p.id: p.name for p in _prows}
-        all_model_map = {m.id: _prov.get(m.provider_id, "") for m in _mrows}
-
-    all_map: dict[str, int] = defaultdict(int)
-    for dt, p, c, mid, mname, pname in all_rows:
-        if want:
-            prov_name = pname or (all_model_map.get(mid, "") if mid is not None else "")
-            if prov_name != want:
-                continue
-        all_map[_local_date_str(dt)] += (p or 0) + (c or 0)
     daily_all = [{"date": d, "tokens": t} for d, t in sorted(all_map.items())]
     peak_tokens = max((v["tokens"] for v in daily_all), default=0)
 
@@ -224,7 +190,7 @@ async def usage_stats(
     perf = await _perf_summary(db, perf_conds)
 
     return {
-        "total": {**total, "total": total["prompt"] + total["completion"], "calls": len(rows)},
+        "total": {**total, "total": total["prompt"] + total["completion"], "calls": calls},
         "by_model": by_model_out,
         "daily": daily_out,
         "daily_by_model": daily_by_model_out,
@@ -238,7 +204,7 @@ async def usage_stats(
         "streak_current": streak_current,
         "streak_longest": longest,
         # plan-308-1542 需求6：供应商筛选 + 可选列表
-        "providers": all_providers,
+        "providers": sorted(all_providers),
         "provider": want or None,
         # plan-20261021-usage-update：平均首字 / 平均速度（与调用记录表同口径）
         "perf": perf,

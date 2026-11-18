@@ -1,6 +1,8 @@
 """系统设置：工作目录、全局规则、记忆开关、AI 规则来源等桌面版可配置项。"""
 import json
+import logging
 import os
+from functools import partial, wraps
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -13,8 +15,12 @@ from app.core.config import (
     update_workspace_root,
 )
 from app.core.ripgrep_env import locate_ripgrep
+from app.core.user_config_io import (
+    config_transaction, read_config_snapshot, recent_config, remember_config, run_config_io, write_config,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _USER_CONFIG_PATH = Path(
     os.environ.get("CHATCODER_USER_CONFIG", str(Path.home() / ".chatcoder" / "config.json"))
@@ -36,7 +42,8 @@ def _load_config() -> dict:
     """读取持久化用户配置。"""
     try:
         if _USER_CONFIG_PATH.exists():
-            return json.loads(_USER_CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(_USER_CONFIG_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         pass
     return {}
@@ -44,13 +51,30 @@ def _load_config() -> dict:
 
 def _save_config(data: dict) -> None:
     """写入持久化用户配置。"""
+    write_config(_USER_CONFIG_PATH, data)
+
+
+def _save_startup_config(data: dict) -> None:
+    """旧设置迁移写入失败时，已有配置仍可用于启动。"""
     try:
-        _USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _USER_CONFIG_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _save_config(data)
     except OSError:
-        pass
+        logger.debug("启动时无法写入用户配置迁移", exc_info=True)
+
+
+def _config_route(*, write: bool = False):
+    def decorate(handler):
+        @wraps(handler)
+        async def run(*args, **kwargs):
+            call = partial(handler, *args, **kwargs)
+            if write:
+                def update():
+                    with config_transaction(_USER_CONFIG_PATH):
+                        return call()
+                return await run_config_io(update)
+            return await run_config_io(call)
+        return run
+    return decorate
 
 
 # plan-20261019-toolcard-v2：会话工具卡设置的取值夹紧（与前端 store/toolCard.ts 的栏目键一致）
@@ -123,7 +147,7 @@ def _upgrade_desktop_defaults(data: dict) -> None:
         if key in data and data[key] == old:
             data[key] = new
     data["desktop_defaults_rev"] = _DESKTOP_DEFAULTS_REV
-    _save_config(data)
+    _save_startup_config(data)
 
 
 def _migrate_retry_policy(data: dict) -> None:
@@ -146,12 +170,13 @@ def _migrate_retry_policy(data: dict) -> None:
         expanded = (base + [base[-1]] * count)[:count]
     data["agent_retry_intervals"] = format_retry_intervals(expanded)
     data.pop("agent_retry_count", None)
-    _save_config(data)
+    _save_startup_config(data)
 
 
 def load_persisted_workspace() -> None:
     """启动时从用户配置恢复工作目录及全局设置。"""
     data = _load_config()
+    remember_config(_USER_CONFIG_PATH, data)
     path = data.get("workspace_root")
     if path and Path(path).exists():
         update_workspace_root(path)
@@ -281,7 +306,7 @@ def load_persisted_workspace() -> None:
             data.pop(_old_key, None)
             _renamed_dirty = True
     if _renamed_dirty:
-        _save_config(data)
+        _save_startup_config(data)
     if "approval_timeout_sec_child" in data:
         try:
             settings.approval_timeout_sec_child = int(data["approval_timeout_sec_child"])
@@ -353,21 +378,23 @@ def load_persisted_workspace() -> None:
             setattr(settings, _key, _default)
             _defaults_added = True
     if _defaults_added:
-        _save_config(data)
+        _save_startup_config(data)
 
 
 @router.get("/settings/workspace", response_model=WorkspaceOut)
-async def get_workspace() -> WorkspaceOut:
+@_config_route()
+def get_workspace() -> WorkspaceOut:
     path = settings.workspace_root
     return WorkspaceOut(workspace_root=os.path.abspath(path), exists=Path(path).exists())
 
 
 @router.put("/settings/workspace", response_model=WorkspaceOut)
-async def set_workspace(body: WorkspaceIn) -> WorkspaceOut:
+@_config_route(write=True)
+def set_workspace(body: WorkspaceIn) -> WorkspaceOut:
     target = Path(body.workspace_root).expanduser()
     target.mkdir(parents=True, exist_ok=True)
-    update_workspace_root(str(target))
     _persist_workspace(str(target))
+    update_workspace_root(str(target))
     return WorkspaceOut(workspace_root=str(target.resolve()), exists=True)
 
 
@@ -720,7 +747,15 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
 @router.get("/settings/global", response_model=GlobalSettingsOut)
 async def get_global_settings() -> GlobalSettingsOut:
     """读取全局设置(记忆开关、全局规则、Agent/安全配置、终端/显示选项等)。"""
-    return _global_settings_out(_load_config())
+    # plan-20261118-runtime-question-cache：连续切页走快照，配置写入立即发布，外部编辑在短窗口后重读。
+    data = recent_config(_USER_CONFIG_PATH)
+    if data is not None:
+        return _global_settings_out(data)
+    return await run_config_io(_refresh_global_settings)
+
+
+def _refresh_global_settings() -> GlobalSettingsOut:
+    return _global_settings_out(read_config_snapshot(_USER_CONFIG_PATH, _load_config))
 
 
 class TerminalShellOption(BaseModel):
@@ -754,15 +789,18 @@ def _detect_shells() -> list[TerminalShellOption]:
 
 
 @router.get("/settings/terminal/options", response_model=TerminalOptionsOut)
-async def get_terminal_options() -> TerminalOptionsOut:
+@_config_route()
+def get_terminal_options() -> TerminalOptionsOut:
     """返回 Shell 列表及本机可用性。终端字体的安装情况由前端探测（渲染端才是字体的最终消费者）。"""
     return TerminalOptionsOut(shells=_detect_shells())
 
 
 @router.put("/settings/global", response_model=GlobalSettingsOut)
-async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
+@_config_route(write=True)
+def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     """更新全局设置。"""
     data = _load_config()
+    updates: dict = {}
     if body.global_rules is not None:
         data["global_rules"] = body.global_rules
     # plan-278-1391: 压缩触发阈值（夹紧到 0.50~0.95，非法值忽略），运行时立即生效
@@ -773,16 +811,16 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
             _ratio = None
         if _ratio is not None and 0.50 <= _ratio <= 0.95:
             data["auto_compact_threshold_ratio"] = round(_ratio, 2)
-            settings.auto_compact_threshold_ratio = round(_ratio, 2)
+            updates["auto_compact_threshold_ratio"] = round(_ratio, 2)
     if body.language is not None:
         data["language"] = body.language
     # v1.0: Agent/安全配置
     if body.auto_approve_tools is not None:
         data["auto_approve_tools"] = body.auto_approve_tools
-        settings.auto_approve_tools = body.auto_approve_tools
+        updates["auto_approve_tools"] = body.auto_approve_tools
     if body.force_approval_tools is not None:
         data["force_approval_tools"] = body.force_approval_tools
-        settings.force_approval_tools = body.force_approval_tools
+        updates["force_approval_tools"] = body.force_approval_tools
     # v2.2: 常规面板补项
     # 终端 Shell 只认已知取值（非法值回落 auto）；字体名去掉首尾空白并限制长度
     if body.terminal_shell is not None:
@@ -793,88 +831,82 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
     if body.http_proxy is not None:
         data["http_proxy"] = body.http_proxy
         # v31.2: 同步运行时 settings（http_client 显式读取，不依赖 trust_env）
-        settings.http_proxy = body.http_proxy
-        if body.http_proxy:
-            os.environ["HTTP_PROXY"] = body.http_proxy
-            os.environ["HTTPS_PROXY"] = body.http_proxy
-        else:
-            os.environ.pop("HTTP_PROXY", None)
-            os.environ.pop("HTTPS_PROXY", None)
+        updates["http_proxy"] = body.http_proxy
     if body.enhanced_search is not None:
         data["enhanced_search"] = body.enhanced_search
-        settings.enhanced_search = body.enhanced_search
+        updates["enhanced_search"] = body.enhanced_search
     if body.show_todos is not None:
         data["show_todos"] = body.show_todos
-        settings.show_todos = body.show_todos
+        updates["show_todos"] = body.show_todos
     if body.show_message_search is not None:
         data["show_message_search"] = body.show_message_search
-        settings.show_message_search = body.show_message_search
+        updates["show_message_search"] = body.show_message_search
     # 任务完成系统通知档位（三档，非法值回落 unfocused；前端据此决定是否弹系统通知）
     if body.task_notify_mode is not None:
         _nm = _notify_mode(body.task_notify_mode)
         data["task_notify_mode"] = _nm
-        settings.task_notify_mode = _nm
+        updates["task_notify_mode"] = _nm
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
-        settings.plan_mode_allow_outside_access = body.plan_mode_allow_outside_access
+        updates["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
     if body.sandbox_mode is not None:
         if body.sandbox_mode in ("workspace-write", "read-only", "danger-full-access"):
             data["sandbox_mode"] = body.sandbox_mode
-            settings.sandbox_mode = body.sandbox_mode
+            updates["sandbox_mode"] = body.sandbox_mode
     if body.auto_approve_outside_read is not None:
         data["auto_approve_outside_read"] = body.auto_approve_outside_read
-        settings.auto_approve_outside_read = body.auto_approve_outside_read
+        updates["auto_approve_outside_read"] = body.auto_approve_outside_read
     if body.auto_overdraft_on_quota_exceeded is not None:
         data["auto_overdraft_on_quota_exceeded"] = body.auto_overdraft_on_quota_exceeded
-        settings.auto_overdraft_on_quota_exceeded = body.auto_overdraft_on_quota_exceeded
+        updates["auto_overdraft_on_quota_exceeded"] = body.auto_overdraft_on_quota_exceeded
     # v46: 额度自动重置开关（与自动透支并列的额度恢复手段）
     if body.auto_reset_on_quota_exceeded is not None:
         data["auto_reset_on_quota_exceeded"] = body.auto_reset_on_quota_exceeded
-        settings.auto_reset_on_quota_exceeded = body.auto_reset_on_quota_exceeded
+        updates["auto_reset_on_quota_exceeded"] = body.auto_reset_on_quota_exceeded
     if body.memory_enabled is not None:
         # plan-549-2281 复盘修复：memory_enabled 原先在本函数里写两遍（函数开头一遍、
         # 这里一遍），开头那份不同步运行时——两处分支必须收成一处理，否则日后改一处、
         # 落盘值与运行时值就会静默不一致。保留带 settings.auto_memory_enabled 同步的这份。
         data["memory_enabled"] = body.memory_enabled
-        settings.auto_memory_enabled = body.memory_enabled
+        updates["auto_memory_enabled"] = body.memory_enabled
     # plan-75-332: 审批卡「解释」专用模型 / 思考深度（0/空 = 跟随会话）
     # 改回「跟随会话」时前端显式传 null，必须用 model_fields_set 区分「未提供」与
     # 「显式清空」：否则 `is not None` 会把清空当成未修改，设置不生效。
     if "approval_explain_model_id" in body.model_fields_set:
         _emid = int(body.approval_explain_model_id or 0)
         data["approval_explain_model_id"] = _emid
-        settings.approval_explain_model_id = _emid or None
+        updates["approval_explain_model_id"] = _emid or None
     if "approval_explain_reasoning_effort" in body.model_fields_set:
         _meff = str(body.approval_explain_reasoning_effort or "").strip()
         data["approval_explain_reasoning_effort"] = _meff
-        settings.approval_explain_reasoning_effort = _meff
+        updates["approval_explain_reasoning_effort"] = _meff
     # 采样温度 / 最大输出（设置中心高级项）：夹紧后立即生效；0 输出上限 = 由模型或官方兜底决定
     if body.agent_tool_temperature is not None:
         _tt = min(2.0, max(0.0, float(body.agent_tool_temperature)))
         data["agent_tool_temperature"] = _tt
-        settings.agent_tool_temperature = _tt
+        updates["agent_tool_temperature"] = _tt
     if body.agent_text_temperature is not None:
         _xt = min(2.0, max(0.0, float(body.agent_text_temperature)))
         data["agent_text_temperature"] = _xt
-        settings.agent_text_temperature = _xt
+        updates["agent_text_temperature"] = _xt
     if body.agent_max_output_tokens is not None:
         _mo = min(128_000, max(0, int(body.agent_max_output_tokens)))
         data["agent_max_output_tokens"] = _mo
-        settings.agent_max_output_tokens = _mo
+        updates["agent_max_output_tokens"] = _mo
     # v45: 异常自动重试间隔（标签序列，个数即次数）：非法项丢弃、夹到 0–3600 秒、最多 20 项，运行时立即生效
     if body.agent_retry_intervals is not None:
         _ri = format_retry_intervals(parse_retry_intervals(body.agent_retry_intervals))
         data["agent_retry_intervals"] = _ri
-        settings.agent_retry_intervals = _ri
+        updates["agent_retry_intervals"] = _ri
     if body.browser_enabled is not None:
         data["browser_enabled"] = bool(body.browser_enabled)
-        settings.browser_enabled = bool(body.browser_enabled)
+        updates["browser_enabled"] = bool(body.browser_enabled)
     if body.browser_headless is not None:
         data["browser_headless"] = bool(body.browser_headless)
-        settings.browser_headless = bool(body.browser_headless)
+        updates["browser_headless"] = bool(body.browser_headless)
     if body.suggestion_enabled is not None:
         data["suggestion_enabled"] = bool(body.suggestion_enabled)
-        settings.suggestion_enabled = bool(body.suggestion_enabled)
+        updates["suggestion_enabled"] = bool(body.suggestion_enabled)
     # plan-693-2868 §7 P5 第 8 条：社区仓库地址。存原样（归一化在 community_service.repo()），
     # 这样用户改成非法值时不会静默清空，而是下次读取时按「未配置」处理并在日志里留痕。
     if "community_repo" in body.model_fields_set:
@@ -887,65 +919,65 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _val = getattr(body, _field, None)
         if _val is not None:
             data[_field] = bool(_val)
-            setattr(settings, _field, bool(_val))
+            updates[_field] = bool(_val)
     if body.desktop_screenshot_quality is not None:
         _q = max(10, min(100, int(body.desktop_screenshot_quality)))
         data["desktop_screenshot_quality"] = _q
-        settings.desktop_screenshot_quality = _q
+        updates["desktop_screenshot_quality"] = _q
     if body.desktop_screenshot_max_dim is not None:
         _d = max(0, int(body.desktop_screenshot_max_dim))
         data["desktop_screenshot_max_dim"] = _d
-        settings.desktop_screenshot_max_dim = _d
+        updates["desktop_screenshot_max_dim"] = _d
     if body.desktop_coord_mode is not None:
         _cm = str(body.desktop_coord_mode or "auto").strip().lower()
         _cm = _cm if _cm in ("auto", "pixel", "norm1000") else "auto"
         data["desktop_coord_mode"] = _cm
-        settings.desktop_coord_mode = _cm
+        updates["desktop_coord_mode"] = _cm
     # plan-474-2105: 单会话并发上限（夹紧到 1~30，运行时立即生效——派发 / 创建前读取）
     if body.max_concurrent_subagents is not None:
         _mc = max(1, min(30, int(body.max_concurrent_subagents)))
         data["max_concurrent_subagents"] = _mc
-        settings.max_concurrent_subagents = _mc
+        updates["max_concurrent_subagents"] = _mc
     # plan-549-2281：max_subsessions_per_parent / subsession_enabled /
     # operator_subsession_enabled 三处写入已删除（配置项下线）。
     # plan-156-619 S4d：子会话默认模型 / 思考深度（子代理设置面板仅保留这两项可调项）
     if body.subagent_model_id is not None:
         _sm = max(0, int(body.subagent_model_id))
         data["subagent_model_id"] = _sm
-        settings.subagent_model_id = _sm
+        updates["subagent_model_id"] = _sm
     if body.subagent_reasoning_effort is not None:
         _se = str(body.subagent_reasoning_effort or "")[:20]
         data["subagent_reasoning_effort"] = _se
-        settings.subagent_reasoning_effort = _se
+        updates["subagent_reasoning_effort"] = _se
     # plan-549-2281：子代理开关保存；子会话开关已删除。
     if body.subagent_enabled is not None:
         data["subagent_enabled"] = bool(body.subagent_enabled)
-        settings.subagent_enabled = bool(body.subagent_enabled)
+        updates["subagent_enabled"] = bool(body.subagent_enabled)
     # plan-549-2281：操控思考深度改名 operator_subagent_effort（写新键，旧键不再回写）
     if body.operator_subagent_effort is not None:
         _oe = str(body.operator_subagent_effort or "lowest")[:20]
         data["operator_subagent_effort"] = _oe
-        settings.operator_subagent_effort = _oe
+        updates["operator_subagent_effort"] = _oe
     # plan-549-2281：「操控子代理」开关（写新键，旧键不再回写）
     if body.operator_subagent_enabled is not None:
         data["operator_subagent_enabled"] = bool(body.operator_subagent_enabled)
-        settings.operator_subagent_enabled = bool(body.operator_subagent_enabled)
+        updates["operator_subagent_enabled"] = bool(body.operator_subagent_enabled)
     if body.tool_card_sections_expanded is not None:
         data["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
-        settings.tool_card_sections_expanded = bool(body.tool_card_sections_expanded)
+        updates["tool_card_sections_expanded"] = bool(body.tool_card_sections_expanded)
     # plan-20261019-toolcard-v2：默认形态 / 逐栏默认展开（取值夹紧，未知栏目丢弃）
     if body.tool_card_default_form is not None:
         _form = _tool_card_form(body.tool_card_default_form)
         data["tool_card_default_form"] = _form
-        settings.tool_card_default_form = _form
+        updates["tool_card_default_form"] = _form
     if body.tool_card_section_defaults is not None:
         _secs = _tool_card_sections(body.tool_card_section_defaults)
         data["tool_card_section_defaults"] = _secs
-        settings.tool_card_section_defaults = _secs
+        updates["tool_card_section_defaults"] = _secs
     # 工作流运行时：夹紧后写入配置；并发上限由服务每拍读取，保存即生效
     if body.workflow_enabled is not None:
         data["workflow_enabled"] = bool(body.workflow_enabled)
-        settings.workflow_enabled = bool(body.workflow_enabled)
+        updates["workflow_enabled"] = bool(body.workflow_enabled)
     for _flag in (
         "workflow_confirm_before_start",
         "workflow_auto_resume_on_network",
@@ -956,30 +988,39 @@ async def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _flag_value = getattr(body, _flag)
         if _flag_value is not None:
             data[_flag] = bool(_flag_value)
-            setattr(settings, _flag, bool(_flag_value))
+            updates[_flag] = bool(_flag_value)
     if body.workflow_composition_mode is not None:
         _mode = _composition_mode(body.workflow_composition_mode)
         data["workflow_composition_mode"] = _mode
-        settings.workflow_composition_mode = _mode
+        updates["workflow_composition_mode"] = _mode
     if body.workflow_conflict_policy is not None:
         _policy = _conflict_policy(body.workflow_conflict_policy)
         data["workflow_conflict_policy"] = _policy
-        settings.workflow_conflict_policy = _policy
+        updates["workflow_conflict_policy"] = _policy
     if body.workflow_isolation_default is not None:
         _isolation = _isolation_default(body.workflow_isolation_default)
         data["workflow_isolation_default"] = _isolation
-        settings.workflow_isolation_default = _isolation
+        updates["workflow_isolation_default"] = _isolation
     if body.workflow_hot_files is not None:
         _hot = str(body.workflow_hot_files)[:2000]
         data["workflow_hot_files"] = _hot
-        settings.workflow_hot_files = _hot
+        updates["workflow_hot_files"] = _hot
     for _key, (_lo, _hi) in _WORKFLOW_INT_BOUNDS.items():
         _val = getattr(body, _key)
         if _val is not None:
             _clamped = max(_lo, min(_hi, int(_val)))
             data[_key] = _clamped
-            setattr(settings, _key, _clamped)
+            updates[_key] = _clamped
     _save_config(data)
+    for key, value in updates.items():
+        setattr(settings, key, value)
+    if body.http_proxy is not None:
+        if body.http_proxy:
+            os.environ["HTTP_PROXY"] = body.http_proxy
+            os.environ["HTTPS_PROXY"] = body.http_proxy
+        else:
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("HTTPS_PROXY", None)
     return _global_settings_out(data)
 
 
@@ -1017,7 +1058,8 @@ def _resolve_project_scope_key(project_path: str | None) -> str:
 
 
 @router.get("/settings/rules/{scope}/{key:path}", response_model=ScopeRulesOut)
-async def get_scope_rules(scope: str, key: str) -> ScopeRulesOut:
+@_config_route()
+def get_scope_rules(scope: str, key: str) -> ScopeRulesOut:
     """读取指定作用域的规则(scope: workdir / group, key: 路径或会话ID)。"""
     data = _load_config()
     storage_key = _get_scope_rules_key(scope, key)
@@ -1030,7 +1072,8 @@ async def get_scope_rules(scope: str, key: str) -> ScopeRulesOut:
 
 
 @router.put("/settings/rules/{scope}/{key:path}", response_model=ScopeRulesOut)
-async def set_scope_rules(scope: str, key: str, body: ScopeRulesIn) -> ScopeRulesOut:
+@_config_route(write=True)
+def set_scope_rules(scope: str, key: str, body: ScopeRulesIn) -> ScopeRulesOut:
     """更新指定作用域的规则。"""
     data = _load_config()
     storage_key = _get_scope_rules_key(scope, key)
@@ -1040,7 +1083,8 @@ async def set_scope_rules(scope: str, key: str, body: ScopeRulesIn) -> ScopeRule
 
 
 @router.get("/settings/rules/workdir", response_model=ScopeRulesOut)
-async def get_workdir_rules(project_path: str = "") -> ScopeRulesOut:
+@_config_route()
+def get_workdir_rules(project_path: str = "") -> ScopeRulesOut:
     """读取当前工作目录的规则。
 
     plan-234-1171 R7: `project_path` 指定规则归属项目；未传时保持原行为
@@ -1058,7 +1102,8 @@ async def get_workdir_rules(project_path: str = "") -> ScopeRulesOut:
 
 
 @router.put("/settings/rules/workdir", response_model=ScopeRulesOut)
-async def set_workdir_rules(body: ScopeRulesIn, project_path: str = "") -> ScopeRulesOut:
+@_config_route(write=True)
+def set_workdir_rules(body: ScopeRulesIn, project_path: str = "") -> ScopeRulesOut:
     """更新当前工作目录的规则（plan-234-1171 R7: 支持按项目写入）。"""
     ws_key = _resolve_project_scope_key(project_path)
     data = _load_config()
@@ -1098,7 +1143,7 @@ class AiRulesIn(BaseModel):
 async def scan_ai_rules(path: str = ""):
     """扫描项目下的 AI 规则文档，按来源识别。"""
     root = Path(path) if path else Path(settings.workspace_root)
-    if not root.is_dir():
+    if not await run_config_io(root.is_dir):
         return []
     # plan-114-450：与注入侧同一个扫描器（根 + 一级子目录 + 目录形态规则），
     # 界面看到的文件 = 实际会被加载的文件，每个文件都归属到可开关的来源。
@@ -1119,7 +1164,8 @@ async def scan_ai_rules(path: str = ""):
 
 
 @router.get("/settings/ai-rules", response_model=AiRulesOut)
-async def get_ai_rules(project_path: str = "") -> AiRulesOut:
+@_config_route()
+def get_ai_rules(project_path: str = "") -> AiRulesOut:
     """读取 AI 规则配置（来源启停 + 全局/项目规则）。
 
     plan-234-1171 R7: `project_path` 指定项目规则的归属项目。此前一律用服务端
@@ -1151,7 +1197,8 @@ def _rule_sources_out(data: dict) -> list[dict]:
 
 
 @router.put("/settings/ai-rules", response_model=AiRulesOut)
-async def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
+@_config_route(write=True)
+def set_ai_rules(body: AiRulesIn) -> AiRulesOut:
     """保存 AI 规则配置。
 
     plan-234-1171 R7: 写入键与 get_ai_rules / user_rules_loader 严格同源，

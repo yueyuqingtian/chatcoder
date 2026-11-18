@@ -754,7 +754,7 @@ async def _inject_mcp_tools(
             ]
         existing = {str(s.get("function", {}).get("name") or "") for s in tool_schemas}
         injected = 0
-        for mt in _mcp_tools:
+        for mt in sorted(_mcp_tools, key=lambda tool: tool.name):
             if mt.name in existing:
                 continue
             tool_schemas.append(mt.function_schema())

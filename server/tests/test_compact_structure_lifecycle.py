@@ -137,6 +137,53 @@ async def test_persistent_live_projection_matches_database_range(db):
     assert sum(m.context_kind == "checkpoint" for m in live) == 1
 
 
+async def test_cancelled_tool_compaction_survives_new_turns(db, tmp_path, monkeypatch):
+    """plan-20261117-compact-trigger：512k 窗口压缩后连续新消息不能重新载入旧历史。"""
+    from unittest.mock import AsyncMock
+    from app.orchestration import context_manager as cm, compaction, token_counter
+    from app.orchestration.agent_loop import _compact_persistent_or_fallback, resolve_compact_thresholds
+    from app.orchestration.context_memory import _fetch_main_messages
+    from app.orchestration.token_counter import estimate_messages_tokens, messages_token_total
+    from app.persistence.models.message import Message, Session
+
+    session = await _mk_session(db)
+    interrupted = Message(session_id=session.id, turn_id=1, sender_type="agent", msg_type="tool_call",
+                          content={"tool": "ask_user_question", "args": {}, "call_key": "cancelled"})
+    db.add(interrupted)
+    await db.flush()
+    await _mk_long_history(db, session.id, rounds=44, tool_chars=45000)
+    await db.commit()
+    source = await _fetch_main_messages(db, session.id, limit=None)
+    window = 512000
+    threshold = resolve_compact_thresholds(window, 0.9)["pre_threshold"]
+    assert messages_token_total(source) >= threshold
+    fallback = AsyncMock(side_effect=AssertionError("不应退回临时内存压缩"))
+    monkeypatch.setattr(compaction, "auto_compact", fallback)
+    result, _ = await _compact_persistent_or_fallback(
+        db, session_id=session.id, provider=None, agent_window=window,
+        used_tokens=messages_token_total(source), agent_id=1, agent_name="主代理", turn_id=1,
+        messages=[M(role="system", content="规则"),
+                  M(role="user", content="继续处理", context_kind="current_task")], reply_language="zh")
+    assert result and interrupted.id in result["shadowed_ids"]
+    fallback.assert_not_awaited()
+    monkeypatch.setattr(cm, "_resolve_ta3_model_meta", AsyncMock(return_value={"provider": "deepseek"}))
+    monkeypatch.setattr(cm, "_symbol_index_hint", AsyncMock(return_value=""))
+    monkeypatch.setattr(cm, "project_structure_brief", AsyncMock(return_value=""))
+    monkeypatch.setattr(token_counter, "get_agent_context_window", AsyncMock(return_value=window))
+    for turn_id in (10, 11, 12):
+        async with type(db)(bind=db.bind, expire_on_commit=False) as fresh:
+            saved = await fresh.get(Session, session.id)
+            bundle = await cm.build_main_context(
+                fresh, agent=SimpleNamespace(id=1, model_id=None, name="测试"), session=saved,
+                project=SimpleNamespace(id=None, path=str(tmp_path), rules_docs=None),
+                turn=SimpleNamespace(id=turn_id, user_message_id=None), user_message="调整文案")
+            messages = bundle.to_messages()
+            assert [m.checkpoint_id for m in messages if m.context_kind == "checkpoint"] == [result["compaction_id"]]
+            history_ids = {i for m in bundle.history for i in m.source_message_ids}
+            assert not history_ids.intersection(result["shadowed_ids"])
+            assert estimate_messages_tokens(messages) < threshold
+
+
 async def test_rollup_preserves_previous_summary_and_attachment(db):
     from app.orchestration.context_compressor import _roll_checkpoint_frame
     from app.persistence.models.message import Message

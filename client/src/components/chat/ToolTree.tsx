@@ -19,6 +19,8 @@ import { createContext, memo, useContext, useEffect, useMemo, useState } from "r
 import { ViewportBlock } from "../ui/ViewportBlock";
 import { useRunningTicker } from "./useRunningTicker";
 import type { ToolLeaf, ToolNode } from "./timeline";
+import { ComposerAttachments } from "./ComposerAttachments";
+import { useScoped } from "./convoScope";
 import { SEARCH_TOOLS, RUN_TOOLS, isWriteLeaf } from "./timeline";
 import { api } from "../../api/client";
 import { usePanelStore } from "../../store/panel";
@@ -610,6 +612,7 @@ function leafFallbackDiff(leaf: ToolLeaf, path: string | null): Array<{ type: "a
 }
 
 const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
+  const sessionId = useScoped("currentSessionId");
   const setPreviewPath = usePanelStore((s) => s.setPreviewPath);
   const setDiffPreview = usePanelStore((s) => s.setDiffPreview);
   const openPanel = usePanelStore((s) => s.openPanel);
@@ -834,7 +837,7 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                    *  多选的答案是字符串数组，这里统一压成展示文本（顿号连接）。 */
                   const parseAnswers = (): Record<string, string> => {
                     if (!leaf.output) return {};
-                    const jsonMatch = leaf.output.match(/\{[\s\S]*\}/);
+                    const jsonMatch = leaf.output.split(/\n\n(?:回答附件|注意)：/u, 1)[0].match(/\{[\s\S]*\}/);
                     if (!jsonMatch) return {};
                     try {
                       const parsed = JSON.parse(jsonMatch[0]);
@@ -855,20 +858,25 @@ const LeafRow = memo(function LeafRow({ leaf }: { leaf: ToolLeaf }) {
                   // 后端最多只问 _MAX_QUESTIONS 题，多出的会被截掉、从未真正提问，而参数里仍是模型写的完整列表。
                   // 有回答记录时只列出有答案的题（提问向导要求每道实际问到的题都作答），避免把没问过的题显示成「已回答」
                   const rows = qs
-                    .map((q, idx) => ({ q, idx, hit: answerMap[String(idx)] ?? answerMap[String(idx + 1)] }))
+                    .map((q, idx) => ({
+                      q, idx,
+                      hit: answerMap[Object.hasOwn(answerMap, "0") ? String(idx) : String(idx + 1)],
+                      files: leaf.questionAttachments?.filter((file) => file.question_index === idx) ?? [],
+                    }))
                     .filter((r) => !hasAnswers || r.hit != null);
                   // 没有回答记录时按工具状态给占位：等待中 / 取消或超时 都不能显示成「已回答」
                   const emptyHint = running ? "等待回答…" : ok === false ? "未回答" : "已回答";
                   return (
                     <div className="tc-question-qa">
-                      {rows.map(({ q, idx, hit }) => (
+                      {rows.map(({ q, idx, hit, files }) => (
                         <div key={idx} className="tc-question-qa-item">
                           <span className="tc-qa-label">问题 {idx + 1}</span>
-                          <span className="tc-qa-q">{q.question || ""}</span>
+                          <span className="tc-qa-q">{typeof q?.question === "string" ? q.question : ""}</span>
                           <span className="tc-qa-label">回答</span>
                           <span className={"tc-qa-val" + (hit == null ? " is-empty" : "")}>
-                            {hit == null ? emptyHint : String(hit)}
+                            {hit == null ? emptyHint : (hit || "附件回答")}
                           </span>
+                          <ComposerAttachments files={files} sessionId={sessionId ?? null} />
                         </div>
                       ))}
                     </div>

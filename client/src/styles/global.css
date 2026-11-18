@@ -2486,9 +2486,32 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   color: var(--text-3);
   font-weight: 400;
 }
+/* plan-20261118-question-qa-attachments：附件属于该题「回答」的内容，必须与回答列左对齐、铺满内容列。
+   此前附件容器是网格的第 5 个子项，自动落到第 2 行第 1 列（56px 标签列），图片被压成一条竖线。
+   输入态残留的底边距、内部滚动与胶囊底色也一并收成阅读态：附件全部展开、不夹滚动条。 */
+.tc-question-qa-item > .composer-attachments {
+  grid-column: 2 / -1;
+  align-self: start;
+  min-width: 0;
+  padding: 0;
+  max-height: none;
+  overflow: visible;
+}
+.tc-question-qa-item > .composer-attachments .composer-attach-chip {
+  height: 26px;
+  max-width: 100%;
+  background: var(--bg-active);
+}
+.tc-question-qa-item > .composer-attachments .attach-chip-thumb {
+  width: 18px;
+  height: 18px;
+}
 
 /* 输入框直接替换形态的向导式提问卡片（对齐参考图 paste-20260829121505.png） */
 .composer-question-wizard {
+  --question-row-inset: 4px;
+  --question-line-height: 20px;
+  --question-control-height: var(--btn-h-xs);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--r-md, 12px);
@@ -2580,12 +2603,16 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  /* plan-20261118-question-answer-layout：以内容高度为准，缩放时实际边框厚度仍与回答框一致。 */
+  box-sizing: content-box;
+  min-height: var(--question-control-height);
+  padding: var(--question-row-inset) 12px;
   border-radius: var(--r-md);
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text-1);
   font-size: 12.5px;
+  line-height: var(--question-line-height);
   text-align: left;
   cursor: pointer;
   transition: all var(--dur-fast);
@@ -2657,24 +2684,26 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   pointer-events: none;
 }
 .question-wizard-custom-row {
-  display: flex;
-  /* 多行输入时序号与文本框顶对齐；单行时与原先视觉一致 */
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 12px;
   border-radius: var(--r-md);
   border: 1px solid var(--border);
   background: var(--bg);
   transition: border-color var(--dur-fast), background var(--dur-fast);
 }
-.question-wizard-custom-row:focus-within {
-  /* plan-238-1188: 聚焦态中性化——不再出现浅蓝品牌色边框 */
-  border-color: var(--text-2);
+.question-wizard-custom-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: var(--question-row-inset) 6px var(--question-row-inset) 12px;
 }
-/* 序号的 11px 小字在 20px 行盒里垂直居中，与输入框单行文本（同为 20px 行高）对齐；
-   多行时序号仍停在第一行，不会随文本框高度漂到中间 */
-.question-wizard-custom-row .question-wizard-opt-num {
-  line-height: 20px;
+.question-wizard-custom-editor {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding-block: calc((var(--question-control-height) - var(--question-line-height)) / 2);
+  line-height: var(--question-line-height);
+  cursor: text;
 }
 .question-wizard-custom-input {
   flex: 1;
@@ -2684,7 +2713,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   outline: none;
   font-family: inherit;
   font-size: 12.5px;
-  line-height: 20px;
+  line-height: inherit;
   color: var(--text-1);
   /* 多行自定义回答：高度由内容驱动——输入增长、切题清空回落、返回上一题恢复多行答案都自动完成，
      不再依赖 JS 测高（内联 height 会失去同步）。超过 max-height 后内部滚动，不撑破卡片。
@@ -2694,6 +2723,7 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
   margin: 0;
   padding: 0;
   resize: none;
+  min-height: var(--question-line-height);
   max-height: 160px;
   overflow-y: auto;
 }
@@ -2709,14 +2739,17 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
 }
 .question-wizard-hint {
   font-size: 11px;
+  line-height: 1.4;
   color: var(--text-3);
   display: flex;
   align-items: center;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
 }
 .question-wizard-actions {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 8px;
 }
 .question-wizard-nav-btns {

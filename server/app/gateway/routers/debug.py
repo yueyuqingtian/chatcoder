@@ -361,8 +361,9 @@ async def get_arthas_config():
 
 @router.put("/arthas/config", response_model=dict)
 async def set_arthas_config(body: ArthasConfig):
+    from app.core.user_config_io import run_config_io
     from app.services import arthas_service as svc
-    return svc.save_config(body.model_dump(exclude_unset=True))
+    return await run_config_io(svc.save_config, body.model_dump(exclude_unset=True))
 
 
 # ── 数据库连接（配置页用）──

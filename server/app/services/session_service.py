@@ -746,7 +746,7 @@ def _attachment_ids(content: Any) -> set[str]:
 
 
 async def collect_session_attachments(session_ids: list[int]) -> set[str]:
-    """这些会话的消息引用的附件 file_id（附件只由用户消息携带）。
+    """这些会话的用户消息和提问回答引用的附件 file_id。
 
     plan-562-2318 H4：从 `archive_service` 下沉，供三条删除路径共用。
     **必须在删除写事务之前调用**：消息行删掉之后就再也查不到这些 file_id 了。
@@ -761,7 +761,11 @@ async def collect_session_attachments(session_ids: list[int]) -> set[str]:
         for chunk in _chunks(ids):
             rows = await db.execute(
                 select(Message.content).where(
-                    Message.session_id.in_(chunk), Message.sender_type == "user"
+                    Message.session_id.in_(chunk),
+                    (Message.sender_type == "user") | (
+                        (Message.msg_type == "tool_result") &
+                        (Message.content["tool"].as_string() == "ask_user_question")
+                    ),
                 )
             )
             for content in rows.scalars().all():

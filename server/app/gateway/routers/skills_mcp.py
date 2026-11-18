@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.user_config_io import config_transaction, run_config_io, write_config
 from app.persistence.database import get_db
 from app.services import skill_service
 
@@ -34,13 +35,22 @@ def _load_repos() -> list[dict]:
 
 
 def _save_repos(repos: list[dict]) -> None:
-    try:
-        _REPO_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data = json.loads(_REPO_CFG_PATH.read_text(encoding="utf-8")) if _REPO_CFG_PATH.exists() else {}
-        data["skill_repos"] = repos
-        _REPO_CFG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    data = json.loads(_REPO_CFG_PATH.read_text(encoding="utf-8")) if _REPO_CFG_PATH.exists() else {}
+    data["skill_repos"] = repos
+    write_config(_REPO_CFG_PATH, data)
+
+
+def _add_repo(repo: dict) -> None:
+    with config_transaction(_REPO_CFG_PATH):
+        repos = _load_repos()
+        if any(item.get("url") == repo["url"] for item in repos):
+            raise HTTPException(400, "该仓库已添加")
+        _save_repos([*repos, repo])
+
+
+def _remove_repo(repo_id: str) -> None:
+    with config_transaction(_REPO_CFG_PATH):
+        _save_repos([item for item in _load_repos() if item.get("id") != repo_id])
 
 
 def skill_to_dict(s) -> dict:
@@ -377,7 +387,7 @@ class SkillRepoImport(BaseModel):
 @router.get("/skills/repos", response_model=list[dict])
 async def list_skill_repos():
     """列出已配置的技能仓库。"""
-    repos = _load_repos()
+    repos = await run_config_io(_load_repos)
     for r in repos:
         local = _REPO_ROOT / str(r["id"])
         r["synced"] = local.is_dir()
@@ -388,24 +398,19 @@ async def list_skill_repos():
 @router.post("/skills/repos", response_model=dict)
 async def create_skill_repo(body: SkillRepoCreate):
     """添加技能仓库（git url）。"""
-    repos = _load_repos()
-    for r in repos:
-        if r.get("url") == body.url:
-            raise HTTPException(400, "该仓库已添加")
     repo = {
         "id": uuid.uuid4().hex[:12],
         "name": body.name or body.url.rstrip("/").split("/")[-1],
         "url": body.url,
     }
-    repos.append(repo)
-    _save_repos(repos)
+    await run_config_io(_add_repo, repo)
     return repo
 
 
 @router.post("/skills/repos/{repo_id}/sync", response_model=dict)
 async def sync_skill_repo(repo_id: str):
     """拉取仓库并列出其中的技能。"""
-    repos = _load_repos()
+    repos = await run_config_io(_load_repos)
     repo = next((r for r in repos if r.get("id") == repo_id), None)
     if repo is None:
         raise HTTPException(404, "仓库不存在")
@@ -442,8 +447,7 @@ async def import_repo_skill(body: SkillRepoImport, db: AsyncSession = Depends(ge
 @router.delete("/skills/repos/{repo_id}", response_model=dict)
 async def delete_skill_repo(repo_id: str):
     """删除技能仓库配置及本地缓存。"""
-    repos = _load_repos()
-    _save_repos([r for r in repos if r.get("id") != repo_id])
+    await run_config_io(_remove_repo, repo_id)
     local = _REPO_ROOT / repo_id
     try:
         import shutil

@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { ApiError } from "../api/client";
 import type { ArtifactOut, ArthasEntryOut, AttachmentInfo, ComposerRefOut, DebugStatusOut, FileChangeOut, MergeReportOut, MessageOut, ModelOut, ProjectOut, ProviderOut, RollbackAffected, RollbackConflict, RollbackPreviewFile, SessionOut, TaskOut, TaskSuggestionOut, TurnOut, WorkflowNodeBrief } from "../api/client";
 import { wsClient, globalWsClient } from "../api/ws";
+import { questionAttachmentRefs, rejectQuestionSubmission, type QuestionAttachments } from "./questionDrafts";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
 // R4：任务完成系统通知（仅桌面版，三档见设置 → 常规）
@@ -186,17 +187,13 @@ export interface SubagentMeta {
 }
 
 /** plan-75-332: 审批卡「解释」状态。
- *  按 approvalId 键控（与 questionDraft 同法）——切换页面/会话后返回仍可恢复；
+ *  按 approvalId 键控——切换页面/会话后返回仍可恢复；
  *  approval.request 到达时重置，审批结束/取消时清空。 */
 /** 待审批项：同一会话可能同时有多个审批（如并行子代理各自请求），按到达顺序排队逐个作答。 */
 export interface ApprovalQueueItem {
   approvalId: string;
   detail: Record<string, unknown>;
 }
-
-/** 提问作答值：单选 / 自定义输入是字符串；多选是「勾选的选项 + 自定义补充」的字符串数组。 */
-export type QuestionAnswer = string | string[];
-export type QuestionAnswers = Record<string, QuestionAnswer>;
 
 export interface ApprovalExplainState {
   approvalId: string;
@@ -227,7 +224,6 @@ export interface SessionSlice {
   /** 待审批队列（队首即 pendingApproval），随会话切片保存/恢复 */
   approvalQueue: ApprovalQueueItem[];
   /** plan-238-1188: 提问作答草稿随会话 slice 一起保存/恢复，切走再回来不丢。 */
-  questionDraft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null;
   /** plan-75-332: 审批卡解释内容（同样随切片保存/恢复）。 */
   approvalExplain: ApprovalExplainState | null;
   /** plan-95/v38: turnId 标记计划卡归属 turn；planDocPath 为后端广播的实际文档路径。
@@ -303,7 +299,6 @@ function _snapshotSlice(s: ChatState): SessionSlice {
     usageCacheTotals: s.usageCacheTotals,
     pendingApproval: s.pendingApproval,
     approvalQueue: s.approvalQueue,
-    questionDraft: s.questionDraft,
     approvalExplain: s.approvalExplain,
     pendingPlan: s.pendingPlan,
     pendingPlanTurn: s.pendingPlanTurn,
@@ -444,12 +439,6 @@ interface ChatState {
   pendingApproval: { approvalId: string; detail: Record<string, unknown> } | null;
   /** 待审批队列：并行子代理可能同时请求审批，前一个未作答时后一个入队而不是覆盖它（否则前者无人应答、超时失败）。 */
   approvalQueue: ApprovalQueueItem[];
-  /** plan-238-1188: AI 提问向导的作答草稿（按 approvalId 键控）。
-   *  提问卡渲染在 ComposerCore 内部（本地 state），切到设置页会卸载组件、
-   *  已选答案随之丢失；上移到 store 后返回原会话可完整恢复。
-   *  生命周期：approval.request 置 null（新提问）→ 作答过程中持续写回 →
-   *  approval.response / respondApproval / cancelTurn 清空。 */
-  questionDraft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null;
   /** plan-75-332: 审批卡「解释」状态（骨架 → 流式填充），按 approvalId 键控。
    *  生命周期：explainApproval 置 loading → delta 累加 → done/error 终态 →
    *  approval.request / approval.response / respondApproval / cancelTurn 清空。 */
@@ -623,9 +612,8 @@ resumeTurn: () => Promise<void>;
   retryTask: (taskId: number) => Promise<void>;
   /** 取消方案（落库版）：= confirmPlanTurn(false)，重启后卡片按钮不复活。 */
   dismissPlan: (turnId?: number) => void;
-  respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>, rememberScope?: "session" | "global") => void;
+  respondApproval: (approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>, rememberScope?: "session" | "global", files?: QuestionAttachments) => boolean;
   /** plan-238-1188: 提问向导作答草稿写回（null 清空）。 */
-  setQuestionDraft: (draft: { approvalId: string; stepIndex: number; answers: QuestionAnswers } | null) => void;
   /** plan-75-332: 请求 AI 解释当前审批项（骨架先显示，内容流式填充）。 */
   explainApproval: (approvalId: string) => void;
   /** plan-75-332: 清空解释状态（审批结束/取消/卡片卸载时调用）。 */
@@ -1425,7 +1413,6 @@ function _resetSessionState(): Partial<ChatState> {
     lastCompact: null,
     pendingApproval: null,
     approvalQueue: [],
-    questionDraft: null,
     approvalExplain: null,
     pendingPlan: null,
     pendingPlanTurn: null,
@@ -1492,7 +1479,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastCompact: null,
   pendingApproval: null,
   approvalQueue: [],
-  questionDraft: null,
   approvalExplain: null,
   pendingPlan: null,
   pendingPlanTurn: null,
@@ -2436,11 +2422,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  respondApproval: (approvalId, approved, remember = false, answer, rememberScope = "session") => {
+  respondApproval: (approvalId, approved, remember = false, answer, rememberScope = "session", files) => {
     // plan-20261103-interactions：切回时连接可能尚未就绪，未发出的答案不能被记成已处理。
     if (!wsClient.connected) {
       set({ error: "会话连接尚未恢复，请稍后重试。" });
-      return;
+      return false;
     }
     // v2.2 (对齐 zcode 3.12/3.14): remember=true 生成"始终允许"规则；
     // v3.0 (plan-88): rememberScope 区分会话级/全局规则（session / global）
@@ -2449,7 +2435,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       approval_id: approvalId, approved, remember,
       remember_scope: rememberScope,
       ...(answer ? { answer } : {}),
+      ...(files ? { answer_attachments: questionAttachmentRefs(files) } : {}),
     });
+    if (answer) return true;
     // 本地立即关闭横幅，避免等待广播返回造成的 UI 延迟
     // plan-75-332: 一并清掉解释内容（本次审批已结束，保留下来只会串到下个审批卡）
     // 只摘掉本次作答的那一项：队列里其余待审批继续排队展示（不能像单槽那样整体清空）
@@ -2458,17 +2446,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         approvalQueue: queue,
         pendingApproval: queue[0] ?? null,
-        questionDraft: s.questionDraft?.approvalId === approvalId ? null : s.questionDraft,
         approvalExplain: s.approvalExplain?.approvalId === approvalId ? null : s.approvalExplain,
       };
     });
     // 会话隔离修复：同步摘掉跨会话索引里的这一条。回执广播只回到发起会话，
     // 若只清当前队列，残留条目会让卡片在切回原会话后复活（表现为反复回到第 1 题）。
     pendingActions.clearByApprovalId(approvalId);
+    return true;
   },
-
-  /** plan-238-1188: 提问向导作答草稿写回（切设置页/换会话后仍可恢复）。 */
-  setQuestionDraft: (draft) => set({ questionDraft: draft }),
 
   /** plan-75-332: 请求 AI 解释审批项。立即置 loading（UI 立刻出骨架），
    *  内容由 approval.explain.delta/done/error 事件补充。 */
@@ -2720,7 +2705,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingSubagents: 0,
       pendingApproval: null,
       approvalQueue: [],
-      questionDraft: null,
       approvalExplain: null,
       ...(s.currentSessionId != null
         ? patchSession(s, s.currentSessionId, (x) => setSessionRunning(x, false))
@@ -4116,13 +4100,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // plan-282-1421（第10项）：累加会话缓存统计，供"平均缓存命中率"使用。
         // 仅统计真实 API 样本（cached_input>0 或 prompt>0 才有意义），避免估算样本污染均值。
         const prevTotals = get().usageCacheTotals;
-        const counted = promptTokens > 0;
+        const counted = detail.source === "api" && payload.cache_read_reported === true && promptTokens > 0;
         set({
           usage: detail,
           usageCacheTotals: counted
             ? {
                 inputSum: prevTotals.inputSum + promptTokens,
-                cachedSum: prevTotals.cachedSum + detail.cached_input,
+                cachedSum: prevTotals.cachedSum + Math.min(promptTokens, Math.max(0, detail.cached_input)),
                 samples: prevTotals.samples + 1,
               }
             : prevTotals,
@@ -4274,7 +4258,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 这里按 approvalId 兜底，保证回执丢失或延迟时卡片也不会复活。
         if (respondedId) pendingActions.clearByApprovalId(respondedId);
         set((s) => {
-          if (!respondedId) return { approvalQueue: [], pendingApproval: null, questionDraft: null, approvalExplain: null };
           const patch: Partial<ChatState> = {};
           const queue = s.approvalQueue.filter((x) => x.approvalId !== respondedId);
           if (queue.length !== s.approvalQueue.length) {
@@ -4282,7 +4265,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             patch.pendingApproval = queue[0] ?? null;
           }
           if (s.approvalExplain?.approvalId === respondedId) patch.approvalExplain = null;
-          if (s.questionDraft?.approvalId === respondedId) patch.questionDraft = null;
           return patch;
         });
         break;
@@ -4434,8 +4416,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "error":
         set({ error: String((payload as { message?: string }).message ?? "未知错误") });
         break;
-      case "ack":
+      case "ack": {
+        const ref = String(payload.ref ?? "");
+        if (ref && payload.resolved === true) pendingActions.clearByApprovalId(ref);
+        if (ref && payload.resolved === false) {
+          rejectQuestionSubmission(ref, String(payload.error ?? "回答提交失败，请重试。"));
+        }
         break;
+      }
       case "sync.response": {
         const count = Number(payload.count ?? 0);
         if (payload.reset_required && get().currentSessionId != null) invalidateMessageHistory(get().currentSessionId!);
@@ -4693,7 +4681,6 @@ usePendingInteractions.subscribe((state, previous) => {
   useChatStore.setState({
     approvalQueue: queue,
     pendingApproval: queue[0] ?? null,
-    questionDraft: current.questionDraft && contains(current.questionDraft.approvalId) ? current.questionDraft : null,
     approvalExplain: current.approvalExplain && contains(current.approvalExplain.approvalId) ? current.approvalExplain : null,
   });
 });

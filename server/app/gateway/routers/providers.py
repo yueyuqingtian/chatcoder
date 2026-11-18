@@ -1,8 +1,10 @@
 """供应商管理 API（v16）。"""
 import logging
+from collections import defaultdict
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.schemas import (
@@ -77,8 +79,13 @@ async def _cred_to_out(c, *, preferred_id: int | None = None) -> ProviderCredent
 
 
 async def _to_out(db: AsyncSession, p) -> ProviderOut:
-    # plan-248-1258 M2.2: 附带凭据统计，供前端徽标显示「N 个 Key/账号」
-    creds = await credential_service.list_credentials(db, p.id)
+    return _provider_out(
+        p, await credential_service.list_credentials(db, p.id),
+        await provider_service.count_models(db, p.id),
+    )
+
+
+def _provider_out(p, creds, model_count: int) -> ProviderOut:
     # plan-20261020-retry-cred-perf：非 ta3 的「可用」只算健康凭据（暂缓中的不计入），
     # ta3 保持旧的冷却硬过滤口径
     if (p.api_format or "openai").lower() == "ta3":
@@ -98,7 +105,7 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
         api_format=p.api_format or "openai",
         is_active=p.is_active,
         has_api_key=bool(p.api_key) or bool(creds),
-        model_count=await provider_service.count_models(db, p.id),
+        model_count=model_count,
         auth_status=getattr(p, "auth_status", None),
         account_label=getattr(p, "account_label", None),
         created_at=str(p.created_at) if p.created_at else None,
@@ -117,8 +124,22 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
 
 @router.get("/providers", response_model=list[ProviderOut])
 async def list_providers(db: AsyncSession = Depends(get_db)):
+    from app.persistence.models.model_reg import Model, ProviderCredential
+
     providers = await provider_service.list_providers(db)
-    return [await _to_out(db, p) for p in providers]
+    if not providers:
+        return []
+    # plan-20261118-runtime-question-cache：模型数量与凭据各读一次，避免任务并发时为每行等待两个查询。
+    counts = dict((await db.execute(
+        select(Model.provider_id, func.count(Model.id)).group_by(Model.provider_id)
+    )).all())
+    creds_by_provider = defaultdict(list)
+    rows = (await db.scalars(select(ProviderCredential).order_by(
+        ProviderCredential.priority, ProviderCredential.id,
+    ).execution_options(populate_existing=True))).all()
+    for credential in rows:
+        creds_by_provider[credential.provider_id].append(credential)
+    return [_provider_out(p, creds_by_provider[p.id], counts.get(p.id, 0)) for p in providers]
 
 
 @router.post("/providers", response_model=ProviderOut)
