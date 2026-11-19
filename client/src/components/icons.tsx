@@ -591,6 +591,41 @@ export function IconBrandWindowsTerminal({ size = 16, className }: { size?: numb
   );
 }
 
+/** 自动换行图标：代码块 / 文件预览「自动换行」状态 */
+export function IconWrapText({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "wrap-text")}>
+      <path d="M3 6h18" />
+      <path d="M3 12h15a3 3 0 1 1 0 6h-4" />
+      <polyline points="16 16 14 18 16 20" />
+      <path d="M3 18h7" />
+    </svg>
+  );
+}
+
+/** 不自动换行图标：代码块 / 文件预览「横向不折行」状态 */
+export function IconNoWrap({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "no-wrap")}>
+      <path d="M3 6h12" />
+      <path d="M3 12h18" />
+      <polyline points="18 9 21 12 18 15" />
+      <path d="M3 18h12" />
+    </svg>
+  );
+}
+
+/** 表格图标：Markdown 表格卡片头部展示 */
+export function IconTable({ size = 14, color = "currentColor", strokeWidth = 1.75, ...rest }: IconProps) {
+  return (
+    <svg {...baseProps(size, color, strokeWidth, rest, "table")}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="3" y1="9" x2="21" y2="9" />
+      <line x1="9" y1="9" x2="9" y2="21" />
+    </svg>
+  );
+}
+
 /* ── 语义别名（指向上面已桥接的实现，不要删：调用方按语义名取用） ── */
 
 export const IconChat = IconMessageSquare;

@@ -50,6 +50,8 @@ export interface UiPrefs {
   panelDragLayout: PanelDragLayout;
   /** plan-329-1647 S6（RFL-7）：是否允许按帧预算自动降级（关闭则固定 panelDragLayout） */
   panelDragAutoDegrade: boolean;
+  /** plan-03054563-1：代码块与文件预览是否自动换行（默认关闭，保留横向滚动；支持在卡片右上角或外观设置切换并持久化） */
+  codeWordWrap: boolean;
 }
 
 export type MotionLevel = "full" | "reduced" | "off";
@@ -82,7 +84,8 @@ const DEFAULTS: UiPrefs = {
   language: "zh",
   motionLevel: "full",
   panelDragLayout: "realtime",
-  panelDragAutoDegrade: true,
+  panelDragAutoDegrade: false,
+  codeWordWrap: false,
 };
 
 const FONT_OPTIONS: Record<string, string> = {
@@ -253,6 +256,7 @@ export function applyUiVars(p: UiPrefs, opts?: { glassToggle?: boolean }) {
   else root.style.removeProperty("--sidebar-focus");
   root.style.fontSize = `${p.uiBaseFontSize}px`;
   root.setAttribute("data-glass", p.glassmorphism ? "on" : "off");
+  root.setAttribute("data-code-wrap", p.codeWordWrap ? "on" : "off");
   // 清理旧版本遗留的 DOM 属性（外部穿透 / 液态玻璃 / 玻璃风格 / 诊断）。
   root.removeAttribute("data-external");
   root.removeAttribute("data-glass-style");

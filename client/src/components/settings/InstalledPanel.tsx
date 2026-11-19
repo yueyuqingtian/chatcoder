@@ -28,7 +28,6 @@ import {
 import { ActionDialogs, toneOf } from "./MarketPanel";
 import { MicroAppSettings } from "./MicroAppSettings";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
-import { DebuggerPanel } from "./DebuggerPanel";
 import { CordisPluginsSection } from "./CordisPluginsSection";
 
 /** plan-693-2868（D1 / §7 P4-3）：「拓展」第四类 = 微应用。
@@ -160,7 +159,7 @@ export function InstalledPanel() {
   /** 导入 / 安装弹窗：只覆盖插件 / 技能 / 连接器——微应用走「导入 zip 包」的独立通道
    *  （`POST /api/microapps/import`，见 MarketPanel 的「微应用」标签），不混进这三个既有弹窗。 */
   const [dialog, setDialog] = useState<null | "plugin" | "skill" | "connector">(null);
-  /** 内置连接器（database / debugger）的专属配置面板（plan-41-198：保留原配置能力） */
+  /** 内置连接器（database）的专属配置面板（plan-41-198：保留原配置能力） */
   const [configServer, setConfigServer] = useState<McpServerOut | null>(null);
   /** dsh 第三方插件数量（由子组件上报）：有插件时不再显示整页空态，避免「装了却提示没装」 */
   const [dshCount, setDshCount] = useState(0);
@@ -633,7 +632,7 @@ export function InstalledPanel() {
                   <div className="inst-actions">
                     {/* plan-91-393：次要操作悬停显现，固定槽位仅改透明度，避免布局抖动 */}
                     <span className="sb-hover-actions">
-                      {row.kind === "connector" && (row.name === "database" || row.name === "debugger") && (
+                      {row.kind === "connector" && row.name === "database" && (
                         <Tooltip title="配置">
                           <button className="ui-icon-btn size-xs" aria-label="配置"
                             onClick={() => setConfigServer(connectors.find((c) => c.id === row.dbId) ?? null)}>
@@ -657,10 +656,8 @@ export function InstalledPanel() {
                           <IconInfo size={14} />
                         </button>
                       </Tooltip>
-                      {/* plan-external-microapps：外置条目没有「移除」——它的目录在用户本机（常在仓库里），
-                          从设置页删目录是不可接受的副作用；下线只到「停止进程」为止（见上方图标）。
-                          直接从操作区省略，不留一个点了会弹窗又什么都不能做的死按钮。 */}
-                      {!row.external && (
+                      {/* plan-03054563-1：内置条目（source="builtin"，如数据库连接）与外置微应用均不提供移除/删除 */}
+                      {!row.external && row.source !== "builtin" && (
                         <Tooltip title={row.kind === "plugin" ? "卸载" : row.kind === "microapp" ? "从微应用库移除" : "移除"}>
                           <button className="ui-icon-btn size-xs" aria-label="移除" onClick={() => setDropTarget(row)}>
                             <IconTrash size={14} />
@@ -692,17 +689,16 @@ export function InstalledPanel() {
         ))}
       </div>
 
-      {/* 内置连接器配置（数据库连接 / 开发调试）——保留原有专属配置面板 */}
+      {/* 内置连接器配置（数据库连接）——保留原有专属配置面板 */}
       <Modal
         open={configServer !== null}
         onClose={() => setConfigServer(null)}
-        title={configServer?.name === "database" ? "数据库连接配置" : configServer?.name === "debugger" ? "开发调试配置" : "连接器配置"}
-        /* 内置的数据库 / 调试连接器，其描述已在主卡片中展示，标题栏不再重复 */
-        subtitle={configServer?.name === "database" || configServer?.name === "debugger" ? undefined : (configServer?.description || undefined)}
+        title={configServer?.name === "database" ? "数据库连接配置" : "连接器配置"}
+        /* 内置的数据库连接器，其描述已在主卡片中展示，标题栏不再重复 */
+        subtitle={configServer?.name === "database" ? undefined : (configServer?.description || undefined)}
         width={860}
       >
         {configServer?.name === "database" && <DatabaseConnectionsPanel server={configServer} />}
-        {configServer?.name === "debugger" && <DebuggerPanel server={configServer} />}
       </Modal>
 
       {/* 技能仓库：添加 / 同步 / 按需导入 / 移除（保留现有技能仓库导入方式） */}
@@ -852,9 +848,8 @@ export function InstalledPanel() {
                   {detail.enabled ? "停用" : "启用"}
                 </button>
               )}
-              {/* 外置微应用的目录属于用户自己（常在仓库里），不提供删除：
-                  从设置页删目录是不可接受的副作用，直接不给按钮，而不是给一个点了没反应的死按钮 */}
-              {!detail.external && (
+              {/* 内置连接器/技能与外置微应用均不提供删除 */}
+              {!detail.external && detail.source !== "builtin" && (
                 <button
                   className="btn btn-danger-ghost btn-sm"
                   onClick={() => { setDropTarget(detail); setDetail(null); }}

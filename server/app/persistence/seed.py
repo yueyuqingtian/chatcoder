@@ -243,14 +243,13 @@ async def _seed_builtin_mcp(db: AsyncSession) -> int:
             "args": (["--mcp-server", "database"] if frozen
                      else ["-m", "app.mcp_servers.database"]) + ["--workspace", "${workspaceFolder}"],
         },
-        {
-            "name": "debugger",
-            "display_name": "开发调试",
-            "description": "让 AI 在项目运行期间调用接口、在代码中设断点或做方法级现场观测"
-                           "（Web 前端 CDP、Java JDWP 断点、Arthas 观测——IDEA 调试中也能用）。",
-            "args": ["--mcp-server", "debugger"] if frozen else ["-m", "app.mcp_servers.debugger"],
-        },
     ]
+    # plan-03054563-1：移除内置「开发调试」连接器——老库若存有 source="builtin" 的 debugger 行则同步清理
+    legacy_dbg = (await db.execute(
+        select(McpServer).where(McpServer.name == "debugger", McpServer.source == "builtin")
+    )).scalars().all()
+    for row in legacy_dbg:
+        await db.delete(row)
     created = 0
     for spec in specs:
         existing = (await db.execute(

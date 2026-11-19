@@ -19,9 +19,10 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { IconCopy, IconCheck } from "../icons";
+import { IconCopy, IconCheck, IconWrapText, IconNoWrap } from "../icons";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
+import { useUiStore } from "../../store/ui";
 import { api, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { TableBlock } from "./TableBlock";
@@ -43,6 +44,8 @@ function statCacheSet(key: string, value: boolean): void {
 
 export function CodeBlockWrapper({ children, live = false }: { children: ReactNode; live?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const codeWordWrap = useUiStore((s) => s.codeWordWrap);
+  const setPrefs = useUiStore((s) => s.setPrefs);
   const preRef = useRef<HTMLPreElement>(null);
   const source = nodeText(children);
 
@@ -73,21 +76,34 @@ export function CodeBlockWrapper({ children, live = false }: { children: ReactNo
     <div className="md-code-block" role="region" aria-label="代码块">
       <div className="md-code-head">
         <span className="md-code-lang">{detectedLang || "code"}</span>
-        {/* plan-282-1416：复制按钮图标化（原「复制」文字改为纯图标 + aria-label），
-            头部更安静，同时保留已复制反馈（图标换勾 + copied 态着色） */}
-        {/* plan-20261016-ux（问题 8）：悬停提示改用统一 Tooltip（不再用原生 title） */}
-        <Tooltip content={copied ? "已复制到剪贴板" : "复制代码"} side="top">
-          <button
-            className={`md-code-copy-btn${copied ? " copied" : ""}`}
-            onClick={handleCopy}
-            aria-label={copied ? "已复制" : "复制代码"}
-            type="button"
-          >
-            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-          </button>
-        </Tooltip>
+        <div className="md-code-actions">
+          <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+            <button
+              className="md-code-action-btn"
+              onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
+              aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
+              aria-pressed={codeWordWrap}
+              type="button"
+            >
+              {codeWordWrap ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
+            </button>
+          </Tooltip>
+          {/* plan-282-1416：复制按钮图标化（原「复制」文字改为纯图标 + aria-label），
+              头部更安静，同时保留已复制反馈（图标换勾 + copied 态着色） */}
+          {/* plan-20261016-ux（问题 8）：悬停提示改用统一 Tooltip（不再用原生 title） */}
+          <Tooltip content={copied ? "已复制到剪贴板" : "复制代码"} side="top">
+            <button
+              className={`md-code-copy-btn${copied ? " copied" : ""}`}
+              onClick={handleCopy}
+              aria-label={copied ? "已复制" : "复制代码"}
+              type="button"
+            >
+              {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+            </button>
+          </Tooltip>
+        </div>
       </div>
-      <pre className="md-code-pre" ref={preRef}>{source.length > 12000
+      <pre className={`md-code-pre${codeWordWrap ? " is-wrapped" : ""}`} ref={preRef}>{source.length > 12000
         ? <LongCode source={source} language={detectedLang} live={live} /> : children}</pre>
     </div>
   );

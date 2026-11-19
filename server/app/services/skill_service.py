@@ -263,6 +263,10 @@ async def update_mcp_server(db: AsyncSession, server_id: int, **kwargs: Any) -> 
     return await run_write_locked(patch, label=f"mcp.update.{server_id}")
 
 
+class BuiltinMcpDeleteError(ValueError):
+    """内置连接器不允许删除（plan-03054563-1）。"""
+
+
 async def delete_mcp_server(db: AsyncSession, server_id: int) -> bool:
     from app.persistence.database import run_write_locked
 
@@ -270,6 +274,8 @@ async def delete_mcp_server(db: AsyncSession, server_id: int) -> bool:
         srv = s.get(McpServer, server_id)
         if srv is None:
             return False
+        if srv.source == "builtin":
+            raise BuiltinMcpDeleteError("内置连接器不支持删除")
         s.delete(srv)
         s.commit()
         return True

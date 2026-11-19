@@ -3,11 +3,20 @@ import { memo, useMemo } from "react";
 import type { MessageOut } from "@chatcoder/shared";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
-import { IconChevronRight } from "../icons";
+import { IconAlertCircle, IconCheck, IconChevronRight } from "../icons";
 import { Tooltip } from "../ui";
+import { parseUtc } from "../../utils/time";
+import { useRunningTicker } from "./useRunningTicker";
 import { subagentState, type SubagentState } from "./subagentStatus";
 import { SubagentAvatar, SUBAGENT_ROLE_LABEL, resolveSubagentRole } from "./SubagentAvatar";
 import { subagentActivity } from "./subagentActivity";
+
+function fmtElapsed(startMs: number, endMs: number): string {
+  if (!startMs || endMs < startMs) return "";
+  const sec = Math.max(0, Math.round((endMs - startMs) / 1000));
+  const min = Math.floor(sec / 60);
+  return min > 0 ? `${min}m${sec % 60}s` : `${sec}s`;
+}
 
 const STATE_TEXT: Record<SubagentState, string> = {
   running: "执行中",
@@ -35,13 +44,18 @@ export interface SubagentMetaLite {
 export const SubagentCard = memo(function SubagentCard({ meta }: { meta: SubagentMetaLite }) {
   const openSubagent = usePanelStore((s) => s.openSubagent);
   const status = useChatStore((s) => s.subagentMeta[meta.agentId]?.status ?? meta.status);
+  const startedAtRaw = useChatStore((s) => s.subagentMeta[meta.agentId]?.startedAt ?? meta.startedAt ?? null);
+  const endedAtRaw = useChatStore((s) => s.subagentMeta[meta.agentId]?.endedAt ?? meta.endedAt ?? null);
   const state = subagentState(status);
   const running = state === "running";
   const failed = state === "failed";
   const stopped = state === "stopped";
   const done = state === "done";
+  useRunningTicker(running);
 
-
+  const startMs = startedAtRaw ? parseUtc(startedAtRaw) : 0;
+  const endMs = running ? Date.now() : (endedAtRaw ? parseUtc(endedAtRaw) : 0);
+  const durationText = startMs > 0 && endMs > 0 ? fmtElapsed(startMs, endMs) : "";
 
   const errText = (failed || stopped) && meta.error ? String(meta.error).trim() : "";
   const dispatchFailed = meta.dispatchFailed === true;
@@ -75,7 +89,6 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
   const isActionShine = running && sepIdx > 0 && rawActivity.slice(0, sepIdx) === "1";
   const activityText = sepIdx >= 0 ? rawActivity.slice(sepIdx + 1) : rawActivity;
 
-
   const stateText = dispatchFailed ? "派发失败" : STATE_TEXT[state];
   const stateClass = running ? "is-run" : done ? "is-ok" : failed ? "is-fail" : "";
 
@@ -88,8 +101,8 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
         : state === "pending"
           ? "等待调度开始…"
           : done
-            ? "点击查看完整子代理会话"
-            : "点击查看执行记录";
+            ? "已完成子代理任务"
+            : "查看执行记录";
 
   const tip = dispatchFailed
     ? `${meta.name}（派发失败：${errText || "未知原因"}）`
@@ -101,28 +114,36 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
     <div className="tc-node tc-subagent">
       <Tooltip content={tip}>
         <div
-          className={"subagent-row" + (clickable ? " clickable" : "")}
+          className={"subagent-card" + (clickable ? " clickable" : "")}
           data-tool-state={running ? "running" : failed ? "fail" : "done"}
-          role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : undefined}
+          role={clickable ? "button" : undefined}
+          tabIndex={clickable ? 0 : undefined}
           onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openSubagent(meta.agentId, meta.name); } }}
           onClick={clickable ? () => openSubagent(meta.agentId, meta.name) : undefined}
         >
           <SubagentAvatar role={role} running={running} />
-          <div className="sa-main">
-            <div className="sa-line1">
+          <div className="sa-body">
+            <div className="sa-top">
               <span className="sa-title">{displayTitle}</span>
-              <span className="sa-role-text">· {roleLabel}</span>
-              <span className={`sa-state ${stateClass}`}>{stateText}</span>
+              <span className="sa-role-pill">{roleLabel}</span>
+              <span className="sa-right">
+                <span className={`sa-state ${stateClass}`}>
+                  {running && <span className="sa-dot-run" aria-hidden />}
+                  {done && <IconCheck size={12} />}
+                  {failed && <IconAlertCircle size={12} />}
+                  <span>{stateText}{durationText ? ` · ${durationText}` : ""}</span>
+                </span>
+                {clickable && (
+                  <span className="sa-open-hint" aria-hidden>
+                    <IconChevronRight size={13} />
+                  </span>
+                )}
+              </span>
             </div>
-            <div className={"sa-line2" + (errText ? " is-error" : "")}>
+            <div className={"sa-sub" + (errText ? " is-error" : "")}>
               <span className={isActionShine ? "text-shine" : undefined}>{secondLine}</span>
             </div>
           </div>
-          {clickable && (
-            <span className="sa-open-hint" aria-hidden>
-              <IconChevronRight size={11} />
-            </span>
-          )}
         </div>
       </Tooltip>
     </div>

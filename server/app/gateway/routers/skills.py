@@ -193,7 +193,10 @@ async def update_mcp_server(server_id: int, body: McpServerUpdate, db: AsyncSess
 
 @router.delete("/mcp-servers/{server_id}")
 async def delete_mcp_server(server_id: int, db: AsyncSession = Depends(get_db)):
-    ok = await skill_service.delete_mcp_server(db, server_id)
+    try:
+        ok = await skill_service.delete_mcp_server(db, server_id)
+    except skill_service.BuiltinMcpDeleteError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not ok:
         raise HTTPException(404, "mcp server not found")
     return {"ok": True}

@@ -8,6 +8,8 @@
  * （它们混进正文会让「整段带行号」判定失败、行号错位），`NUMBERED` 决定行号起点。 */
 import { memo, useCallback, useMemo } from "react";
 import { Tooltip } from "../ui/Tooltip";
+import { IconWrapText, IconNoWrap } from "../icons";
+import { useUiStore } from "../../store/ui";
 import hljs from "highlight.js/lib/core";
 import typescript from "highlight.js/lib/languages/typescript";
 import javascript from "highlight.js/lib/languages/javascript";
@@ -75,6 +77,8 @@ export function highlightLines(path: string, lines: string[]): string[] | null {
 }
 
 export const CodeView = memo(function CodeView({ path, text }: { path: string; text: string }) {
+  const codeWordWrap = useUiStore((s) => s.codeWordWrap);
+  const setPrefs = useUiStore((s) => s.setPrefs);
   // 解析成「正文行 + 行号起点」：剥离文件头 / 截断提示后再判「整段带行号」，
   // 保证行号槽与文件真实行号对齐（plan-522-2209 R10 保留了这段逻辑）
   const { body, start, total, meta } = useMemo(() => {
@@ -129,8 +133,21 @@ export const CodeView = memo(function CodeView({ path, text }: { path: string; t
         <Tooltip content={path} side="top"><span className="cv-name">{baseName(path)}</span></Tooltip>
         {/* 文件属性（共 N 行）：截断说明由 ClampBlock 的折叠行统一给出，这里不再拼「已省略…」 */}
         <span className="cv-meta">{meta}</span>
+        <div className="md-code-actions">
+          <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+            <button
+              type="button"
+              className="md-code-action-btn"
+              onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
+              aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
+              aria-pressed={codeWordWrap}
+            >
+              {codeWordWrap ? <IconWrapText size={13} /> : <IconNoWrap size={13} />}
+            </button>
+          </Tooltip>
+        </div>
       </div>
-      <div className="cv-body" style={{ ["--cv-gutter" as string]: `${gutterW + 2}ch` }}>
+      <div className={`cv-body${codeWordWrap ? " is-wrapped" : ""}`} style={{ ["--cv-gutter" as string]: `${gutterW + 2}ch` }}>
         <ClampBlock text={body} render={renderLines} lang={langOf(path) ?? undefined} copyText={text} />
       </div>
     </div>

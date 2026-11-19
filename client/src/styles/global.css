@@ -1199,21 +1199,21 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    这里显式覆盖继承值，并把宽度收到 4px（全局是 6px）。 */
 .tc-output,
 .tc-error-output {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
   scrollbar-gutter: stable;   /* 出现/消失不引起内容横向抖动 */
 }
 .tc-output::-webkit-scrollbar,
-.tc-error-output::-webkit-scrollbar { width: 4px; height: 4px; }
+.tc-error-output::-webkit-scrollbar { width: 6px; height: 6px; }
 .tc-output::-webkit-scrollbar-track,
 .tc-error-output::-webkit-scrollbar-track { background: transparent; }
 .tc-output::-webkit-scrollbar-thumb,
 .tc-error-output::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--text-3) 42%, transparent);
+  border-radius: var(--r-pill);
 }
 .tc-output::-webkit-scrollbar-thumb:hover,
-.tc-error-output::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+.tc-error-output::-webkit-scrollbar-thumb:hover { background: color-mix(in oklab, var(--text-2) 65%, transparent); }
 /* 工具调用展开区（对齐 zcode 3.14.2） */
 /* plan-621-2572: 工具输出区字号由 11px 提升为 12px、行高由 1.4 提升为 1.55，长日志阅读更舒适 */
 .tc-code { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-1); white-space: pre-wrap; word-break: break-word; line-height: 1.55; }

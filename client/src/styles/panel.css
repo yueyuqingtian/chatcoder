@@ -402,9 +402,14 @@
   transition: flex-basis var(--dur-spring) var(--spring-soft), visibility 0s linear var(--dur-spring);
 }
 /* 文件管理 Markdown 预览（plan-20261017-goal12 项 9）：按「阅读文档」排版——正文居中限宽、标题层级清楚、
- * 代码块与表格统一为卡片（令牌圆角），代码块头部与复制按钮在此独立定义（不依赖聊天作用域） */
-.ft-md-preview { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 24px 28px; font-size: 13.5px; line-height: 1.75; color: var(--text-1); }
-.ft-md-preview .md-body { max-width: 820px; margin: 0 auto; }
+ * 代码块与表格与消息流共用 flow.css 中的统一卡片语言（12px 圆角、头部操作区、常驻横向滑块、自动换行） */
+.ft-md-preview {
+  container-type: inline-size;
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: clamp(14px, 3cqi, 20px) clamp(14px, 4cqi, 24px) 28px;
+  font-size: 13.5px; line-height: 1.75; color: var(--text-1);
+}
+.ft-md-preview .md-body { max-width: 820px; margin: 0 auto; min-width: 0; }
 .ft-md-preview .md-body > :first-child { margin-top: 0; }
 .ft-md-preview .md-body h1, .ft-md-preview .md-body h2, .ft-md-preview .md-body h3,
 .ft-md-preview .md-body h4 { color: var(--text-1); line-height: 1.35; font-weight: 600; margin: 1.3em 0 .6em; }
@@ -421,48 +426,14 @@
 .ft-md-preview .md-body blockquote > :last-child { margin-bottom: 0; }
 .ft-md-preview .md-body hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
 .ft-md-preview .md-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-/* plan-156-620：右侧 Markdown 预览与消息流同一套「安静」样式——
-   · 行内代码：中性底 + 细描边、正文色（不再整篇蓝字）；只作用于段落内的行内代码；
-   · 代码块：朴素代码窗口（细边框、无灰底、头部不加底色）；块内 code 清掉行内代码样式
-     （Markdown 组件给所有 code 都挂了 md-inline-code，此前代码块每一行都被染成蓝底）；
-   · 表格：只保留内层卡片一圈边框（外层块不再加边框，避免卡片套卡片），表头 / 行样式沿用消息流。 */
 .ft-md-preview .md-body :not(pre) > .md-inline-code {
   font-family: var(--font-mono); font-size: 0.86em;
   color: var(--text-1);
   background: color-mix(in oklab, var(--text-1) 6%, transparent);
   border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
-  /* plan-156-621：内距收进项目间距档（2/4/8/12），5px 不在档位内 */
   padding: 0 4px; border-radius: var(--r-sm);
   overflow-wrap: anywhere;
 }
-/* plan-621-2572：保持 border 与圆角令牌，底色设为 2% 纯净浅底，头部 4.5% 明度差，形成清晰层次 */
-.ft-md-preview .md-body .md-code-block {
-  position: relative; margin: 1em 0;
-  border: 1px solid var(--surface-inset-border); border-radius: var(--r-lg);
-  background: color-mix(in oklab, var(--text-1) 2%, var(--bg-panel)); overflow: hidden;
-}
-.ft-md-preview .md-body .md-code-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  min-height: 34px; padding: 0 8px 0 14px;
-  border-bottom: 1px solid var(--surface-inset-border);
-  background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
-}
-.ft-md-preview .md-body .md-code-lang { font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--text-2); }
-.ft-md-preview .md-body .md-code-copy-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: var(--r-md); background: transparent; color: var(--text-3); cursor: pointer; transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard); }
-.ft-md-preview .md-body .md-code-copy-btn:hover { background: var(--bg-hover); color: var(--text-1); }
-.ft-md-preview .md-body .md-code-copy-btn.copied { color: var(--success); }
-.ft-md-preview .md-body .md-code-pre {
-  margin: 0; padding: 12px 16px 14px; overflow-x: auto;
-  font-size: 12.5px; line-height: 1.7; tab-size: 2;
-  background: transparent; border: none;
-}
-.ft-md-preview .md-body .md-code-pre code,
-.ft-md-preview .md-body .md-code-pre code.md-inline-code {
-  display: block; padding: 0; border: none; border-radius: 0;
-  background: transparent; color: var(--text-1);
-  font-size: inherit; overflow-wrap: normal; white-space: pre;
-}
-.ft-md-preview .md-body .md-table-block { margin: 1em 0; border: none; border-radius: 0; overflow: visible; }
 .ft-md-preview .md-body img { max-width: 100%; border-radius: var(--r-md); }
 .ft-preview-err { padding: 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; color: var(--error); font-size: 12px; }
 .ft-diff-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }

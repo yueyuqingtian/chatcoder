@@ -7,7 +7,7 @@
  * 数据从渲染后的 DOM 读取——流式与落库共用同一个组件，不需要另外解析 Markdown 源文。
  */
 import { Children, isValidElement, useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { IconCheck, IconCopy, IconDownload, IconMaximize } from "../icons";
+import { IconCheck, IconCopy, IconDownload, IconMaximize, IconTable } from "../icons";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { tableRows, tableMarkdown, nodeText } from "./markdownData";
@@ -128,6 +128,8 @@ export function TableBlock({ children }: { children?: ReactNode }) {
   const getTable = useCallback(() => tableRef.current, []);
   const getModalTable = useCallback(() => modalTableRef.current ?? tableRef.current, []);
   const rows = useMemo(() => tableRows(children), [children]);
+  const colCount = rows[0]?.length ?? 0;
+  const dataRowCount = rows.length > 1 ? rows.length - 1 : rows.length;
   const long = rows.length > 80;
   const data = useMemo(() => long ? { markdown: tableMarkdown(children), csv: "\uFEFF" + rows.map((row) => row.map((cell) =>
     /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell).join(",")).join("\r\n") } : undefined, [children, rows, long]);
@@ -143,8 +145,15 @@ export function TableBlock({ children }: { children?: ReactNode }) {
   }), [children, rows, long]);
   return (
     <div className="md-table-block">
-      <TableTools getTable={getTable} data={data} onExpand={() => setOpen(true)} />
       <div className="md-table-card">
+        <div className="md-table-head">
+          <span className="md-table-meta">
+            <IconTable size={13} />
+            <span>表格</span>
+            {colCount > 0 && <span className="md-table-dim">· {dataRowCount} 行 × {colCount} 列</span>}
+          </span>
+          <TableTools getTable={getTable} data={data} onExpand={() => setOpen(true)} />
+        </div>
         <div className="md-table-scroll">
           <table className={`md-table${long ? " md-table-windowed" : ""}`} ref={tableRef}>{body}</table>
         </div>

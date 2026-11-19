@@ -133,18 +133,26 @@ async def db(tmp_path):
 
 @pytest.mark.asyncio
 async def test_seed_builtin_mcp_idempotent_and_defaults_off(db):
-    """内置 MCP 幂等注册：重复执行不重复插入，且**默认不启用**。
+    """内置 MCP 幂等注册：仅保留 database，重复执行不重复插入，且**默认不启用**。
 
     默认关闭是产品要求（用户手动开启），必须由测试守住——
     否则一次误改就会让所有用户的数据库 MCP 默认开着。
     """
     from app.persistence.seed import _seed_builtin_mcp
 
+    # 先放入一条遗留的内置 debugger，验证启动播种会自动清理
+    db.add(McpServer(
+        name="debugger", display_name="开发调试", source="builtin",
+        transport="stdio", command="python", args=["-m", "app.mcp_servers.debugger"],
+        is_active=False,
+    ))
+    await db.commit()
+
     first = await _seed_builtin_mcp(db)
-    assert first == 2, "应注册 database 与 debugger 两个内置 MCP"
+    assert first == 1, "应仅注册 database 一个内置 MCP（不再内置 debugger）"
 
     rows = (await db.execute(select(McpServer).where(McpServer.source == "builtin"))).scalars().all()
-    assert {r.name for r in rows} == {"database", "debugger"}
+    assert {r.name for r in rows} == {"database"}
     assert all(r.is_active is False for r in rows), "内置 MCP 必须默认关闭"
 
     # 第二次执行：不新增，且保留用户已开启的状态
@@ -168,3 +176,17 @@ async def test_builtin_mcp_entries_are_stdio_with_command(db):
         assert r.transport == "stdio"
         assert r.command, f"{r.name} 缺少 command"
         assert r.args, f"{r.name} 缺少 args"
+
+
+@pytest.mark.asyncio
+async def test_builtin_mcp_cannot_be_deleted(db):
+    """内置连接器不允许通过 delete_mcp_server 删除（plan-03054563-1）。"""
+    from app.persistence.seed import _seed_builtin_mcp
+    from app.services.skill_service import BuiltinMcpDeleteError, delete_mcp_server
+
+    await _seed_builtin_mcp(db)
+    await db.commit()
+    row = (await db.execute(select(McpServer).where(McpServer.name == "database"))).scalars().first()
+    assert row is not None
+    with pytest.raises(BuiltinMcpDeleteError):
+        await delete_mcp_server(db, row.id)

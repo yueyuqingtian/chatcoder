@@ -74,7 +74,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 registerBuiltinPlugins();
 fixture(100, false);
-void initialMessages(SID).then((messages) => useChatStore.setState({ messages }));
+void initialMessages(SID).then((batch) => {
+  batch.commit();
+  useChatStore.setState({ messages: batch.items });
+});
 
 function FixtureApp() {
   const left = useRef<HTMLDivElement>(null), right = useRef<HTMLDivElement>(null);
@@ -129,7 +132,9 @@ function FixtureApp() {
   useEffect(() => () => { window.clearTimeout(samplingTimer.current); metrics.stop(); }, []);
   const load = async (count: number, heavy = false) => {
     setRate(0); setRounds(count); fixture(count, heavy);
-    useChatStore.setState({ messages: await initialMessages(SID) });
+    const batch = await initialMessages(SID);
+    batch.commit();
+    useChatStore.setState({ messages: batch.items });
   };
   return <div className="perf-fixture">
     <header className="perf-toolbar">

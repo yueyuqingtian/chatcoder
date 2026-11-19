@@ -577,12 +577,14 @@ export function MarketPanel() {
                   }
                   entries={[
                     { label: "查看详情", onSelect: () => setDetail(item) },
-                    {
-                      label: item.kind === "plugin" ? "卸载" : "删除",
-                      icon: <IconTrash size={12} />,
-                      danger: true,
-                      onSelect: () => setDropTarget(item),
-                    },
+                    ...(item.group !== "builtin" && item.source !== "builtin"
+                      ? [{
+                        label: item.kind === "plugin" ? "卸载" : "删除",
+                        icon: <IconTrash size={12} />,
+                        danger: true,
+                        onSelect: () => setDropTarget(item),
+                      }]
+                      : []),
                   ]}
                 />
                 {(item.kind === "plugin" || item.localId != null) && (
@@ -827,7 +829,7 @@ export function MarketPanel() {
                   </button>
                 )}
                 <button className="btn btn-primary btn-sm" onClick={goManage}>前往管理 →</button>
-                {(detail.kind === "plugin" || detail.localId != null) && (
+                {(detail.kind === "plugin" || detail.localId != null) && detail.group !== "builtin" && detail.source !== "builtin" && (
                   <button className="btn btn-danger-ghost btn-sm" onClick={() => setDropTarget(detail)}>
                     <IconTrash size={12} /> {detail.kind === "plugin" ? "卸载" : "删除"}
                   </button>

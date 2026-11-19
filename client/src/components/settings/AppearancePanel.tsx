@@ -203,6 +203,12 @@ export function AppearancePanel() {
             onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
             format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />
         </Row>
+        <Row
+          title="代码块自动换行"
+          desc="开启后消息流与文档预览中的代码块、文件预览长行自动折行；也可直接在卡片右上角点击图标切换"
+        >
+          <Sw checked={ui.codeWordWrap} onChange={(v) => ui.setPrefs({ codeWordWrap: v })} />
+        </Row>
       </div>
 
       <div className="settings-card">

@@ -13,7 +13,7 @@ import { parseServerTime } from "../utils/time";
 import { adoptWakeupTurn } from "../utils/wakeupMessages";
 import { equalJson } from "../utils/equalMessage";
 import { indexMessageAppend, hasMessageId } from "../utils/messageChanges";
-import { initialMessages, refreshMessageWindow, abortMessageHistory, invalidateMessageHistory } from "./messageHistory";
+import { initialMessages, refreshMessageWindow, abortMessageHistory, clearMessageHistory, invalidateMessageHistory } from "./messageHistory";
 import { isBusy } from "../perf/bus";
 import { registerReconcileTask, RECONCILE_ORDER } from "../perf/reconcile";
 import type { ServerEventName } from "@chatcoder/shared/events";
@@ -1347,6 +1347,10 @@ function _messageSignature(m: MessageOut): string {
   ].join("|");
 }
 
+export function mergeRefreshedMessages(existing: MessageOut[], fetched: MessageOut[], baseIds: Set<number>): MessageOut[] {
+  return _mergeRefreshed(existing, fetched, baseIds);
+}
+
 /** v967: cached 切回时刷新 messages（DB 最新），与快照去重合并——补齐切走期间已落库但未收到广播的消息。 */
 async function refreshAndMergeMessages(sessionId: number): Promise<void> {
   const cur = useChatStore.getState();
@@ -1355,24 +1359,37 @@ async function refreshAndMergeMessages(sessionId: number): Promise<void> {
     const result = await refreshMessageWindow(sessionId, cur.messages);
     const now = useChatStore.getState();
     if (now.currentSessionId !== sessionId) return;
-    const present = new Set(result.items.map((m) => m.id));
-    const existing = now.messages.filter((m) => !result.checkedIds.has(m.id) || present.has(m.id));
-    useChatStore.setState({ messages: _mergeRefreshed(existing, result.items, new Set()), loading: false });
+    // plan-20261120-message-loss：checkedIds 交由 _mergeRefreshed 统一校验（保留空快照保护与 id > maxFetchedId 尾部保护），
+    // 且仅在确认归属当前会话并完成合并后才提交游标，避免切走丢弃消息却提前推进游标造成永久空洞。
+    useChatStore.setState((s) => (
+      s.currentSessionId !== sessionId
+        ? {}
+        : { messages: _mergeRefreshed(s.messages, result.items, result.checkedIds), loading: false }
+    ));
+    if (useChatStore.getState().currentSessionId === sessionId) result.commit();
   } catch {
     return; // 拉取失败不阻塞切换（保留快照）
   }
 }
 
 /** plan-20261101-performance：分页只合并本窗口，不把窗口外的消息当成删除。 */
-export function mergeHistoryIntoChat(sessionId: number, messages: MessageOut[], threadId?: number, checkedIds = new Set<number>()): void {
+export function mergeHistoryIntoChat(
+  sessionId: number,
+  messages: MessageOut[],
+  threadId?: number,
+  checkedIds = new Set<number>(),
+  commit?: () => void,
+): void {
+  let applied = false;
   useChatStore.setState((s) => {
-    if (s.currentSessionId !== sessionId || (!messages.length && !checkedIds.size)) return {};
-    const present = new Set(messages.map((m) => m.id));
-    const retain = (existing: MessageOut[]) => existing.filter((m) => !checkedIds.has(m.id) || present.has(m.id));
+    if (s.currentSessionId !== sessionId) return {};
+    applied = true;
+    if (!messages.length && !checkedIds.size) return {};
     if (threadId != null) return { subagentMessages: { ...s.subagentMessages,
-      [threadId]: _mergeRefreshed(retain(s.subagentMessages[threadId] ?? []), messages, new Set()) } };
-    return { messages: _mergeRefreshed(retain(s.messages), messages, new Set()) };
+      [threadId]: _mergeRefreshed(s.subagentMessages[threadId] ?? [], messages, checkedIds) } };
+    return { messages: _mergeRefreshed(s.messages, messages, checkedIds) };
   });
+  if (applied) commit?.();
 }
 
 /** v38 (plan-482): task.proposed 处理中按 request_task_id 取请求任务标题作卡片文案。 */
@@ -1800,6 +1817,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       && rawCached.sessionCreatedAt !== session.created_at,
     );
     if (rawCached && cacheIsStale) {
+      clearMessageHistory(sessionId);
       set((s) => {
         const next = { ...s.sessionState };
         delete next[sessionId];
@@ -1887,7 +1905,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 缓存命中路径在上面已 return，不会走到这里，故缓存切换零闪烁。
     set({ loading: true, error: null, sessionLoading: true, sessionLoadError: false });
     try {
-      const [messages, turns, tasks] = await Promise.all([
+      const [initialPage, turns, tasks] = await Promise.all([
         initialMessages(sessionId),
         api.listTurns(sessionId),
         api.listSessionTasks(sessionId),
@@ -1897,12 +1915,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // plan-20261020-suggestion-gate：请求期间可能已经切走——迟到的响应不得结束当前会话的加载态
       // （否则建议卡会在新会话消息还没渲染时先冒出来）。
       if (get().currentSessionId !== sessionId) return;
-      set({
-        messages, turns, tasks, loading: false, sessionLoading: false,
-        runningTurnId: running?.id ?? null,
-        isRunning: Boolean(running),
-        interruptedTurnId: interrupted?.id ?? null,
+      // plan-20261120-message-loss：冷加载期间 WS 可能已推入新消息，按合并写入避免整表覆盖丢消息；
+      // 合并落定后再提交首屏游标。
+      let messages: MessageOut[] = initialPage.items;
+      set((s) => {
+        messages = _mergeRefreshed(s.messages, initialPage.items, new Set());
+        return {
+          messages, turns, tasks, loading: false, sessionLoading: false,
+          runningTurnId: running?.id ?? null,
+          isRunning: Boolean(running),
+          interruptedTurnId: interrupted?.id ?? null,
+        };
       });
+      initialPage.commit();
       // plan-282-1492: 首次加载（含重启进入）恢复"运行中"必须启动心跳兜底。
       // 此前只有缓存命中路径才启动心跳——若 DB 里那条 running 是上次异常退出遗留的
       // （后端已重启自愈 / turn 结束事件早已丢失），前端就会永远停在"执行中"，
@@ -2049,6 +2074,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessions = await api.listSessions();
       // plan-156-620：删除的可能是子会话（不在 sessions 里），子会话桶同步重建
       void get().loadSubsessionIndex();
+      clearMessageHistory(sessionId);
       set((s) => ({
         sessions,
         // v2.2: 同步清理已删除会话的分桶缓存
@@ -2751,7 +2777,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .filter((a): boolean => Boolean(a && typeof (a as { file_id?: unknown }).file_id === "string"))
             .map((a) => a as unknown as AttachmentInfo)
         : [];
-      const [messages, turns, tasks] = await Promise.all([
+      const [initialPage, turns, tasks] = await Promise.all([
         initialMessages(currentSessionId),
         api.listTurns(currentSessionId),
         api.listSessionTasks(currentSessionId),
@@ -2761,6 +2787,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // （与 refreshMessages / loadSessionSubagents 同一套防护口径）。后端已回滚成功，
       // 因此返回 true——调用方据此不会再去拉旧会话的回滚预览（那同样会串会话）。
       if (get().currentSessionId !== currentSessionId) return true;
+      const messages = initialPage.items;
+      initialPage.commit();
       // plan-1094: 回滚成功后立即清掉该 turn 及其之后的待审缓存——后端已物理删除
       // RollbackWrite(turn_id >= turn_id)，前端缓存残留会让贴条持续显示「N 待审」
       const nextChanges = { ...get().turnChanges };
@@ -2885,9 +2913,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const result = await refreshMessageWindow(currentSessionId, get().messages);
       if (get().currentSessionId !== currentSessionId) return;
-      const present = new Set(result.items.map((m) => m.id));
-      set((s) => ({ messages: _mergeRefreshed(s.messages.filter((m) =>
-        !result.checkedIds.has(m.id) || present.has(m.id)), result.items, new Set()) }));
+      set((s) => (
+        s.currentSessionId !== currentSessionId
+          ? {}
+          : { messages: _mergeRefreshed(s.messages, result.items, result.checkedIds) }
+      ));
+      if (get().currentSessionId === currentSessionId) result.commit();
     } catch (e) {
       // 切走会话时 abortMessageHistory 会中止本请求（AbortError），旧会话的迟到错误
       // 不得写进当前会话的全局 error（会被 Toast 弹成红色错误条）；主动中止本身也不算失败。
@@ -4667,7 +4698,12 @@ useChatStore.subscribe((state, previous) => {
   if (cold.length <= 5) return;
   cold.sort(([a], [b]) => (_viewUsedAt.get(Number(b)) ?? 0) - (_viewUsedAt.get(Number(a)) ?? 0));
   const next = { ...state.sessionState };
-  for (const [sid] of cold.slice(5)) { delete next[Number(sid)]; _viewUsedAt.delete(Number(sid)); }
+  for (const [sid] of cold.slice(5)) {
+    const id = Number(sid);
+    delete next[id];
+    _viewUsedAt.delete(id);
+    clearMessageHistory(id);
+  }
   useChatStore.setState({ sessionState: next });
 });
 

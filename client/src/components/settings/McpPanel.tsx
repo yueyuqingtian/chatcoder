@@ -9,7 +9,6 @@ import { Modal } from "../Modal";
 import { Collapse, Empty, FormDialog, Input, Select, Textarea, Tooltip } from "../ui";
 import { Sw } from "./shared";
 import { DatabaseConnectionsPanel } from "./DatabaseConnectionsPanel";
-import { DebuggerPanel } from "./DebuggerPanel";
 
 export function McpPanel() {
   const [items, setItems] = useState<McpServerOut[]>([]);
@@ -143,16 +142,13 @@ export function McpPanel() {
               {detailServer.is_active ? "已启用" : "已停用"}
             </span>
           </div>
-          {(detailServer.name === "database" || detailServer.name === "debugger") && (
+          {detailServer.name === "database" && (
             <p className="mcp-detail-desc">
-              {detailServer.name === "database"
-                ? "为当前项目配置数据库连接与 AI 操作权限；权限由服务端强制校验。"
-                : "配置 Web(CDP) / Java(JDWP) 调试端口，并在此观察断点现场。"}
+              为当前项目配置数据库连接与 AI 操作权限；权限由服务端强制校验。
             </p>
           )}
           {detailServer.name === "database" && <DatabaseConnectionsPanel server={detailServer} />}
-          {detailServer.name === "debugger" && <DebuggerPanel server={detailServer} />}
-          {detailServer.name !== "database" && detailServer.name !== "debugger" && (
+          {detailServer.name !== "database" && (
             <div className="db-empty"><span className="db-empty-text">该服务没有专属配置页。</span></div>
           )}
         </div>

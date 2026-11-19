@@ -837,7 +837,7 @@ function MessageFlowCore({
      * 跟随中说明用户在看最新内容，加载历史不该改变他的视图意图。 */
     if (!sticky.isFollowing()) sticky.release();
     try {
-      const messages = await olderMessages(historySessionId, historyThreadId);
+      const { items: messages, commit } = await olderMessages(historySessionId, historyThreadId);
       // 数据到达时才捕获锚点，等待期间用户继续滚动或新输出落地不应使旧锚点抢位。
       if (!sticky.isFollowing()) {
         const anchor = virtualizer.getVirtualItems().find((item) => item.end > el.scrollTop);
@@ -848,7 +848,7 @@ function MessageFlowCore({
             messageId: node?.dataset.messageId, messageOffset: node ? node.getBoundingClientRect().top - top : undefined };
         }
       }
-      mergeHistoryIntoChat(historySessionId, messages, historyThreadId);
+      mergeHistoryIntoChat(historySessionId, messages, historyThreadId, new Set(), commit);
     }
     catch { prependAnchor.current = null; }
     finally { loadingOlder.current = false; }
@@ -2258,7 +2258,7 @@ function SubagentMessageFlow({
     try {
       const result = await refreshMessageWindow(sid, useChatStore.getState().subagentMessages[tid] ?? [], tid);
       if (!alive()) return;
-      mergeHistoryIntoChat(sid, result.items, tid, result.checkedIds);
+      mergeHistoryIntoChat(sid, result.items, tid, result.checkedIds, result.commit);
     } catch (error) {
       /* plan-723-3029：原来是静默 `catch {}`——失败时 messageHistory 里该线程的窗口状态还是 EMPTY
        * （hasBefore=false），连「加载更早消息」按钮都不渲染，用户只看到一片空白，

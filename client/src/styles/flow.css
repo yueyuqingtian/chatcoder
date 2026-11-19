@@ -78,9 +78,9 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 .cv { font-family: var(--font-mono); font-size: 12px; line-height: 1.65; }
 .cv-head {
   position: sticky; top: 0; z-index: 1;
-  /* 窄栏自适应：头部恒为单行 30px，文件名 / 说明文字过长时省略号截断（完整文本走 Tooltip），
+  /* 窄栏自适应：头部恒为单行 34px，文件名 / 说明文字过长时省略号截断（完整文本走 Tooltip），
      不换行、不撑高、不压到下方正文区 */
-  display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; overflow: hidden;
+  display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px 0 12px; overflow: hidden;
   background: color-mix(in oklab, var(--surface-inset) 92%, var(--text-1) 4%);
   border-bottom: 1px solid var(--surface-inset-border);
   font-family: var(--font-sans); font-size: 12px;
@@ -125,12 +125,20 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 }
 .tc-output:has(> .cv) .cv-line,
 .tc-output:has(> .cv) .tc-diff-line { width: max-content; min-width: 100%; }  /* 长行横向滚动，短行背景铺满 */
+.tc-output:has(> .cv) .cv-body.is-wrapped .cv-line,
+:root[data-code-wrap="on"] .tc-output:has(> .cv) .tc-diff-line { width: 100%; }
+.tc-output:has(> .cv) .cv-body.is-wrapped .cv-code,
+:root[data-code-wrap="on"] .tc-output:has(> .cv) .tc-diff .cv-code {
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; min-width: 0;
+}
 .tc-output:has(> .cv) .cv-body::-webkit-scrollbar,
-.tc-output:has(> .cv) .tc-diff::-webkit-scrollbar { width: 4px; height: 4px; }
+.tc-output:has(> .cv) .tc-diff::-webkit-scrollbar { width: 6px; height: 6px; }
 .tc-output:has(> .cv) .cv-body::-webkit-scrollbar-track,
 .tc-output:has(> .cv) .tc-diff::-webkit-scrollbar-track { background: transparent; }
 .tc-output:has(> .cv) .cv-body::-webkit-scrollbar-thumb,
-.tc-output:has(> .cv) .tc-diff::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--r-sm); }
+.tc-output:has(> .cv) .tc-diff::-webkit-scrollbar-thumb { background: color-mix(in oklab, var(--text-3) 42%, transparent); border-radius: var(--r-pill); }
+.tc-output:has(> .cv) .cv-body::-webkit-scrollbar-thumb:hover,
+.tc-output:has(> .cv) .tc-diff::-webkit-scrollbar-thumb:hover { background: color-mix(in oklab, var(--text-2) 65%, transparent); }
 /* 语法高亮配色：复用 markdown 代码块的令牌色 */
 .cv .hljs-comment, .cv .hljs-quote { color: var(--color-code-comment, #8b949e); font-style: italic; }
 .cv .hljs-keyword, .cv .hljs-selector-tag, .cv .hljs-built_in { color: var(--color-code-keyword, #cf222e); }
@@ -335,86 +343,268 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .turn-agent-text .md-body hr,
 .turn-agent-text .md-body .md-hr { margin: 16px 0; border: none; border-top: 1px solid var(--border); }
 
-/* 代码块：与工具展开区同一卡片语言（同底色、同边框、12px 卡片圆角），头部去底色、复制按钮去描边 */
-/* plan-621-2572：代码块头部与正文底色形成明度差（头部 4.5% 对比正文 2%），强化窗口层级感与边界清晰度 */
-.turn-agent-text .md-body .md-code-block {
+/* 代码块（plan-03054563-1）：统一主消息流 / 子代理消息流 / 文件管理 MD 预览 / 侧边小窗四处作用域。
+   头部语言标签 + 「自动换行 / 复制」图标按钮（4px 间距）；正文重置 scrollbar-width/color
+   解除外层 .message-flow 的 transparent 继承，确保横向溢出的滑动块常驻可见。 */
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-block {
+  position: relative;
   margin: 12px 0;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--surface-inset-border);
   border-radius: var(--r-lg);
   overflow: hidden;
   background: color-mix(in oklab, var(--text-1) 2%, var(--bg-panel));
   box-shadow: none;
 }
-.turn-agent-text .md-body .md-code-head {
-  min-height: 34px; padding: 0 8px 0 14px;
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 8px 0 14px;
   background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
   border-bottom: 1px solid var(--surface-inset-border);
 }
-.turn-agent-text .md-body .md-code-lang {
-  font-family: var(--font-mono); font-size: 12px; font-weight: 500;
-  text-transform: none; letter-spacing: 0; color: var(--text-2);
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-lang {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.turn-agent-text .md-body .md-code-copy-btn {
-  justify-content: center; width: 26px; height: 26px; min-height: 26px; padding: 0;
-  border: none; border-radius: var(--r-md); background: transparent; color: var(--text-3);
+.md-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
-.turn-agent-text .md-body .md-code-copy-btn:hover { background: var(--bg-hover); color: var(--text-1); border: none; }
-.turn-agent-text .md-body .md-code-copy-btn.copied { color: var(--success); border: none; }
-.turn-agent-text .md-body .md-code-pre { padding: 12px 16px; font-size: 12.5px; line-height: 1.65; }
-
-/* 表格（对齐参考图 5 / 图 6）：卡片容器 + 右上角工具条（复制 Markdown / 下载 CSV / 展开浮窗）。
-   工具条槽位固定（不随悬停增减高度），平时半透明、悬停或键盘聚焦时完全显示。 */
-/* 表格（对齐参考图 5 / 图 6）：卡片容器 + 右上角工具条（复制 Markdown / 下载 CSV / 展开浮窗）。
-   plan-621-2572：表格工具条置于卡片上方紧凑行，常态保持 0.72 清晰可见，悬停/聚焦至 1，彻底避免遮挡表头文字 */
-.md-table-block { margin: 12px 0; }
-.md-table-tools {
-  display: flex; align-items: center; justify-content: flex-end; gap: 2px;
-  height: 26px; margin-bottom: 4px;
+.md-code-action-btn,
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-md);
   background: transparent;
-  opacity: 0.72;
-  transition: opacity var(--dur-2) var(--ease-standard);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
 }
-.md-table-block:hover > .md-table-tools,
-.md-table-tools:focus-within,
-.md-table-dialog .md-table-tools { opacity: 1; }
+.md-code-action-btn:hover,
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+  border: none;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-copy-btn.copied {
+  color: var(--success);
+  border: none;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre {
+  margin: 0;
+  padding: 12px 16px 12px;
+  background: transparent;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: calc(var(--fs-md, 13px) - 0.5px);
+  line-height: 1.7;
+  tab-size: 2;
+  overflow-x: auto;
+  white-space: pre;
+  /* 解除父容器 .message-flow 的 transparent scrollbar-color 继承，让定制滑块始终可见 */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.ft-md-preview .md-body .md-code-pre { font-size: 12.5px; }
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre code {
+  background: transparent;
+  padding: 0;
+  color: var(--text-1);
+  font-family: inherit;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre.is-wrapped {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre.is-wrapped code,
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre.is-wrapped .md-long-code,
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre.is-wrapped .md-long-code > .viewport-block {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 卡片内常驻细滑块：代码块 / 表格统一，静止态同样清晰可见 */
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre::-webkit-scrollbar,
+.md-table-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre::-webkit-scrollbar-track,
+.md-table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre::-webkit-scrollbar-thumb,
+.md-table-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--text-3) 42%, transparent);
+  border-radius: var(--r-pill);
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-code-pre::-webkit-scrollbar-thumb:hover,
+.md-table-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--text-2) 65%, transparent);
+}
+
+/* 表格（plan-03054563-1）：一体式顶栏（表图标 + 行列维度 + 操作按钮）+ 舒展列宽 + 轻盈分隔线 */
+.md-table-block {
+  position: relative;
+  margin: 12px 0;
+  min-width: 0;
+  max-width: 100%;
+}
+.md-table-card {
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+.md-table-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 8px 0 12px;
+  background: color-mix(in oklab, var(--text-1) 4%, var(--bg-panel));
+  border-bottom: 1px solid var(--surface-inset-border);
+}
+.md-table-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.md-table-meta svg { color: var(--text-3); flex-shrink: 0; }
+.md-table-dim { color: var(--text-3); font-weight: 400; font-size: 11.5px; }
+.md-table-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  opacity: 1;
+}
 .md-table-tool {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; padding: 0;
-  border: none; border-radius: var(--r-md);
-  background: transparent; color: var(--text-3); cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
   transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
 }
 .md-table-tool:hover { background: var(--bg-hover); color: var(--text-1); }
 .md-table-tool.is-done { color: var(--success); }
-.md-table-card {
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  background: var(--bg-panel);
+.md-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
-.md-table-scroll { overflow-x: auto; }
 .md-body .md-table-card .md-table {
-  display: table; width: 100%; max-width: none; margin: 0;
-  border-collapse: collapse; border-spacing: 0;
-  font-size: 12.5px; line-height: 1.65;
+  display: table;
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  margin: 0;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
 }
+.md-body .md-table-card .md-table.md-table-windowed { table-layout: fixed; width: 100%; }
 .md-body .md-table-card .md-th,
 .md-body .md-table-card .md-td {
-  padding: 10px 14px;
-  border: none; border-bottom: 1px solid var(--border);
-  text-align: left; vertical-align: top;
-  white-space: normal;
+  padding: 9px 14px;
+  border: none;
+  border-bottom: 1px solid var(--border-light);
+  text-align: left;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
 }
-/* plan-621-2572：表头统一使用纯色不透明底色（避免 sticky 吸顶透字），字重 600、文字主色与底边线 */
 .md-body .md-table-card .md-th,
 .md-table-modal .md-th {
-  background: color-mix(in oklab, var(--text-1) 5%, var(--bg-panel));
-  color: var(--text-1); font-weight: 600; white-space: nowrap;
-  border-bottom: 1px solid var(--divider, var(--border));
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+  background: color-mix(in oklab, var(--text-1) 2%, var(--surface-inset));
+  border-bottom: 1px solid var(--border);
 }
-.md-body .md-table-card .md-td { color: var(--text-1); }
+.md-body .md-table-card .md-td {
+  color: var(--text-1);
+  min-width: 72px;
+  max-width: 300px;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.md-body .md-table-card .md-td :not(pre) > .md-inline-code,
+.md-body .md-table-card .md-td .md-inline-code {
+  color: var(--text-1);
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
+  padding: 0 4px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
 .md-body .md-table-card tbody tr:last-child > .md-td { border-bottom: none; }
-.md-body .md-table-card tbody tr:nth-child(even) > .md-td { background: color-mix(in oklab, var(--text-1) 1.5%, transparent); }
+.md-body .md-table-card tbody tr { transition: background var(--dur-1) var(--ease-standard); }
+.md-body .md-table-card tbody tr:hover > .md-td { background: color-mix(in oklab, var(--text-1) 3%, transparent); }
+
+/* 窄容器自适应：子代理右侧栏、侧边对话小窗、窄版 MD 文档预览自动收紧表格与代码块内距 */
+:is(.subagent-panel, .mini-chat) .md-body .md-table-card .md-th,
+:is(.subagent-panel, .mini-chat) .md-body .md-table-card .md-td {
+  padding: 7px 10px;
+  max-width: 220px;
+}
+@container (max-width: 480px) {
+  .ft-md-preview .md-body .md-table-card .md-th,
+  .ft-md-preview .md-body .md-table-card .md-td,
+  .subagent-panel .md-body .md-table-card .md-th,
+  .subagent-panel .md-body .md-table-card .md-td {
+    padding: 7px 10px;
+    max-width: 210px;
+  }
+  .ft-md-preview .md-body .md-code-pre,
+  .subagent-panel .md-body .md-code-pre {
+    padding: 10px 12px;
+  }
+}
+
 /* 浮窗：大视图可横纵滚动，表头吸顶；浮窗不在 .turn-agent-text 下，行内代码 / 加粗单独补齐消息流同款样式 */
 .md-table-dialog-body { padding-top: 4px; }
 .md-table-modal { font-size: 13px; line-height: 1.65; color: var(--text-1); }
@@ -430,10 +620,10 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 .md-table-modal .md-strong { font-weight: 600; }
 
-/* ══ plan-20261017-ux-overhaul 阶段 D：Markdown / 表格 / 代码再打磨 ══════════════════════
-   目标是「层次清楚、安静不花」：标题靠字号与上方留白分级，正文主色，辅助信息次级色；
-   表格去斑马纹改为悬停行高亮，工具条改为卡片右上角浮出（不再额外占一行高度）；
-   行内代码去掉彩色字，改中性底 + 细描边，避免一段话里满屏彩色片段。 */
+/* ══ plan-20261017-ux-overhaul 阶段 D：Markdown 正文排版 ══════════════════════ */
+.turn-item-text,
+.turn-agent-text,
+:is(.turn-agent-text, .ft-md-preview) .md-body { min-width: 0; max-width: 100%; }
 .turn-agent-text .md-body { color: var(--text-1); }
 .turn-agent-text .md-body .md-h1 { font-size: 1.32em; margin: 1.3em 0 0.55em; letter-spacing: -0.005em; }
 .turn-agent-text .md-body .md-h2 { font-size: 1.16em; margin: 1.25em 0 0.5em; }
@@ -456,48 +646,6 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
   padding: 0 5px; border-radius: var(--r-sm);
   font-size: 0.86em;
-}
-/* 代码块：头部语言标签与复制按钮固定 34px 槽位；正文行高与字号令牌化，长行横向滚动不换行 */
-/* plan-621-2572：头部与代码块底色明度差保持一致，去除多余覆盖 */
-.turn-agent-text .md-body .md-code-head {
-  gap: 8px; min-height: 34px; padding: 0 8px 0 14px;
-  background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
-}
-.turn-agent-text .md-body .md-code-pre {
-  padding: 12px 16px 14px;
-  font-size: calc(var(--fs-md, 13px) - 0.5px); line-height: 1.7;
-  tab-size: 2;
-}
-
-/* 表格 */
-/* plan-621-2572：彻底取消 .md-table-tools 的 absolute 覆盖，工具栏置于卡片上方，不遮挡表头文字且清晰易发现 */
-.md-table-block { position: relative; }
-.md-table-tools {
-  display: flex; align-items: center; justify-content: flex-end; gap: 2px;
-  height: 26px; margin: 0 0 4px 0; padding: 0;
-  background: transparent;
-  opacity: 0.72;
-}
-.md-table-block:hover > .md-table-tools,
-.md-table-tools:focus-within,
-.md-table-dialog .md-table-tools { opacity: 1; }
-.md-body .md-table-card .md-th {
-  color: var(--text-1); font-weight: 600;
-  background: color-mix(in oklab, var(--text-1) 5%, var(--bg-panel));
-  border-bottom: 1px solid var(--divider, var(--border));
-}
-.md-body .md-table-card .md-td,
-.md-body .md-table-card .md-th { font-variant-numeric: tabular-nums; padding: 10px 14px; }
-.md-body .md-table-card tbody tr:nth-child(even) > .md-td { background: none; }
-.md-body .md-table-card tbody tr { transition: background var(--dur-1) var(--ease-standard); }
-.md-body .md-table-card tbody tr:hover > .md-td { background: color-mix(in oklab, var(--text-1) 3%, transparent); }
-/* 横向可滚动时两侧出现渐隐阴影提示（background-attachment: local 方案，无需脚本） */
-.md-table-scroll {
-  background:
-    linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 24px 100% no-repeat local,
-    linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 24px 100% no-repeat local,
-    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.12), transparent) left / 10px 100% no-repeat scroll,
-    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.12), transparent) right / 10px 100% no-repeat scroll;
 }
 
 /* 消息层次：用户消息（气泡）> AI 正文（主色）> 工作过程（工具 / 思考，次级色、略小） */
@@ -656,60 +804,89 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   font-variant-numeric: tabular-nums;
 }
 
-/* ── 子代理轻量平铺行与 Q 版头像（紧凑靠左流式排布，状态与箭头紧跟信息，不甩到最右） ── */
-.subagent-row {
-  display: inline-flex; align-items: flex-start; gap: var(--flow-icon-gap, 8px);
-  width: fit-content; max-width: 100%;
-  margin: 0; padding: 0;
-  border-radius: var(--r-md);
-  background: transparent;
+/* ── 子代理轻量实体卡片与 Q 版头像（plan-03054563-1：无左侧装饰竖线，12px 圆角轻量边界，显式紧凑行高） ── */
+.turn-subagents { display: flex; flex-direction: column; gap: 6px; }
+.tc-subagent { container-type: inline-size; min-width: 0; }
+.subagent-card {
+  display: flex; align-items: center; gap: 10px;
+  width: min(100%, 560px); min-width: 0;
+  margin: 0; padding: 9px 12px;
+  border-radius: var(--r-lg);
+  background: var(--surface-inset);
+  border: 1px solid var(--surface-inset-border);
+  text-align: left;
+  transition: background var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
 }
-.subagent-row.clickable { cursor: pointer; }
-.subagent-row.clickable:hover { background: transparent; }
+.subagent-card.clickable { cursor: pointer; }
+.subagent-card.clickable:hover {
+  background: color-mix(in oklab, var(--text-1) 2.5%, var(--surface-inset));
+  border-color: var(--border-strong);
+}
 
 .sa-avatar {
-  width: var(--flow-icon, 16px); height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); border-radius: var(--r-md);
+  width: 30px; height: 30px; border-radius: var(--r-md);
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.sa-avatar svg { flex-shrink: 0; width: var(--flow-icon, 16px); height: var(--flow-icon, 16px); }
+.sa-avatar.tone-explore { background: color-mix(in oklab, var(--color-sky-500) 13%, transparent); }
+.sa-avatar.tone-coder { background: color-mix(in oklab, var(--color-teal-600) 13%, transparent); }
+.sa-avatar.tone-operator { background: color-mix(in oklab, var(--color-indigo-500) 13%, transparent); }
+.sa-avatar.tone-verifier { background: color-mix(in oklab, var(--color-green-600) 13%, transparent); }
+.sa-avatar svg { flex-shrink: 0; width: 22px; height: 22px; }
 .sa-avatar.is-running svg { animation: sa-dada-bob var(--dur-load) ease-in-out infinite; }
 @keyframes sa-dada-bob {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-1.5px); }
 }
 
-.sa-main { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: calc(var(--flow-gap) * 0.25); }
-.sa-line1 { display: flex; align-items: center; gap: var(--flow-item-gap, 6px); min-width: 0; min-height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2)); }
+.sa-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sa-top { display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.4; }
 .sa-title {
-  font-size: var(--fs-md, 13px); font-weight: 500; line-height: var(--chat-line-height, 2.2); color: var(--text-1);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-md, 13px); font-weight: 550; line-height: 1.4; color: var(--text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
-.sa-role-text { font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3); flex-shrink: 0; }
-.sa-line2 {
-  font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.sa-role-pill {
+  flex-shrink: 0; font-size: 11px; line-height: 18px; padding: 0 6px;
+  border-radius: var(--r-pill); background: var(--bg-hover); color: var(--text-3); font-weight: 500;
 }
-.sa-line2.is-error { color: var(--error); }
-
+.sa-right { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .sa-state {
-  flex-shrink: 0;
-  font-size: calc(var(--fs-md, 13px) - 1px); line-height: var(--chat-line-height, 2.2); color: var(--text-3);
-  font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  font-size: 11.5px; line-height: 1.4; font-weight: 500; color: var(--text-3);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .sa-state.is-ok { color: var(--success); }
-.sa-state.is-run { color: var(--color-brand, var(--accent)); }
+.sa-state.is-run { color: var(--info); }
 .sa-state.is-fail { color: var(--error); }
+.sa-dot-run {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  animation: sa-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sa-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
 .sa-open-hint {
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
-  color: var(--text-3); opacity: 0;
-  height: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2));
-  transition: opacity var(--dur-fast);
+  color: var(--text-3); opacity: 0.65;
+  transition: transform var(--dur-2) var(--ease-standard), opacity var(--dur-2), color var(--dur-2);
 }
-.subagent-row.clickable:hover .sa-open-hint,
-.subagent-row.clickable:focus-visible .sa-open-hint { opacity: 1; }
+.subagent-card.clickable:hover .sa-open-hint,
+.subagent-card.clickable:focus-visible .sa-open-hint {
+  opacity: 1; color: var(--text-1); transform: translateX(2px);
+}
+.sa-sub {
+  font-size: 12px; line-height: 1.45; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sa-sub.is-error { color: var(--error); }
+
+@container (max-width: 380px) {
+  .subagent-card { padding: 8px 10px; gap: 8px; }
+  .sa-role-pill { display: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .sa-avatar.is-running svg { animation: none; }
+  .sa-avatar.is-running svg, .sa-dot-run { animation: none; }
 }
 
 /* plan-20261114-message-flow：层级线按用户要求仅描绘展开树，贯穿整个内容区，不表达运行状态。 */
