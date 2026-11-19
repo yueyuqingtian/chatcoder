@@ -34,9 +34,12 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
   const viewRef = useRef<HTMLSpanElement>(null);
   const stripRef = useRef<HTMLSpanElement>(null);
   const lineRef = useRef<HTMLSpanElement>(null);
-  const [cur, setCur] = useState("");
+  // plan-20261119-thinking-preview：流式内容可能停在段尾空行，等到下一行有字再切换预览。
+  const previewText = text.trimEnd();
+  const line = previewText.slice(previewText.lastIndexOf("\n") + 1);
+  const [cur, setCur] = useState(line);
   const [prev, setPrev] = useState<string | null>(null);
-  const curRef = useRef("");
+  const curRef = useRef(line);
   const prevRef = useRef<string | null>(null);
   const swapRef = useRef<{ start: number; dur: number } | null>(null);
   const lineCountRef = useRef(0);
@@ -71,11 +74,10 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
     a.lastTs = now;
 
     // 行数统计：手动计数避免每帧 split 分配大数组（思考文本可达数十 KB）
-    let count = text ? 1 : 0;
-    for (let i = 0; i < text.length; i++) {
-      if (text.charCodeAt(i) === 10) count++;
+    let count = previewText ? 1 : 0;
+    for (let i = 0; i < previewText.length; i++) {
+      if (previewText.charCodeAt(i) === 10) count++;
     }
-    const line = text.slice(text.lastIndexOf("\n") + 1);
 
     if (count < lineCountRef.current) {
       // 内容重置（新一段思考/落库清缓冲）：直接跳变
@@ -108,7 +110,7 @@ export const ThinkingTicker = memo(function ThinkingTicker({ text, placeholder =
       setCur(line);
     }
     startRef.current(); // 有新文本 → 唤醒循环（测量由 RO 更新）
-  }, [text]);
+  }, [text, previewText, line]);
 
   // 测量：RO 在**布局之后**回调（不会强制同步布局），文本增长 / 容器宽度变化都会命中；
   // 命中即更新目标值并唤醒停帧循环。
