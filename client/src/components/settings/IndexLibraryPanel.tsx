@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconDatabase, IconRefresh, IconSearch, IconZap } from "../icons";
-import { Empty, Input, Select } from "../ui";
+import { Button, Empty, Input, PageActions, Section, Select } from "../ui";
 import { isIndexBusy, progressText, resolveSearchTarget } from "./indexProgress";
 
 export interface WorkspaceStat {
@@ -172,114 +172,124 @@ export function IndexLibraryPanel() {
   };
 
   return (
-    <div>
+    <div className="sc-page">
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void load()}>刷新</Button>
+      </PageActions>
+
       <div className="sched-note">
         为每个工作目录单独开启代码符号索引（默认关闭）。开启后会自动建立并持续更新，
         AI 在会话中即可用 symbol_search / outline 快速定位函数、类与文件结构；
         改动文件后索引会自动增量更新。
       </div>
 
-      <div className="idx-list sc-list">
-        {items.map((w) => (
-          <div key={w.workspace} className="idx-item sc-row">
-            {/* plan-91-393：统一行结构——图标块 + 标题/路径 + 状态 + 右侧操作 */}
-            <span className="sc-tile"><IconDatabase size={15} /></span>
-            <div className="idx-item-main sc-row-main">
-              <div className="idx-item-title">
-                <span className={"idx-dot " + w.status} />
-                <span className="idx-name">{w.name || w.workspace}</span>
-                <span className={"idx-badge " + w.status}>{STATUS_LABEL[w.status] || w.status}</span>
-                {w.exists === false && <span className="idx-badge error">目录不存在</span>}
-              </div>
-              <div className="idx-item-desc">
-                <span className="idx-path sc-mono">{w.workspace}</span>
-              </div>
-              <div className="idx-item-desc">
-                {isIndexBusy(w.status) ? (
-                <div className="idx-progress">
-                  <div className="idx-progress-bar">
-                    <div className="idx-progress-fill" style={{ width: `${Math.max(2, Math.min(100, w.progress || 0))}%` }} />
-                  </div>
-                  <div className="idx-progress-meta">
-                    <span className="idx-progress-pct">{w.progress || 0}%</span>
-                    {/* 两阶段计数语义不同：扫描期只报发现数（总量未知），
-                        解析期才有总数（此时计数从 0 重新开始）。 */}
-                    <span>{progressText(w)}</span>
-                  </div>
+      <Section title="工作区索引" bare>
+        <div className="idx-list sc-list">
+          {items.map((w) => (
+            <div key={w.workspace} className="idx-item sc-row">
+              {/* plan-91-393：统一行结构——图标块 + 标题/路径 + 状态 + 右侧操作 */}
+              <span className="sc-tile"><IconDatabase size={15} /></span>
+              <div className="idx-item-main sc-row-main">
+                <div className="idx-item-title">
+                  <span className={"idx-dot " + w.status} />
+                  <span className="idx-name">{w.name || w.workspace}</span>
+                  <span className={"idx-badge " + w.status}>{STATUS_LABEL[w.status] || w.status}</span>
+                  {w.exists === false && <span className="idx-badge error">目录不存在</span>}
                 </div>
-              ) : (
-                <>
-                  <span>{w.files} 文件</span>
-                  <span>·</span>
-                  <span>{w.symbols} 符号</span>
-                  <span>·</span>
-                  <span>更新于 {fmtTime(w.last_updated)}</span>
-                </>
-              )}
-              {w.error && <span className="idx-err">{w.error}</span>}
+                <div className="idx-item-desc">
+                  <span className="idx-path sc-mono">{w.workspace}</span>
+                </div>
+                <div className="idx-item-desc">
+                  {isIndexBusy(w.status) ? (
+                  <div className="idx-progress">
+                    <div className="idx-progress-bar">
+                      <div className="idx-progress-fill" style={{ width: `${Math.max(2, Math.min(100, w.progress || 0))}%` }} />
+                    </div>
+                    <div className="idx-progress-meta">
+                      <span className="idx-progress-pct">{w.progress || 0}%</span>
+                      {/* 两阶段计数语义不同：扫描期只报发现数（总量未知），
+                          解析期才有总数（此时计数从 0 重新开始）。 */}
+                      <span>{progressText(w)}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <span>{w.files} 文件</span>
+                    <span>·</span>
+                    <span>{w.symbols} 符号</span>
+                    <span>·</span>
+                    <span>更新于 {fmtTime(w.last_updated)}</span>
+                  </>
+                )}
+                {w.error && <span className="idx-err">{w.error}</span>}
+                </div>
               </div>
-            </div>
-            <div className="idx-item-actions sc-row-actions">
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy === w.workspace || w.exists === false}
-                onClick={() => void toggle(w, !w.enabled)}
-              >
-                {busy === w.workspace ? "处理中…" : w.enabled ? "关闭索引" : "开启索引"}
-              </button>
-              {w.enabled && (
-                <button
-                  className="btn btn-ghost btn-sm"
-                  disabled={busy === w.workspace || isIndexBusy(w.status)}
-                  onClick={() => void rebuild(w)}
+              <div className="idx-item-actions sc-row-actions">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy === w.workspace || w.exists === false}
+                  onClick={() => void toggle(w, !w.enabled)}
                 >
-                  <IconRefresh size={12} /> {isIndexBusy(w.status) ? "重建中…" : "重建"}
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        {items.length === 0 && (
-          <Empty title="暂无项目" desc="创建项目后即可在此开启索引" />
-        )}
-      </div>
-
-      <div className="idx-search">
-        <div className="idx-search-title">符号检索预览</div>
-        <div className="idx-search-row">
-          <Select
-            value={effectiveTarget ?? ""}
-            onChange={(v) => { setTarget(v); setHits(null); }}
-            disabled={enabledItems.length === 0}
-            options={enabledItems.map((w) => ({ value: w.workspace, label: w.name || w.workspace }))}
-            aria-label="检索目标索引库"
-          />
-          <Input
-            placeholder="函数名 / 类名（支持部分匹配）"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void runSearch(); }}
-          />
-          <button className="btn btn-primary btn-sm" disabled={!effectiveTarget || !query.trim() || searching} onClick={() => void runSearch()}>
-            <IconSearch size={13} /> {searching ? "检索中…" : "检索"}
-          </button>
-        </div>
-        {hits && (
-          <div className="idx-hits">
-            {hits.length === 0 && <div className="navpage-empty">未找到匹配符号</div>}
-            {hits.map((h, i) => (
-              <div key={i} className="idx-hit">
-                <span className="idx-hit-kind">{h.kind}</span>
-                <span className="idx-hit-name">{h.name}</span>
-                <span className="idx-hit-loc">{h.file_path}:{h.line_start}-{h.line_end}</span>
+                  {busy === w.workspace ? "处理中…" : w.enabled ? "关闭索引" : "开启索引"}
+                </Button>
+                {w.enabled && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<IconRefresh size={12} />}
+                    disabled={busy === w.workspace || isIndexBusy(w.status)}
+                    onClick={() => void rebuild(w)}
+                  >
+                    {isIndexBusy(w.status) ? "重建中…" : "重建"}
+                  </Button>
+                )}
               </div>
-            ))}
+            </div>
+          ))}
+          {items.length === 0 && (
+            <Empty title="暂无项目" desc="创建项目后即可在此开启索引" />
+          )}
+        </div>
+      </Section>
+
+      <Section title="符号检索预览" flush>
+        <div className="idx-search">
+          <div className="idx-search-row">
+            <Select
+              value={effectiveTarget ?? ""}
+              onChange={(v) => { setTarget(v); setHits(null); }}
+              disabled={enabledItems.length === 0}
+              options={enabledItems.map((w) => ({ value: w.workspace, label: w.name || w.workspace }))}
+              aria-label="检索目标索引库"
+            />
+            <Input
+              placeholder="函数名 / 类名（支持部分匹配）"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void runSearch(); }}
+            />
+            <Button variant="primary" size="sm" icon={<IconSearch size={13} />} loading={searching} disabled={!effectiveTarget || !query.trim() || searching} onClick={() => void runSearch()}>
+              {searching ? "检索中…" : "检索"}
+            </Button>
           </div>
-        )}
-        {!items.some((w) => w.enabled) && (
-          <div className="idx-hint"><IconZap size={12} /> 先开启至少一个项目的索引，然后即可检索符号。</div>
-        )}
-      </div>
+          {hits && (
+            <div className="idx-hits">
+              {hits.length === 0 && <Empty size="sm" title="未找到匹配符号" />}
+              {hits.map((h, i) => (
+                <div key={i} className="idx-hit">
+                  <span className="idx-hit-kind">{h.kind}</span>
+                  <span className="idx-hit-name">{h.name}</span>
+                  <span className="idx-hit-loc">{h.file_path}:{h.line_start}-{h.line_end}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {!items.some((w) => w.enabled) && (
+            <div className="idx-hint"><IconZap size={12} /> 先开启至少一个项目的索引，然后即可检索符号。</div>
+          )}
+        </div>
+      </Section>
     </div>
   );
 }

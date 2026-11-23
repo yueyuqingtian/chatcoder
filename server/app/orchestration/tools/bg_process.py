@@ -129,7 +129,7 @@ class _BgEntry:
     __slots__ = ("shell_id", "proc", "command", "cwd", "session_id",
                  "started_at", "buffer", "total_chars", "returncode", "finished_at",
                  "turn_id", "on_exit", "notified", "stopped_by", "observed", "start_task",
-                 "stdin_open")
+                 "stdin_open", "write_baseline")
 
     def __init__(self, shell_id: str, proc: asyncio.subprocess.Process,
                  command: str, cwd: str | None, session_id: int,
@@ -164,6 +164,8 @@ class _BgEntry:
         self.turn_id = turn_id
         self.on_exit = on_exit
         self.notified = False
+        # plan-20261120-non-tool-capture：后台命令启动前的轻量工作区快照基线，退出时补记文件变更
+        self.write_baseline: dict[str, Any] | None = None
 
     def append_output(self, text: str) -> None:
         if not text:
@@ -292,6 +294,105 @@ class BgProcessRegistry:
         if entry is not None and text:
             entry.append_output(text)
 
+    def attach_write_baseline(self, shell_id: str, baseline: dict[str, Any]) -> None:
+        """挂接后台命令启动前的工作区快照基线，供退出时补记文件变更。"""
+        entry = self._entries.get(shell_id)
+        if entry is not None:
+            entry.write_baseline = baseline
+
+    async def reconcile_shell_writes(self, shell_id: str) -> None:
+        """按 shell_id 触发一次后台进程的文件变更收口（幂等）。"""
+        entry = self._entries.get(shell_id)
+        if entry is not None:
+            await self.reconcile_entry_writes(entry)
+
+    async def reconcile_entry_writes(self, entry: _BgEntry) -> None:
+        """后台进程退出后对比写前快照并补记工作区文件变更（幂等，消费即清基线）。"""
+        baseline = entry.write_baseline
+        if baseline is None:
+            return
+        entry.write_baseline = None
+        pre_ckpts: dict[str, str | None] = baseline.get("pre_ckpts") or {}
+        workspace = str(baseline.get("workspace") or "")
+        turn_id = entry.turn_id
+        session_id = entry.session_id
+        # 已登记进本轮快照的 checkpoint（record_checkpoint_for_turn 内部独立提交，异常时不会回滚）
+        consumed: set[str] = set()
+
+        def _discard_all() -> None:
+            from app.services import rollback_service
+            for ck in pre_ckpts.values():
+                rollback_service.discard_checkpoint(ck)
+
+        if entry.stopped_by == "system" or not workspace or turn_id is None:
+            _discard_all()
+            return
+        try:
+            from app.persistence.database import async_session_factory
+            from app.persistence.models.turn import Turn
+            from app.services import rollback_service
+            from app.orchestration.agent_events import broadcast
+
+            # plan-20261121-build-artifact-filter：后台命令本身是打包 / 编译时，产出整批不登记。
+            if rollback_service.is_build_command(str(baseline.get("command") or "")):
+                _discard_all()
+                return
+
+            pre_scan: dict[str, tuple[int, int]] = baseline.get("pre_scan") or {}
+            post_scan, _, _ = rollback_service.scan_workspace_stat(workspace)
+            scan_diff = rollback_service.diff_workspace_scans(pre_scan, post_scan)
+            explicit: list[str] = list(baseline.get("candidates") or [])
+            candidates = list(dict.fromkeys([*explicit, *scan_diff]))
+            if not candidates:
+                _discard_all()
+                return
+
+            async with async_session_factory() as db:
+                turn_row = await db.get(Turn, int(turn_id))
+                if turn_row is not None and turn_row.status == "rolled_back":
+                    _discard_all()
+                    return
+                detected, _, _ = await rollback_service.record_detected_file_changes(
+                    db,
+                    session_id=session_id,
+                    turn_id=int(turn_id),
+                    workspace=workspace,
+                    tool_name="terminal_exec",
+                    call_key=baseline.get("call_key"),
+                    candidates=candidates,
+                    explicit_candidates=set(explicit),
+                    pre_scan=pre_scan,
+                    pre_bytes=baseline.get("pre_bytes"),
+                    pre_ckpts=pre_ckpts,
+                    pre_texts=baseline.get("pre_texts"),
+                    pre_kinds=baseline.get("pre_kinds"),
+                    pre_digests=baseline.get("pre_digests"),
+                    pre_existed=baseline.get("pre_existed"),
+                    pre_born=baseline.get("pre_born"),
+                    git_dirty=baseline.get("git_dirty"),
+                    ckpt_consumed=consumed,
+                    turn_started_at=baseline.get("turn_started_at"),
+                )
+            for path_k, ck in pre_ckpts.items():
+                norm_k = rollback_service.normalize_workspace_path(workspace, path_k) or path_k
+                if ck and norm_k not in consumed:
+                    rollback_service.discard_checkpoint(ck)
+            if detected:
+                await broadcast(session_id, {
+                    "event": "file.change",
+                    "payload": {"turn_id": int(turn_id), "path": str(detected[0]), "session_id": session_id},
+                })
+        except Exception:  # noqa: BLE001 — 后台文件补记失败不能影响主流程
+            logger.warning("[bg.writes] 补记后台命令文件变更失败 shell_id=%s", entry.shell_id, exc_info=True)
+            # plan-20261120-non-tool-capture：已登记进本轮快照的备份绝对不能再删——登记走
+            # record_checkpoint_for_turn 内的独立提交，不会随本次异常回滚，删掉备份会让
+            # 二进制/超限文件失去唯一还原依据；只清理没有登记成功的那部分。
+            from app.services import rollback_service
+            for path_k, ck in pre_ckpts.items():
+                norm_k = rollback_service.normalize_workspace_path(workspace, path_k) or path_k
+                if ck and norm_k not in consumed:
+                    rollback_service.discard_checkpoint(ck)
+
     async def _collect(self, entry: _BgEntry) -> None:
         """持续流式读取 stdout/stderr 到环形缓冲，进程退出后记录退出码。
 
@@ -341,6 +442,8 @@ class BgProcessRegistry:
             except Exception:  # noqa: BLE001 — 启动广播失败不影响退出广播
                 pass
         await self._broadcast("bg.process.exited", entry)
+        # plan-20261120-non-tool-capture：进程退出后先补记后台命令产生的工作区文件变更，再通知会话
+        await self.reconcile_entry_writes(entry)
         # plan-474-2105：进程退出 → 通知发起会话（只触发一次；回调异常不影响收集任务）
         await self._fire_on_exit(entry)
 
@@ -640,6 +743,7 @@ class TerminalBgStatusTool(Tool):
 
         # plan-20261020-bgtask：模型已经看到了终态——完成回报不必再重复送一遍
         if not info["running"]:
+            await bg_process_registry.reconcile_shell_writes(shell_id)
             bg_process_registry.mark_observed(shell_id)
         stopped_note = {"user": "，被用户手动停止", "agent": "，被你主动终止"}.get(info.get("stopped_by") or "", "")
         lines = [

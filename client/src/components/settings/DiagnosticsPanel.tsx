@@ -5,7 +5,7 @@ import { useState } from "react";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { IconAlertCircle, IconCheckCircle, IconDatabase, IconRefresh, IconWrench } from "../icons";
-import { Empty } from "../ui";
+import { Button, Empty, PageActions, Section } from "../ui";
 
 interface CheckpointStat { workspace: string; file_count: number; size_mb: number; orphan_count: number; retention_days?: number }
 
@@ -64,26 +64,28 @@ export function DiagnosticsPanel() {
   const failCount = (result?.length ?? 0) - okCount;
   return (
     <div className="sc-page">
-      {/* plan-91-393：顶部摘要 + 操作右对齐；检查项分组为带状态图标的行 */}
-      <div className="sc-toolbar">
-        <div className="sc-toolbar-summary">
-          {result == null ? "系统健康检查" : failCount === 0 ? `全部 ${okCount} 项正常` : `${failCount} 项异常 · ${okCount} 项正常`}
-        </div>
-        <span className="sc-flex-spacer" />
+      <PageActions>
         {checkpoints != null && checkpoints.length > 0 && (
-          <button className="btn btn-ghost btn-sm" onClick={clean} disabled={cleaning}><IconWrench size={13} /> {cleaning ? "清理中…" : "清理 checkpoint"}</button>
+          <Button variant="secondary" size="sm" icon={<IconWrench size={13} />} loading={cleaning} disabled={cleaning} onClick={clean}>
+            {cleaning ? "清理中…" : "清理 checkpoint"}
+          </Button>
         )}
-        <button className="btn btn-primary btn-sm" onClick={run} disabled={running}>
-          <span className={`sc-icon-slot ${running ? "spin" : ""}`}><IconRefresh size={13} /></span> {running ? "运行中…" : "运行诊断"}
-        </button>
-      </div>
+        <Button variant="primary" size="sm" icon={<IconRefresh size={13} />} loading={running} disabled={running} onClick={run}>
+          {running ? "运行中…" : "运行诊断"}
+        </Button>
+      </PageActions>
+
       {result == null && !running && (
-        <Empty title="尚未运行诊断" desc="嗒嗒会检查 Git、运行时与存储状态"
-          action={<button className="btn btn-secondary btn-sm" onClick={run}>开始检查</button>} />
+        <Section>
+          <Empty title="尚未运行诊断" desc="嗒嗒会检查 Git、运行时与存储状态"
+            action={<Button variant="secondary" size="sm" onClick={run}>开始检查</Button>} />
+        </Section>
       )}
       {result != null && (
-        <>
-          <div className="sc-group-label">检查项</div>
+        <Section
+          title={failCount === 0 ? `检查项 · 全部 ${okCount} 项正常` : `检查项 · ${failCount} 项异常 · ${okCount} 项正常`}
+          bare
+        >
           <div className="sc-list">
             {result.map((c) => (
               <div key={c.name} className={`sc-row sc-check ${c.ok ? "ok" : "fail"}`}>
@@ -96,11 +98,10 @@ export function DiagnosticsPanel() {
               </div>
             ))}
           </div>
-        </>
+        </Section>
       )}
       {checkpoints != null && checkpoints.length > 0 && (
-        <>
-          <div className="sc-group-label">checkpoint 存储（.chatcoder/checkpoints）</div>
+        <Section title="checkpoint 存储（.chatcoder/checkpoints）" bare>
           <div className="sc-list">
             {checkpoints.map((c) => (
               <div key={c.workspace} className="sc-row">
@@ -111,7 +112,7 @@ export function DiagnosticsPanel() {
                 </div>
                 {c.orphan_count > 0 && <span className="sc-badge warn">有孤儿</span>}
                 <div className="sc-row-actions">
-                  <button className="btn btn-ghost btn-sm" disabled={cleaning}
+                  <Button variant="ghost" size="sm" icon={<IconWrench size={12} />} disabled={cleaning}
                     onClick={async () => {
                       setCleaning(true);
                       try {
@@ -125,13 +126,13 @@ export function DiagnosticsPanel() {
                         await run();
                       } catch (e) { useChatStore.setState({ error: String(e) }); } finally { setCleaning(false); }
                     }}>
-                    <IconWrench size={12} /> 清理
-                  </button>
+                    清理
+                  </Button>
                 </div>
               </div>
             ))}
           </div>
-        </>
+        </Section>
       )}
     </div>
   );

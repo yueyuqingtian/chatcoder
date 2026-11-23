@@ -285,6 +285,7 @@ export const IconPaperclip = defineIcon("IconPaperclip", "paperClip", "paperclip
 export const IconPencil = defineIcon("IconPencil", "edit", "pencil", 18);
 export const IconPet = defineIcon("IconPet", "tag", "pet", 18);
 export const IconPin = defineIcon("IconPin", "pushpin", "pin", 18);
+export const IconStar = defineIcon("IconStar", "star", "star", 18);
 export const IconPlay = defineIcon("IconPlay", "caretRight", "play", 18);
 export const IconPlug = defineIcon("IconPlug", "api", "plug", 18);
 export const IconPlus = defineIcon("IconPlus", "plus", "plus", 18);

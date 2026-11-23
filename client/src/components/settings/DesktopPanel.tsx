@@ -14,7 +14,8 @@ import type { DesktopRecipe, DesktopStatus, RecipeScope } from "../../api/client
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Badge, Button, CardRow, Checkbox, FormDialog, Input, List, ListRow, Segmented, Slider, Textarea, Tooltip } from "../ui";
+import { Badge, Button, CardRow, Checkbox, Empty, FormDialog, Input, List, ListRow, Menu, PageActions, Section, Segmented, Slider, Textarea, Tooltip } from "../ui";
+import { IconPlus, IconSearch } from "../icons";
 import { Field } from "../ui/Field";
 import { Row, Sw } from "./shared";
 
@@ -261,7 +262,11 @@ function DesktopBasicSection() {
 
   return (
     <div className="settings-card-stack sc-stack">
-      <div className="settings-card">
+      {loadError && <div className="ui-toolbar" role="alert">
+        <span>{t("dp.load_fail", { error: loadError })}</span>
+        <Button size="sm" variant="secondary" onClick={() => void load()}>重试</Button>
+      </div>}
+      <Section flush>
         <Row title={t("dp.enable")} desc={t("dp.enable_desc")}>
           {/* plan-537-2251：只改电脑操控本身，不再连带打开内置浏览器（它有独立开关） */}
           <Sw
@@ -290,9 +295,9 @@ function DesktopBasicSection() {
             onChange={(v) => { if (cfg.browser_enabled) patch({ browser_headless: v }); }}
           />
         </Row>
-      </div>
+      </Section>
 
-      <div className="settings-card">
+      <Section flush>
         <Row title={t("dp.foreground")} desc={t("dp.foreground_desc")} disabled={dimPlain}>
           <Sw
             checked={cfg.desktop_require_foreground}
@@ -308,7 +313,13 @@ function DesktopBasicSection() {
             max={4096}
             value={maxDimText}
             disabled={dimPlain}
-            onChange={(e) => setMaxDimText(e.target.value)}
+            onChange={(e) => {
+              const value = e.target.value;
+              setMaxDimText(value);
+              if (value !== "" && Number.isFinite(Number(value))) {
+                patch({ desktop_screenshot_max_dim: Math.min(4096, Math.max(0, Math.trunc(Number(value)))) });
+              }
+            }}
             onBlur={commitMaxDim}
           />
         </Row>
@@ -341,9 +352,9 @@ function DesktopBasicSection() {
             onChange={(v) => patch({ desktop_recipe_enabled: v })}
           />
         </Row>
-      </div>
+      </Section>
 
-      <div className="settings-card">
+      <Section flush>
         <CardRow title={t("dp.status")} desc={t("dp.status_desc")}>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>{statusText}</span>
@@ -371,7 +382,7 @@ function DesktopBasicSection() {
             <span />
           </Row>
         )}
-      </div>
+      </Section>
     </div>
   );
 }
@@ -481,38 +492,21 @@ function DesktopRecipeSection() {
   }, [keyword, load, notify]);
 
   return (
-    <div className="settings-card-stack sc-stack">
-      <div className="settings-card">
-        <CardRow title={t("dp.recipe.section")} desc={t("dp.recipe.section_desc")}>
-          <Button variant="primary" size="sm" onClick={() => setCreating(true)}>
-            {t("dp.recipe.new")}
-          </Button>
-        </CardRow>
-        {/* 搜索行：输入框与按钮固定同行。此前复用允许换行的工具条容器，
-            输入框倾向占满宽度时按钮会被挤到下一行。 */}
-        <div className="dp-search-row">
-          <Input
-            placeholder={t("dp.recipe.search_ph")}
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void load(keyword); }}
-          />
-          <Button variant="secondary" size="sm" onClick={() => load(keyword)}>
-            {t("dp.recipe.search")}
-          </Button>
-        </div>
-
-        {notice && (
-          <Row title={t("dp.recipe.notice")} desc={notice}>
-            <span />
-          </Row>
-        )}
-      </div>
-
-      <div className="settings-card">
-        {/* 批量操作条：占满卡片宽度，左侧勾选状态、右侧动作组分组排布——
-            此前挤在行尾控件槽里，窄窗口下按钮会零散换行。 */}
-        <div className="dp-toolbar">
+    <div className="dp-recipes">
+      <PageActions>
+        <Button type="button" variant="primary" size="sm" icon={<IconPlus size={14} />} onClick={() => setCreating(true)}>
+          {t("dp.recipe.new")}
+        </Button>
+      </PageActions>
+      <Section bare desc={t("dp.recipe.section_desc")}>
+        <List toolbar={<>
+          <form className="dp-search-row" role="search" onSubmit={(event) => { event.preventDefault(); void load(keyword); }}>
+            <Input size="sm" prefix={<IconSearch size={14} />} placeholder={t("dp.recipe.search_ph")}
+              aria-label={t("dp.recipe.search_ph")} value={keyword} onChange={(event) => setKeyword(event.target.value)} />
+            <Button type="submit" variant="secondary" size="sm">{t("dp.recipe.search")}</Button>
+          </form>
+          {notice && <div className="dp-toolbar-notice" role="status">{notice}</div>}
+          <div className="dp-toolbar">
           <div className="dp-toolbar-group">
             <Checkbox
               checked={allSelected}
@@ -532,22 +526,10 @@ function DesktopRecipeSection() {
             <Button variant="secondary" size="sm" onClick={() => fileRef.current?.click()} loading={busy}>
               {t("dp.recipe.import")}
             </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => setConfirmDelete(true)}
-              disabled={selected.size === 0 || busy}
-            >
-              {t("dp.recipe.delete_selected")}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setConfirmClear(true)}
-              disabled={items.length === 0 || busy}
-            >
-              {t("dp.recipe.clear")}
-            </Button>
+            <Menu trigger={<Button variant="ghost" size="sm" disabled={!items.length || busy}>更多</Button>} entries={[
+              { label: t("dp.recipe.delete_selected"), disabled: !selected.size, danger: true, onSelect: () => setConfirmDelete(true) },
+              { label: t("dp.recipe.clear"), danger: true, onSelect: () => setConfirmClear(true) },
+            ]} />
             <input
               ref={fileRef}
               type="file"
@@ -560,40 +542,23 @@ function DesktopRecipeSection() {
               }}
             />
           </div>
-        </div>
-
-        {items.length === 0 ? (
-          <div className="navpage-empty">{t("dp.recipe.empty")}</div>
-        ) : (
-          <List>
-            {items.map((it) => (
+          </div>
+        </>}>
+          {items.length === 0 ? <Empty size="sm" title={t("dp.recipe.empty")} /> : items.map((it) => (
               <ListRow
                 key={it.id}
+                className="dp-recipe-row"
                 onClick={() => setEditing(it)}
-                name={
-                  <span className="dp-recipe-title">
-                    {/* 勾选框独立于行点击：点它只做选择，不打开弹窗 */}
-                    <span onClick={(e) => e.stopPropagation()}>
-                      <Checkbox
-                        checked={selected.has(it.id)}
-                        onChange={() => toggleSelect(it.id)}
-                        aria-label={`选择 ${it.app_name} ${it.intent}`}
-                      />
-                    </span>
-                    <span className="dp-recipe-title-text">{it.app_name} · {it.intent}</span>
-                    {/* plan-20261018-operator-boost：网页路线（内置浏览器）与桌面应用路线共用列表，用角标区分 */}
-                    {it.scope === "browser" && (
-                      <Badge size="xs" tone="info">{t("dp.recipe.scope_web")}</Badge>
-                    )}
-                    {it.source === "user" && (
-                      <span style={{ fontSize: 11, color: "var(--text-3)" }}>
-                        {t("dp.recipe.edited")}
-                      </span>
-                    )}
-                    <span className="dp-recipe-usage">使用 {it.usage_count} 次</span>
-                  </span>
-                }
+                leading={<Checkbox checked={selected.has(it.id)} onChange={() => toggleSelect(it.id)}
+                  aria-label={`选择 ${it.app_name} ${it.intent}`} />}
+                name={<span className="dp-recipe-title">{it.intent}</span>}
                 desc={<span className="dp-recipe-desc">{it.principle}</span>}
+                meta={<>
+                  <span className="dp-recipe-app" aria-label="应用或站点">{it.app_name}</span>
+                  {it.scope === "browser" && <Badge size="xs" tone="info">{t("dp.recipe.scope_web")}</Badge>}
+                  {it.source === "user" && <span>{t("dp.recipe.edited")}</span>}
+                  <span>使用 {it.usage_count} 次</span>
+                </>}
                 actions={
                   <Button
                     variant="ghost"
@@ -604,10 +569,9 @@ function DesktopRecipeSection() {
                   </Button>
                 }
               />
-            ))}
-          </List>
-        )}
-      </div>
+          ))}
+        </List>
+      </Section>
 
       <RecipeEditor
         open={creating || editing !== null}

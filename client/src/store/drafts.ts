@@ -48,11 +48,13 @@ export interface ComposerRefDraft {
   project_label?: string;
   /** plan-693-2868（P1）：新增 "microapp"（微应用引用，值为 appId）——
    *  与 ComposerCore.ComposerRef、client.ComposerRefOut 三处必须同步。 */
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp" | "ui-selection";
   value: string;
   label: string;
   /** plan-693-2868（P1）：微应用引用记下版本，重开输入框后「查看界面」仍能按同版本打开 */
   version?: string;
+  /** plan-interactive-ui：交互方案选择携带的选中详情与源码摘要 */
+  detail?: string;
 }
 
 export interface ComposerDraft {

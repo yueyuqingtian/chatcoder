@@ -60,11 +60,33 @@
 .idx-item.sc-row .idx-progress-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width var(--dur-3) var(--ease-standard); }
 
 /* 归档 / 自动化 / 常规 / 电脑操控 */
-.archive-toolbar.sc-toolbar { margin-bottom: 4px; }
+.archive-toolbar.sc-toolbar { margin-bottom: 0; }
 .sched-item.sc-row { align-items: flex-start; }
 .sched-item.sc-row .sc-row-actions { align-self: center; }
-.sc-stack { gap: 12px; }
+.sc-stack { gap: var(--sp-5); }
 .sc-stack .settings-card { border-radius: var(--r-lg); }
+/* plan-20261120-queue-message-mode：常规页队列消息快捷键对照行 */
+.gp-queue-desc { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.gp-queue-shortcuts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; line-height: 1.4; }
+.gp-queue-shortcut { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); }
+.gp-queue-sep { color: var(--text-3); }
+.gp-kbd-plus { color: var(--text-3); font-size: 11px; }
+.gp-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: 0 1px 0 var(--border);
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+}
 
 /* ── 使用统计：工具条 / KPI / 明细表（plan-91-393） ── */
 .sc-usage-toolbar > .btn { margin-left: 0; }
@@ -148,8 +170,8 @@
  * plan-121-482：设置页行列表统一——特例（本文件最后加载，作最终裁决）
  * ══════════════════════════════════════════════════════════ */
 
-/* ① 权限模式左列（定宽选择列）：不参与卡内贴边，保持自带卡片壳 */
-.ui-card .perm-modes-list {
+/* ① 权限模式左列（定宽选择列）：保持独立卡片壳 */
+.perm-modes-list {
   margin-inline: 0;
   border: 1px solid var(--border-light);
   border-radius: var(--r-lg);
@@ -167,7 +189,6 @@
 }
 .db-section > .settings-resource-list > .settings-resource-item { padding-inline: var(--sp-4); }
 
-/* ③ 归档工具条：底线全宽（与列表行分隔线同宽，避免"半截线"观感） */
-.ui-card .archive-toolbar { margin-inline: calc(var(--sp-5) * -1); padding-inline: var(--sp-5); }
+/* ③ 归档工具条：去掉外包 Card 负边距，由 Section 内容器直接承载全宽底线 */
 /* plan-20261101-performance：异步设置页的占位保持同一内容区域，不挤动侧栏。 */
 .settings-loading { min-height: 160px; padding: 24px; color: var(--text-2); font-size: 13px; line-height: 20px; }

@@ -10,7 +10,7 @@ import { IconRefresh } from "../icons";
 import { Badge, Tooltip } from "../ui";
 
 /** 登录授权类供应商（凭据是账号而非 API Key）：设置页凭据徽标与输入框供应商标签共用 */
-export const OAUTH_FORMATS = new Set(["ta3", "workbuddy", "trae", "kiro"]);
+export const OAUTH_FORMATS = new Set(["ta3", "workbuddy", "trae", "kiro", "antigravity"]);
 
 export interface ModelGroup {
   /** 分组键：供应商名（无供应商的为「独立模型」） */

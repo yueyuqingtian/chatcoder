@@ -49,6 +49,9 @@ class RollbackWrite(Base):
     # plan-20261019-toolcard-v2：这次写盘对文件做了什么（create / modify / delete；旧记录为 NULL，按内容推断）。
     # 二进制 / 超限文本不存全文，「新建」与「删除」只能靠它区分。
     op: Mapped[str | None] = mapped_column(String(8))
+    # 写盘前文件字节的 sha1：同轮连续多次写同一二进制文件时验证修改链衔接，
+    # 避免无写前文本且同轮未重复取 checkpoint 时误报无法校验。
+    before_hash: Mapped[str | None] = mapped_column(String(40))
     # 写盘后文件字节的 sha1：撤销 / 回滚前据此精确判断「本轮之后文件有没有被改过」，
     # 不受 GBK / BOM / 换行归一化影响（旧记录为 NULL，回退文本比较）。
     after_hash: Mapped[str | None] = mapped_column(String(40))

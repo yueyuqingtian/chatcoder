@@ -40,11 +40,7 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     return () => ipcRenderer.removeListener("pty:exit", handler);
   },
   // webview 元素标注回传与 DevTools/截图
-  onBrowserAnnotation: (cb) => {
-    const handler = (_e, payload) => cb(payload);
-    ipcRenderer.on("browser:annotation", handler);
-    return () => ipcRenderer.removeListener("browser:annotation", handler);
-  },
+  writeBrowserImage: (png) => ipcRenderer.invoke("browser:writeImage", png),
   openBrowserDevTools: (webContentsId) => ipcRenderer.invoke("browser:openDevTools", webContentsId),
   captureBrowserPage: (webContentsId) => ipcRenderer.invoke("browser:capturePage", webContentsId),
   // plan-20261015-browser-agent：AI 驱动内置浏览器（节流 / CDP / 隐藏态截图 / 弹窗与新窗口事件）
@@ -55,6 +51,14 @@ contextBridge.exposeInMainWorld("chatcoderAPI", {
     ipcRenderer.on("browserAgent:event", handler);
     return () => ipcRenderer.removeListener("browserAgent:event", handler);
   },
+  // plan-771-3177：内置浏览器安全密码库（safeStorage 加密存储；列表不返回明文密码）
+  browserVaultList: (origin) => ipcRenderer.invoke("browserVault:list", origin),
+  browserVaultSave: (entry) => ipcRenderer.invoke("browserVault:save", entry),
+  browserVaultDelete: (id) => ipcRenderer.invoke("browserVault:delete", id),
+  browserVaultCopyPassword: (id) => ipcRenderer.invoke("browserVault:copyPassword", id),
+  browserVaultAutofill: (webContentsId, id) => ipcRenderer.invoke("browserVault:autofill", webContentsId, id),
+  browserVaultSetNever: (origin, never) => ipcRenderer.invoke("browserVault:setNever", origin, never),
+  browserVaultResolveLogin: (id, action) => ipcRenderer.invoke("browserVault:resolveLogin", id, action),
   // ── plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6：微应用宿主桥的渲染层入口 ──
   // 页面（微应用 webview）的 window.microapp.invoke 由主进程接住，转成这里的 hostRequest；
   // 渲染层拿到后转发后端，结果用 hostReply 回包（主进程再原样回给发起方页面）。

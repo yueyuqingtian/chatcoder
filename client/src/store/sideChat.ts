@@ -47,7 +47,7 @@ interface SideChatState {
   openSide: (sessionId: number) => Promise<void>;
   closeSide: (sessionId: number) => void;
   refreshSide: (sessionId: number) => Promise<void>;
-  sendSide: (sessionId: number, payload: SendSidePayload) => Promise<void>;
+  sendSide: (sessionId: number, payload: SendSidePayload) => Promise<number | null>;
   stopSide: (sessionId: number) => Promise<void>;
   respondSide: (sessionId: number, approvalId: string, approved: boolean, remember?: boolean, answer?: Record<string, unknown>,
     files?: QuestionAttachments) => boolean;
@@ -274,7 +274,7 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
     sendSide: async (sessionId, payload) => {
       const typed = payload.content ?? "";
       const hasAtts = Array.isArray(payload.attachments) && payload.attachments.length > 0;
-      if (!typed.trim() && !hasAtts) return;
+      if (!typed.trim() && !hasAtts) return null;
       // 引用的主对话上下文只随本次提问发送一次：拼在发给模型的内容前面，本地显示仍只展示用户所写的内容
       const context = get().convos[sessionId]?.contextDraft ?? "";
       const content = context ? `${context}${typed}` : typed;
@@ -295,7 +295,7 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
       };
       patch(sessionId, (c) => ({ messages: [...c.messages, optimistic], isRunning: true, error: null }));
       try {
-        await api.createTurn({
+        const turn = await api.createTurn({
           session_id: sessionId,
           content,
           attachments: payload.attachments,
@@ -304,7 +304,9 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
           model_id: payload.modelId ?? undefined,
           refs: payload.refs,
         });
-        await Promise.all([refreshTurns(sessionId), refreshMessages(sessionId)]);
+        // plan-20261122-message-send：输入框只在服务端实际接收本条消息后清理草稿。
+        void Promise.all([refreshTurns(sessionId), refreshMessages(sessionId)]);
+        return turn.id;
       } catch (e) {
         patch(sessionId, (c) => ({
           messages: c.messages.filter((m) => m.id !== tempId),
@@ -313,6 +315,7 @@ export const useSideChatStore = create<SideChatState>((set, get) => {
           contextDraft: context ? context + c.contextDraft : c.contextDraft,
           error: e instanceof Error ? e.message : String(e),
         }));
+        return null;
       }
     },
 

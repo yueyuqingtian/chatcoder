@@ -1230,8 +1230,23 @@ class WorkflowRuntime:
                 by_key = {n["key"]: n for n in flow["nodes"]}
                 for key in ready_node_keys(views, flow_ready=flow_ready):
                     await self._enqueue(snap["run"], run, by_key[key])
+        team_loading = None
+
+        async def load_batch_team():
+            nonlocal team_loading
+            if team_loading is None:
+                from app.orchestration.agent_team import load_team
+                from app.persistence.database import async_session_factory
+
+                async def read():
+                    async with async_session_factory() as db:
+                        return await load_team(db, "workflow", all_models=True)
+
+                team_loading = asyncio.create_task(read())
+            return await asyncio.shield(team_loading)
+
         for slot in self._pool.pop_admissible(accept=self._accept):
-            await self._start(int(slot.node_id))
+            await self._start(int(slot.node_id), load_team=load_batch_team)
         await self._refresh_reasons()
 
     async def run_until_idle(self, timeout: float = 60.0) -> None:
@@ -1322,7 +1337,7 @@ class WorkflowRuntime:
                 self._reason_cache[node_id] = text
                 await store.update_node(node_id, reason=text)
 
-    async def _start(self, node_id: int) -> None:
+    async def _start(self, node_id: int, *, load_team=None) -> None:
         ctx = await store.load_node_context(node_id)
         if ctx is None:
             self._release(node_id)
@@ -1365,6 +1380,7 @@ class WorkflowRuntime:
             commands=tuple(node.get("commands") or ()),
             question=str(node.get("question") or ""),
             rework_source=str(pending.get("source") or ""),
+            load_team=load_team,
             on_agent=lambda agent_id, _nid=node_id: self._bind_agent(_nid, agent_id),
         )
         self._tasks[node_id] = asyncio.create_task(self._run(node_id, request))

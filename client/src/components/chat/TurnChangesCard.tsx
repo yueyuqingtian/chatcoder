@@ -32,6 +32,10 @@ import { FileBadge, splitFilePath } from "./FileBadge";
  *  键为 `${turnId}:${整组签名}`——续跑轮并入后签名变化属于另一次请求，不能被旧请求挡住。 */
 const inflight = new Set<string>();
 
+/** 用户手动展开过的轮次：消息流是虚拟列表，卡片滚出视口再滚回会重新挂载——
+ *  默认折叠后若不记住，用户点开看文件的卡片一滚动就会自己收起。 */
+const expandedTurns = new Set<number>();
+
 /** 已经出现过的轮次卡片：入场动画只在「第一次出现」时播放。
  *  消息流是虚拟列表，卡片滚出视口再滚回会重新挂载——不记下来的话每次滚动都会重播一遍。 */
 const enteredTurns = new Set<number>();
@@ -120,7 +124,10 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
   const iconSmall = Math.max(10, Math.round(chatFontSize * 0.92));
   const badgeSize = Math.max(13, Math.round(chatFontSize * 1.3));
 
-  const [collapsed, setCollapsed] = useState(false);
+  /** 默认折叠：变更卡片是每轮都出现的辅助信息，默认铺开列表会把消息流拉得很长，
+   *  用户按需点开查看（表头已显示文件数与该轮增删行数，信息不丢失）。
+   *  用户点开过的轮次记在 expandedTurns，虚拟列表重挂载后仍保持展开。 */
+  const [collapsed, setCollapsed] = useState(() => !expandedTurns.has(turnId));
   const [showAll, setShowAll] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reverting, setReverting] = useState(false);
@@ -248,6 +255,16 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
     return entries;
   }
 
+  /** 展开 / 收起：记住用户手动展开过的轮次，供重挂载后恢复（见 expandedTurns）。
+   *  用函数式更新：记忆必须跟着真实下一态走，连点两次时读闭包旧值会记反。 */
+  function toggleCollapsed() {
+    setCollapsed((v) => {
+      if (v) expandedTurns.add(turnId);
+      else expandedTurns.delete(turnId);
+      return !v;
+    });
+  }
+
   function closeRevert() {
     setConfirmOpen(false);
     // 关闭动画结束前保留「已取消」视图，避免淡出过程中内容瞬间切回确认文案
@@ -325,14 +342,14 @@ export function TurnChangesCard({ turnId, turnIds }: { turnId: number; turnIds?:
           内部箭头与撤销按钮各自 stopPropagation，避免一次点击触发两次或误触撤销。 */}
       <div
         className="tcc-head"
-        onClick={() => setCollapsed((v) => !v)}
+        onClick={toggleCollapsed}
       >
         <button
           type="button"
           className={`tcc-chev${collapsed ? "" : " is-open"}`}
           aria-label={collapsed ? "展开本轮文件变更" : "收起本轮文件变更"}
           aria-expanded={!collapsed}
-          onClick={(e) => { e.stopPropagation(); setCollapsed((v) => !v); }}
+          onClick={(e) => { e.stopPropagation(); toggleCollapsed(); }}
         >
           <IconChevronDown size={iconMain} />
         </button>

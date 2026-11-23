@@ -573,6 +573,23 @@ def disguise_tools(tool_schemas: list[dict]) -> list[dict]:
                 fn["parameters"]["properties"]["subagent_type"]["enum"] = ["Explore", "Plan"]
                 fn["parameters"]["properties"]["subagent_type"]["description"] = "只读研究角色，运行时强制只读。"
                 fn["description"] = "派发只读探索子代理，只能研究与查看，不能写入或操作界面；运行时强制只读。"
+            params = function.get("parameters", {}).get("properties", {})
+            if alias == "SubAgent" and "profile_id" in params and native is not None:
+                native = copy.deepcopy(native)
+                fn = native["function"]
+                props = fn["parameters"]["properties"]
+                for key in ("profile_id", "write_scope", "validation_resources"):
+                    if key in params:
+                        props[key] = copy.deepcopy(params[key])
+                props["mode"] = copy.deepcopy(params["mode"])
+                if "purpose" not in params:
+                    props.pop("purpose", None)
+                modes = params["mode"]["enum"]
+                if modes == ["readonly"]:
+                    props["subagent_type"]["enum"] = ["Explore", "Plan"]
+                elif modes == ["agent"]:
+                    props["subagent_type"]["enum"] = ["GeneralPurpose", "Verification"]
+                fn["description"] = function["description"]
             if native is not None and alias not in seen:
                 seen.add(alias)
                 builtins.append(native)

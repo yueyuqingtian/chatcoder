@@ -33,14 +33,12 @@ from app.orchestration.subagent import (
     cleanup, get_subagent_manager, list_resumable_subagents, peek_all_managers,
     peek_subagent_manager, resume_subagent,
 )
+from app.orchestration.agent_team import load_team
 from app.orchestration.subagent_tools import (
-    SUBAGENT_TOOL_NAMES, append_subagent_tools, load_subagent_type_states,
+    SUBAGENT_TOOL_NAMES, apply_team_tools,
 )
 # plan-156-619 S4：执行模式 → 子代理 / 子会话能力矩阵，以及子会话工具组。
 # 这一层是边界唯一事实源；engine 只按矩阵决定下发哪组 schema，不再用布尔开关拼条件。
-from app.orchestration.subagent_capabilities import (
-    CAP_EXPLORE_AGENT, capabilities_for,
-)
 from app.orchestration.tools.registry import tool_registry
 from app.persistence.write_behind import write_behind
 from app.services import audit_service, message_service, project_service, rollback_service, session_service, task_service, turn_service
@@ -684,10 +682,8 @@ _MODE_HINTS = {
         "执行流程：\n"
         "1. 先用 todo_write 建立调研清单（要改哪些文件、要先查清哪些事实），"
         "再按清单逐项探索；每完成一项立即标记为 completed。\n"
-        "1b. 调研里有 2 个以上彼此独立的问题时，在**同一条消息里**并行派只读子代理"
-        "（spawn_subagent，mode=readonly）——它们只读、不改代码、不占用你的上下文。"
-        "注意：计划模式**可以**派子代理（默认只读 Explore）；执行体由子代理承担，"
-        "不要因为「不能派可写执行体」就把调研也串起来自己做。\n"
+        "1b. 仅当本轮智能体分工允许派发只读成员时，才可为互相独立的代码调查"
+        "并行调用 spawn_subagent（mode=readonly）。浏览器、桌面和拓展任务由有权限的主代理处理。\n"
         "1a. 若上下文提供「Plan History」（本会话此前各轮计划与状态），"
         "按 Collect → Merge → Replan 三步产出新方案：Collect——逐轮读取，"
         "找出所有未完结轮中尚未完成的需求（done/cancelled 轮的已完成内容"
@@ -1555,14 +1551,6 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 n for n in _available_tools
                 if n in TO_TA3 or n in TO_TA3_EXTENSION or is_mcp_tool(n)
             }
-        _type_states = await load_subagent_type_states(db)
-        # plan-156-624：设置中心总开关此前只存在配置里、engine 从未读取，关掉也不生效。
-        # plan-20261020-subsession-switch：子代理与子会话已拆成两个独立开关，分别门控各自工具，
-        # 两者默认 True，升级用户开箱即用。
-        _subagents_on = bool(getattr(settings, "subagent_enabled", True))
-        _allow_subagents = _subagents_on and bool(
-            _type_states.get("explore", True) or _type_states.get("general", True)
-        )
         # plan-644: plan 模式收集本会话此前各轮计划需求全集并注入（多轮迭代
         # 零丢失的机制保证）；非 plan 模式不注入、零开销
         _plan_history = ""
@@ -1602,12 +1590,22 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
             _plan_history = await _collect_plan_history(db, session, workspace)
             if _plan_history:
                 logger.info("[engine] turn=%s 注入 Plan History %d 字符", turn_id, len(_plan_history))
+        _legacy_child = getattr(session, "side_kind", None) == "sub"
+        _team_allowed = (SUBAGENT_TOOL_NAMES & set(_mode_whitelist or ())) or None
+        _team = await load_team(db, _mode, parent_models=(effective_model_id,),
+                                allow_spawn=not _legacy_child and (
+                                    _team_allowed is None or "spawn_subagent" in _team_allowed))
+        if _team.available():
+            _available_tools.add("spawn_subagent")
+        else:
+            _available_tools.discard("spawn_subagent")
         _replayed_upto = await _history_cutoff(db, session_id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=user_text, attachments=attachments,
             multimodal=_is_multimodal,
-            enable_subagents=_allow_subagents,
+            enable_subagents=False,
+            team_notice=_team.notice(),
             plan_history=_plan_history,
             # plan-19-82: 语言判定文本（续跑轮传 "" 回退真实用户消息）
             language_text=_lang_text,
@@ -1704,33 +1702,9 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
         # 一致，此前这里写「强制只读 explore」与实现不符——只读语义只由 `_mode_readonly`
         # （= is_readonly_like，即 readonly / plan 两类）决定，workflow 取 False。
         # 工作流节点自身的写入仍受 write_scope 约束（在 workflow/guard.py，属另一层约束）。
-        _caps = capabilities_for(_mode)
-        _allow_explore = CAP_EXPLORE_AGENT in _caps and _subagents_on
-        # plan-549-2281 修复：历史挂靠子会话（side_kind=sub）不下发子代理工具——它的
-        # developer 段里有 LEGACY_CHILD_SESSION_HINT「你不能派发」，若工具照发就是同一份
-        # 上下文里两套矛盾指令（旧 strip_for_subsession 的身份剥离在迁移时被删丢了）。
-        _is_legacy_child = bool(getattr(session, "side_kind", None) == "sub")
-        if _allow_explore and not _is_legacy_child:
-            _subagent_allowed: set[str] | None = None
-            if _schema_whitelist is not None:
-                _picked = SUBAGENT_TOOL_NAMES & set(_schema_whitelist)
-                # plan-156-624：旧版本保存的模式白名单里没有子代理工具（那时还没有这套能力），
-                # 空交集不能当作「全部未勾选」——否则升级后子代理整组被撤掉，用户得重新去
-                # 权限面板逐个勾选。只有白名单确实勾过至少一个子代理工具时才按其过滤。
-                _subagent_allowed = _picked or None
-            tool_schemas = append_subagent_tools(
-                tool_schemas, _type_states,
-                explore_only=_mode_readonly,
-                allowed=_subagent_allowed,
-            )
-        else:
-            # 能力矩阵未授权 / 设置关闭 / 历史挂靠子会话：剔除可能经白名单带进来的
-            # 子代理工具，保证「提示词说不能派发」与「工具面真的没有」口径唯一
-            from app.orchestration.subagent_tools import SUBAGENT_TOOL_NAMES as _SAN
-            tool_schemas = [
-                s for s in tool_schemas
-                if s.get("function", {}).get("name") not in _SAN
-            ]
+        tool_schemas = apply_team_tools(
+            tool_schemas, _team, allowed=_team_allowed, manage_existing=not _legacy_child,
+        )
         # plan-549-2281：子会话的创建与控制已下线——不再下发任何子会话工具，
         # 也不再给子会话追加通信工具；历史挂靠子会话按上方身份判定剥离子代理工具。
         # 工作流工具仅在工作流执行模式下发（设置开关之外的第二道门）；只读 / 计划 / 智能体模式不暴露
@@ -1785,6 +1759,8 @@ async def start_turn(db: AsyncSession, *, turn_id: int,
                 # plan-248-1258 M6: 子代理继承的关键上下文（执行模式 / 权限模式）
                 "permission_mode": _mode,
                 "approval_mode": _approval_mode,
+                "team": _team,
+                "parent_tools": frozenset(item["function"]["name"] for item in tool_schemas),
                 # plan-330-1648 M2: 子代理思考深度 = 设置优先 → 本 turn 档位 → 全局默认
                 "reasoning_effort": reasoning_effort,
                 "context_summary": _plan_history or "",
@@ -2638,7 +2614,6 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         from app.orchestration.context_manager import build_main_context
         from app.orchestration.prompts import build_plan_exit_reminder
         from app.orchestration.subagent import get_subagent_manager
-        from app.orchestration.subagent_tools import append_subagent_tools, load_subagent_type_states
         from app.orchestration.tools.registry import tool_registry
         turn = await turn_service.get_turn(db, turn_id)
         if turn is None:
@@ -2741,12 +2716,17 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 确认执行阶段按智能体模式运行，建议卡口径与 start_turn 一致
         from app.orchestration.tools.suggestion import suggestion_allowed as _sugg_allowed
         _suggestion_on_confirm = _sugg_allowed("agent", session)
+        _legacy_child = getattr(session, "side_kind", None) == "sub"
+        _team = await load_team(db, "agent", parent_models=(effective_model_id,),
+                                allow_spawn=not _legacy_child)
         _replayed_upto = await _history_cutoff(db, session.id)
         bundle = await build_main_context(
             db, agent=main_agent, session=session, project=project, turn=turn,
             user_message=original_request,
             multimodal=_is_multimodal,
             suggestion_enabled=_suggestion_on_confirm,
+            enable_subagents=False,
+            team_notice=_team.notice(),
             effective_model_id=effective_model_id,
             # plan-91-394: 中断可续跑的子代理清单（用户说“继续”时主代理据此续跑，而非重新派发）
             paused_subagents=await list_resumable_subagents(session.id),
@@ -2777,11 +2757,6 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
         # 复盘修复：注入前必须过「子代理开关 + 会话身份」两道门——开关关闭时工具已
         # 不下发，提示词必须同口径停止注入（旧 execute_parallel_subsession_hint 的
         # 开关判断在迁移时丢了）；历史挂靠子会话没有派发工具，同样不注入。
-        from app.orchestration.prompts.subagent_dispatch import EXECUTE_DISPATCH_HINT
-        _subagents_on_confirm = bool(getattr(settings, "subagent_enabled", True)) and not bool(
-            getattr(session, "side_kind", None) == "sub"
-        )
-        _exec_parallel = EXECUTE_DISPATCH_HINT if _subagents_on_confirm else ""
         bundle.instruction = (
             (bundle.rules_anchor + "\n\n" if bundle.rules_anchor else "")
             + "用户已确认以下方案文档，现在按它执行：\n\n"
@@ -2789,13 +2764,11 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
             "【执行要求】\n"
             "1. 先用 todo_write 按文档重建执行清单——分几步、每步粒度由你决定，"
             "以完整可交付的改动为界（一组相关改动一起完成；是否中途验证由你按风险与改动量判断，交付前再整体验证一次）；之前的调研清单已清空。\n"
-            "2. 再按文档推进：文档标注为可并行执行的独立步骤，优先派发子代理（spawn_subagent）并行处理"
-            "（派发后继续推进其余步骤，不要轮询）；有前后依赖的步骤自己串行做。\n"
+            f"2. 按文档推进。{_team.notice()}\n"
             "3. 每完成一步立即用 todo_write 把该项标记为 completed、下一项标记为"
             " in_progress，不要事后批量补标。\n"
             "4. 执行中发现划分不合理时，先更新清单再继续。\n"
             "5. 完成后用一段话总结改动与验证结果。"
-            + (f"\n\n{_exec_parallel}" if _exec_parallel else "")
             + _open_section
         )
         main_tools = tool_registry.all_schemas(include_suggestion=_suggestion_on_confirm)
@@ -2811,24 +2784,7 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                         tool_registry.register(mt)
         except Exception:
             logger.warning("[engine] 确认执行路径 MCP 工具加载失败(非阻塞)", exc_info=True)
-        _type_states = await load_subagent_type_states(db)
-        # plan-156-624：确认执行路径与 start_turn 同口径——接入「启用子代理」总开关。
-        # plan-549-2281：子会话下发已下线，这里只留子代理；历史挂靠子会话同样不下发
-        # （与上方 EXECUTE_DISPATCH_HINT 的门禁同一判定）。
-        _subagents_on = _subagents_on_confirm
-        if _subagents_on:
-            main_tools = append_subagent_tools(main_tools, _type_states)
-        else:
-            # plan-549-2281 修复：与 start_turn（else 分支）同口径地剔除子代理工具。
-            # 此前只有 if 分支，关闭「启用子代理」开关后再经计划卡确认执行时，
-            # `_schema_whitelist` 带进来的 spawn_subagent 等工具会照旧下发——
-            # 而提示词已停止注入派发要求（上面 _subagents_on_confirm 同口径），
-            # 工具面与提示词互相矛盾，模型还会反复尝试。
-            from app.orchestration.subagent_tools import SUBAGENT_TOOL_NAMES as _SAN_CONFIRM
-            main_tools = [
-                s for s in main_tools
-                if s.get("function", {}).get("name") not in _SAN_CONFIRM
-            ]
+        main_tools = apply_team_tools(main_tools, _team, manage_existing=not _legacy_child)
         # 确认执行的是计划文档（计划模式产出），不属于工作流执行模式，因此不下发工作流工具
         mgr = get_subagent_manager(session.id)
         _turn_managers[turn_id] = mgr
@@ -2854,6 +2810,8 @@ async def execute_confirmed_plan(db: AsyncSession, *, turn_id: int) -> dict:
                 # plan-75-332: 旧值 default 改名 agent（确认执行阶段就是智能体模式）。
                 "permission_mode": "agent",
                 "approval_mode": _approval_mode,
+                "team": _team,
+                "parent_tools": frozenset(item["function"]["name"] for item in main_tools),
                 "reasoning_effort": None,
             },
             # 与 start_turn 同口径：确认执行期间同样要把注入消息（用户追加 / 子会话提问与汇报）和子代理完成通知
@@ -3024,10 +2982,15 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     workspace = _resolve_workspace(session, project)
     manager = get_subagent_manager(session.id)
     # plan-91-394: 该步骤子代理保有检查点（中断/暂停）→ 原地续跑，保留已完成进度；不新建子代理
+    source = await db.get(Agent, step.agent_id) if step.agent_id else None
+    parent_mode = getattr(session, "permission_mode", None) or "agent"
+    readonly_only = _pps_defaults.is_readonly_like(parent_mode)
     if step.agent_id:
         _rstate, _rdetail = await resume_subagent(
-            session.id, int(step.agent_id), turn_id=turn_id, cancel_event=asyncio.Event(),
+            session.id, int(step.agent_id), turn_id=turn_id, cancel_event=asyncio.Event(), readonly_only=readonly_only,
         )
+        if _rstate == "already_running":
+            return {"ok": False, "error": "此步骤正在运行"}
         if _rstate == "resumed":
             _rhandle = manager.get(int(step.agent_id))
             await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
@@ -3041,24 +3004,35 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
                 "task_id": step.id, "status": step.status, "note": step.note or ""}})
             return {"ok": _rok, "status": step.status}
     effective_model_id = session.model_id or main_agent.model_id
-    # plan-560-2311 C4：与正常派发（spawn_subagent）同一套工具集组装——先剥离子代理禁用的
-    # 工具（ask_user_question / 派下级 / 工作流），再追加子代理自有通信工具（report_to_leader）。
-    # 此前直接传 all_schemas()：重试派出的子代理**看得到 ask_user_question**（问用户会无人
-    # 接收而挂死），也看不到 report_to_leader（无法上报问题与结论），与正常派发的边界不一致。
+    # plan-20261123-agent-team：重试是新派发时仍需遵循会话权限和团队分工。
     from app.orchestration.subagent_tools import (
-        strip_for_subagent as _strip_for_subagent,
-        SUBAGENT_OWN_TOOLS as _SUBAGENT_OWN_TOOLS,
-        available_subagent_tools,
+        SUBAGENT_OWN_TOOLS, available_subagent_tools, restrict_member_tools,
     )
-    tool_schemas = _strip_for_subagent(await available_subagent_tools(db))
-    _have_names = {s.get("function", {}).get("name") for s in tool_schemas}
-    for _own in _SUBAGENT_OWN_TOOLS:
-        if _own["function"]["name"] not in _have_names:
-            tool_schemas.append(_own)
+
+    team = await load_team(db, parent_mode, parent_models=(effective_model_id,),
+                           allow_spawn=getattr(session, "side_kind", None) != "sub")
+    member_mode = "readonly" if getattr(source, "subagent_mode", None) == "readonly" else "agent"
+    profile_id = getattr(source, "subagent_profile_id", None)
+    member = team.select(profile_id, member_mode)
+    if member is None:
+        return {"ok": False, "error": "当前团队分工或会话权限不允许重新派发此步骤"}
+    if manager.pending_count() >= settings.max_concurrent_subagents:
+        return {"ok": False, "error": "团队并发已满，请等待已有成员完成"}
+    effective_model_id, effort, model_fallback = team.model_for(member, effective_model_id, None)
+    readonly = member.mode == "readonly"
+    role = "explore" if readonly else "coder"
+    permitted = _pps_defaults.resolve_tools(parent_mode, {tool.name for tool in tool_registry.all()})
+    tool_schemas = restrict_member_tools(await available_subagent_tools(db, readonly=readonly),
+                                         readonly=readonly, parent_tools=permitted)
+    if readonly and not tool_schemas:
+        return {"ok": False, "error": "当前会话没有可分配的代码读取工具"}
+    tool_schemas.extend(SUBAGENT_OWN_TOOLS)
     cancel_event = asyncio.Event()
     sub_agent = Agent(
         kind="sub", name=step.title[:40], model_id=effective_model_id,
         session_id=session.id, turn_id=turn_id, parent_agent_id=main_agent.id,
+        subagent_mode=member.mode, subagent_role=role,
+        subagent_profile_name=member.name, subagent_profile_id=member.id, status="running",
     )
     # 子代理创建 + step 状态（写引擎单写线程，一次事务返回创建后的 Agent id）
     from app.persistence.database import run_write_locked
@@ -3066,26 +3040,33 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
     def _persist_agent(s):
         from app.persistence.models.agent import Agent as _Agent
         from app.persistence.models.task import Task as _Task
+        st = s.get(_Task, task_id)
+        if st is None or st.status not in ("failed", "cancelled"):
+            return None
         sa = _Agent(
             kind="sub", name=step.title[:40], model_id=effective_model_id,
             session_id=session.id, turn_id=turn_id, parent_agent_id=main_agent.id,
+            subagent_mode=member.mode, subagent_role=role,
+            subagent_profile_name=member.name, subagent_profile_id=member.id, status="running",
         )
         s.add(sa)
         s.flush()
         aid = sa.id
-        st = s.get(_Task, task_id)
-        if st is not None:
-            st.agent_id = aid
-            st.status = "running"
-            st.note = None
+        st.agent_id = aid
+        st.status = "running"
+        st.note = None
         s.commit()
         return aid
 
     agent_id = await run_write_locked(_persist_agent, label="subagent.retry.create")
+    if agent_id is None:
+        return {"ok": False, "error": "该步骤已由另一请求接手"}
     step = await task_service.get_task(db, task_id)  # async 只读对象（保持后续 step 属性读取）
     sub_agent.id = agent_id
     await broadcast(session.id, {"event": "task.updated", "payload": {"task_id": step.id, "status": "running"}})
     handoff = step.description or step.title
+    if model_fallback:
+        handoff += "\n成员模型不可用，已跟随会话。"
     # v19: 重试步骤同样继承用户原始请求
     original_request = ""
     try:
@@ -3106,6 +3087,7 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         db, agent=sub_agent, session=session, project=project, task=step,
         handoff_summary=handoff,
         original_request=original_request,
+        member=member,
     )
     handle_id = manager.spawn(
         db, agent=sub_agent, turn_id=turn_id, task=step,
@@ -3113,14 +3095,17 @@ async def retry_failed_step(db: AsyncSession, *, turn_id: int, task_id: int) -> 
         context_bundle=context, tool_schemas=tool_schemas,
         workspace=workspace, cancel_event=cancel_event,
         # plan-330-1648 M1: 计划步骤子代理 = 可写执行（按自身语义锁定，不继承主代理当时的模式）
-        subagent_mode="default",
+        subagent_mode=member.mode,
+        reasoning_effort=effort,
     )
     # v19: 重试也广播子代理启动事件
     await broadcast(session.id, {
         "event": "agent.started",
         "payload": {"agent_id": sub_agent.id, "kind": "sub",
                     "name": sub_agent.name, "turn_id": turn_id,
-                    "task_id": step.id},
+                    "task_id": step.id,
+                    "subagent_mode": member.mode, "subagent_role": role,
+                    "subagent_profile_name": member.name},
     })
     handle = manager.get(handle_id)
     if handle and handle.task:

@@ -6,15 +6,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconX } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { CardRow, IconButton, List, ListRow, Switch } from "../ui";
+import { CardRow, Empty, IconButton, List, ListRow, Switch } from "../ui";
 
 /** 开关（兼容旧签名 checked/onChange；disabled 可选，用于与所在行的置灰口径一致） */
 export function Sw({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return <Switch checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
-/** 卡片行：标题 + 描述 + 右侧控件槽（title 支持 ReactNode，便于在标题右侧挂徽标） */
-export function Row({ title, desc, children, className, disabled }: { title: React.ReactNode; desc: string; children?: React.ReactNode; className?: string; disabled?: boolean }) {
+/** 卡片行：标题 + 描述 + 右侧控件槽（title/desc 支持 ReactNode，便于在标题右侧挂徽标或说明内嵌键帽） */
+export function Row({ title, desc, children, className, disabled }: { title: React.ReactNode; desc?: React.ReactNode; children?: React.ReactNode; className?: string; disabled?: boolean }) {
   return <CardRow title={title} desc={desc} className={className} disabled={disabled}>{children}</CardRow>;
 }
 
@@ -52,7 +52,7 @@ export function GenericPanel<T extends { id: number }>({ loader, getName, getDes
           />
         ))}
       </List>
-      {items.length === 0 && <div className="navpage-empty">暂无数据</div>}
+      {items.length === 0 && <Empty title="暂无数据" />}
       <ConfirmDialog
         open={confirmTarget !== null}
         title="删除"

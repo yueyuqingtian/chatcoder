@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { api, type MessageOut, type MessagePage } from "../src/api/client.ts";
 import {
+  aroundMessages,
   clearMessageHistory,
+  getMessageHistoryState,
   initialMessages,
   olderMessages,
   refreshMessageWindow,
@@ -172,6 +174,43 @@ try {
     // 5b: id=2 真被删除（id <= maxFetchedId=3）应删除；id=4 大于 maxFetchedId（未落库尾部）应保留
     const partial = mergeRefreshedMessages(existing, [makeMsg(1, "user"), makeMsg(3, "user")], checkedIds);
     assert.deepEqual(partial.map((m) => m.id), [1, 3, 4]);
+  }
+
+  // ── 场景 6：page.context 携带跨页更早消息不误判为跳页断层；around 跳页后才置位并在连续页追上后清除 ──
+  {
+    const sid = 106;
+    clearMessageHistory(sid);
+    api.messagePage = async (_sid, params) => {
+      if (params?.around_id != null) {
+        return makePage([makeMsg(10, "user"), makeMsg(11, "assistant")], { has_before: true, has_after: true, revision: 1 });
+      }
+      if (params?.before_id === 50) {
+        return makePage([makeMsg(10, "user"), makeMsg(30, "assistant")], { before_id: 10, after_id: 30, has_before: false, revision: 1 });
+      }
+      // 首屏页：主区间 [50, 51]，但 context 带入了跨页更早消息 id=20
+      return makePage([makeMsg(50, "user"), makeMsg(51, "assistant")], {
+        context: [makeMsg(20, "assistant")],
+        before_id: 50,
+        after_id: 51,
+        has_before: true,
+        revision: 1,
+      });
+    };
+
+    const init = await initialMessages(sid);
+    init.commit();
+    assert.deepEqual(init.items.map((m) => m.id), [20, 50, 51]);
+    // 关键回归：context 中 id=20 < before_id=50 不应置位 disjointBefore，上滚必须允许自动加载
+    assert.equal(getMessageHistoryState(sid).disjointBefore, false);
+
+    // 真正通过 aroundMessages 跳到更早区间 [10, 11] 后，disjointBefore 置为 true
+    await aroundMessages(sid, 10);
+    assert.equal(getMessageHistoryState(sid).disjointBefore, true);
+
+    // 当连续窗口 olderMessages 追上并覆盖到 id=10 时，disjointBefore 自动清除
+    const older = await olderMessages(sid);
+    older.commit();
+    assert.equal(getMessageHistoryState(sid).disjointBefore, false);
   }
 
   console.log("消息流历史窗口与游标一致性回归全部通过");

@@ -2,11 +2,29 @@
 import codecs
 import mimetypes
 import zipfile
+from collections import deque
 from pathlib import Path
 from fastapi import HTTPException
 
 TEXT_LIMIT = 512 * 1024
 OFFICE_LIMIT = 10 * 1024 * 1024
+INITIAL_TREE_NODE_BUDGET = 5000
+
+# plan-771-3177：统一隐藏文件与重型目录过滤口径，list_children 与 initial_tree 共用。
+DEFAULT_IGNORED_DIRS = frozenset({
+    "node_modules", "__pycache__", ".git", ".venv", "venv",
+    "dist", "build", "target", ".next", ".nuxt",
+    ".pytest_cache", ".ruff_cache", ".mypy_cache", ".cache",
+})
+
+
+def is_hidden_entry(name: str, is_dir: bool = False) -> bool:
+    """判断目录项在 show_hidden=False 时是否应隐藏。"""
+    if name.startswith("."):
+        return True
+    if is_dir and name in DEFAULT_IGNORED_DIRS:
+        return True
+    return False
 
 
 def safe_project_path(root: Path, path: str) -> Path:
@@ -55,33 +73,59 @@ def check_office(path: Path):
             raise HTTPException(422, "文档已损坏或加密，无法预览")
 
 
-def list_children(path: Path):
+def _scan_children(path: Path, show_hidden: bool, limit: int | None = None):
     try:
-        return [{"name": p.name, "path": p.as_posix(), "type": "dir" if p.is_dir() else "file",
-                 "children": [] if p.is_dir() else None}
-                for p in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))]
+        out = []
+        for p in path.iterdir():
+            is_dir = p.is_dir()
+            if not show_hidden and is_hidden_entry(p.name, is_dir=is_dir):
+                continue
+            if limit is not None and len(out) >= limit:
+                return None
+            out.append({
+                "name": p.name,
+                "path": p.as_posix(),
+                "type": "dir" if is_dir else "file",
+                "children": None,
+            })
+        return sorted(out, key=lambda node: (node["type"] != "dir", node["name"].lower()))
     except PermissionError:
         raise HTTPException(403, "没有权限读取此目录")
 
 
-def initial_tree(root: Path, depth: int):
-    """保留文件过滤的初始多层视图；深层定位仍按需补齐，不扫描整棵树。"""
-    remaining = [5000]
-    seen = set()
-    def walk(path, level):
-        if level <= 0 or remaining[0] <= 0: return []
-        resolved = path.resolve()
-        if resolved in seen: return []
-        try: resolved.relative_to(root.resolve())
-        except ValueError: return []
+def list_children(path: Path, show_hidden: bool = False):
+    return _scan_children(path, show_hidden) or []
+
+
+def initial_tree(root: Path, depth: int, show_hidden: bool = False):
+    """plan-20261121-file-tree-settings：只预读能完整返回的分支，根目录始终完整。"""
+    root_resolved = root.resolve()
+    result = list_children(root, show_hidden=show_hidden) if depth > 0 else []
+    remaining = INITIAL_TREE_NODE_BUDGET - len(result)
+    seen = {root_resolved}
+
+    def candidates(nodes, level):
+        if level > 0:
+            for node in nodes:
+                if node["type"] == "dir" and node["name"] not in DEFAULT_IGNORED_DIRS:
+                    yield node, level
+
+    queue = deque(candidates(result, depth - 1))
+    while queue and remaining > 0:
+        node, level = queue.popleft()
+        path = Path(node["path"])
+        try:
+            resolved = path.resolve()
+            if resolved in seen or not resolved.is_relative_to(root_resolved):
+                continue
+            children = _scan_children(path, show_hidden, limit=remaining)
+        except (OSError, RuntimeError, HTTPException):
+            # 子目录消失或无法访问时，仍保留其同级项；手动打开会得到具体错误。
+            continue
         seen.add(resolved)
-        nodes = list_children(path)
-        result = []
-        for node in nodes:
-            if node["name"].startswith(".") or node["name"] == "node_modules": continue
-            if remaining[0] <= 0: break
-            remaining[0] -= 1
-            if node["type"] == "dir": node["children"] = walk(Path(node["path"]),level-1)
-            result.append(node)
-        return result
-    return walk(root, depth)
+        if children is None:
+            continue
+        node["children"] = children
+        remaining -= len(children)
+        queue.extend(candidates(children, level - 1))
+    return result

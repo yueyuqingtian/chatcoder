@@ -1,134 +1,161 @@
-"""v2.2 (对齐 zcode 3.13): 子代理类型（SubagentProfile）管理 API。"""
+"""智能体团队档案接口（plan-20261123-agent-team）。"""
 import logging
+from typing import Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from sqlalchemy.orm import defer
 
-from app.persistence.database import get_db
+from app.orchestration.agent_team import BUILTINS, member_of
+from app.persistence.database import get_db, run_write_locked
+from app.persistence.models.model_reg import Model, Provider
 from app.persistence.models.subagent_profile import SubagentProfile
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/subagents", tags=["subagents"])
+ExecutionMode = Literal["readonly", "agent"]
 
 
 class SubagentProfileIn(BaseModel):
-    name: str
-    description: str | None = None
-    model_id: int | None = None
-    system_prompt: str | None = None
-    # plan-330-1648 M2: 思考深度档位（None = 跟随会话本轮档位）
-    reasoning_effort: str | None = None
-    is_active: bool = True
-
-
-class SubagentProfilePatch(BaseModel):
-    """S10（plan-41-197）：部分更新载荷——列表页的启用开关只传 is_active。
-
-    此前 PATCH 复用全量 schema（name 必填），只传 is_active 会被 422 拒绝，
-    表现为“列表里的启用滑块点击无法修改，只能在弹窗内改”。所有字段可选，
-    未出现的字段保持原值（显式传 null 表示清除覆盖，如 reasoning_effort）。
-    """
-    name: str | None = None
-    description: str | None = None
-    model_id: int | None = None
-    system_prompt: str | None = None
-    reasoning_effort: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    description: str | None = Field(default=None, max_length=300)
+    model_id: int | None = Field(default=None, gt=0)
+    system_prompt: str | None = Field(default=None, max_length=100_000)
+    reasoning_effort: str | None = Field(default=None, max_length=20)
+    execution_mode: ExecutionMode | None = None
     is_active: bool | None = None
 
 
-def _to_out(p: SubagentProfile) -> dict:
+class SubagentProfilePatch(SubagentProfileIn):
+    revision: int | None = Field(default=None, ge=0)
+    reset: Literal["prompt", "all"] | None = None
+
+
+def _to_out(row: SubagentProfile) -> dict:
+    builtin = BUILTINS.get(row.name)
     return {
-        "id": p.id, "name": p.name, "description": p.description,
-        "model_id": p.model_id,
-        "system_prompt": p.system_prompt,
-        "reasoning_effort": getattr(p, "reasoning_effort", None),
-        "is_active": p.is_active,
+        "id": row.id, "name": row.name,
+        "display_name": row.display_name or (builtin[0] if builtin else row.name),
+        "description": row.description,
+        "model_id": row.model_id, "reasoning_effort": row.reasoning_effort,
+        "execution_mode": builtin[2] if builtin else (row.execution_mode or "agent"),
+        "is_active": row.is_active, "builtin": builtin is not None,
+        "revision": row.revision,
     }
 
 
-@router.get("", response_model=list[dict])
+def _detail(row: SubagentProfile) -> dict:
+    from app.orchestration.context_manager import subagent_prompt_preview
+
+    return {**_to_out(row), **subagent_prompt_preview(member_of(row))}
+
+
+def _get(db, profile_id: int) -> SubagentProfile:
+    row = db.get(SubagentProfile, profile_id)
+    if row is None:
+        raise HTTPException(404, "智能体不存在")
+    return row
+
+
+def _apply(db, row: SubagentProfile, fields: dict) -> None:
+    if "name" in fields:
+        display_name = (fields.pop("name") or "").strip()
+        if not display_name:
+            raise HTTPException(422, "请输入智能体名称")
+        row.display_name = display_name
+    if "execution_mode" in fields:
+        mode = fields["execution_mode"]
+        if mode is None or (row.name in BUILTINS and mode != BUILTINS[row.name][2]):
+            raise HTTPException(422, "此智能体不能使用所选执行模式")
+    if "is_active" in fields and fields["is_active"] is None:
+        raise HTTPException(422, "请选择成员启用状态")
+    if "model_id" in fields or "reasoning_effort" in fields:
+        model_id = fields.get("model_id", row.model_id)
+        effort = fields.get("reasoning_effort", row.reasoning_effort)
+        model = db.get(Model, model_id) if model_id is not None else None
+        provider = db.get(Provider, model.provider_id) if model is not None and model.provider_id else None
+        if model_id is not None and (model is None or not model.is_active
+                                     or provider is not None and not provider.is_active):
+            raise HTTPException(422, "所选模型不可用")
+        if model is not None and effort is not None and effort not in (model.reasoning_efforts or []):
+            raise HTTPException(422, "所选模型不支持此思考深度")
+    for key, value in fields.items():
+        setattr(row, key, value)
+
+
+@router.get("")
 async def list_profiles(db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(SubagentProfile).order_by(SubagentProfile.id.asc()))
-    return [_to_out(p) for p in res.scalars().all()]
+    result = await db.execute(select(SubagentProfile).options(defer(SubagentProfile.system_prompt))
+                              .order_by(SubagentProfile.id))
+    return [_to_out(row) for row in result.scalars()]
 
 
-@router.post("", response_model=dict)
-async def create_profile(body: SubagentProfileIn, db: AsyncSession = Depends(get_db)):
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(400, "名称不能为空")
-    exists = (await db.execute(
-        select(SubagentProfile).where(SubagentProfile.name == name)
-    )).scalars().first()
-    if exists:
-        raise HTTPException(409, "同名子代理类型已存在")
-    from app.persistence.database import run_write_locked
-
-    def _p(s):
-        obj = SubagentProfile(
-            name=name, description=body.description,
-            model_id=body.model_id,
-            system_prompt=body.system_prompt, reasoning_effort=body.reasoning_effort,
-            is_active=body.is_active,
-        )
-        s.add(obj)
-        s.flush()
-        oid = obj.id
-        s.commit()
-        return oid
-
-    pid = await run_write_locked(_p, label="subagent.profile.create")
-    created = (await db.execute(select(SubagentProfile).where(SubagentProfile.id == pid))).scalars().first()
-    return _to_out(created)
+@router.get("/{profile_id}")
+async def get_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(SubagentProfile, profile_id)
+    if row is None:
+        raise HTTPException(404, "智能体不存在")
+    return _detail(row)
 
 
-@router.patch("/{profile_id}", response_model=dict)
-async def update_profile(profile_id: int, body: SubagentProfilePatch,
-                         db: AsyncSession = Depends(get_db)):
-    from app.persistence.database import run_write_locked
+@router.post("", status_code=201)
+async def create_profile(body: SubagentProfileIn):
+    def create(db):
+        row = SubagentProfile(name=f"member-{uuid4().hex}", execution_mode="agent", is_active=True)
+        fields = body.model_dump(exclude_unset=True)
+        fields.setdefault("name", None)
+        _apply(db, row, fields)
+        db.add(row)
+        db.flush()
+        result = _detail(row)
+        db.commit()
+        return result
 
-    # S10（plan-41-197）：只更新请求里显式出现的字段（exclude_unset）——
-    # 列表开关只传 is_active 时不再覆盖其它字段，也不再触发 name 必填校验。
-    provided = body.model_dump(exclude_unset=True)
-
-    def _p(s):
-        p = s.get(SubagentProfile, profile_id)
-        if p is None:
-            return False
-        for field, value in provided.items():
-            if field == "name":
-                if value and str(value).strip():
-                    p.name = str(value).strip()
-                continue
-            setattr(p, field, value)
-        s.commit()
-        return True
-
-    ok = await run_write_locked(_p, label=f"subagent.profile.update.{profile_id}")
-    if not ok:
-        raise HTTPException(404, "子代理类型不存在")
-    p = (await db.execute(select(SubagentProfile).where(SubagentProfile.id == profile_id))).scalars().first()
-    return _to_out(p)
+    return await run_write_locked(create, label="subagent.profile.create")
 
 
-@router.delete("/{profile_id}", response_model=dict)
-async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
-    from app.persistence.database import run_write_locked
+@router.patch("/{profile_id}")
+async def update_profile(profile_id: int, body: SubagentProfilePatch):
+    def save(db):
+        row = _get(db, profile_id)
+        changes = body.model_dump(exclude_unset=True, exclude={"revision", "reset"})
+        expected = body.revision if body.revision is not None else row.revision
+        changed = db.execute(update(SubagentProfile)
+                             .where(SubagentProfile.id == profile_id, SubagentProfile.revision == expected)
+                             .values(revision=SubagentProfile.revision + 1))
+        if changed.rowcount != 1:
+            raise HTTPException(409, "此智能体已在其他窗口更新")
+        if body.reset == "all":
+            if row.name not in BUILTINS:
+                raise HTTPException(422, "仅内置智能体可以恢复整项默认配置")
+            name, description, mode = BUILTINS[row.name]
+            changes.update(name=name, description=description, execution_mode=mode,
+                           model_id=None, reasoning_effort=None, is_active=True)
+        if body.reset:
+            changes["system_prompt"] = None
+        _apply(db, row, changes)
+        db.flush()
+        result = _to_out(row)
+        db.commit()
+        return result
 
-    def _p(s):
-        p = s.get(SubagentProfile, profile_id)
-        if p is None:
-            return False
-        s.delete(p)
-        s.commit()
-        return True
+    return await run_write_locked(save, label="subagent.profile.update")
 
-    ok = await run_write_locked(_p, label=f"subagent.profile.delete.{profile_id}")
-    if not ok:
-        raise HTTPException(404, "子代理类型不存在")
-    return {"ok": True}
+
+@router.delete("/{profile_id}")
+async def delete_profile(profile_id: int):
+    def remove(db):
+        row = _get(db, profile_id)
+        if row.name in BUILTINS:
+            raise HTTPException(422, "内置智能体无法删除")
+        db.delete(row)
+        db.commit()
+        return {"ok": True}
+
+    return await run_write_locked(remove, label="subagent.profile.delete")
 
 
 # ── plan-474-2105：运行时并发上限（只读快照）─────────────────────────

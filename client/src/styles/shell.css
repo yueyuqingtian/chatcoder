@@ -18,15 +18,15 @@
   /* 扁平分隔（用户要求「卡片无阴影分割」，参照 zcode）：卡片四周一条 1px 实色描边、不加任何投影。
      描边画在卡片自己的 border 上而不是外扩的 box-shadow 外环——外环落在卡片盒子之外，
      左侧那一圈会被 .app-right 的 overflow:hidden 裁掉，左栏与中间卡片的交界就看不出边线。
-     颜色取「底层色里混 8% 前景色」的不透明值：比底层 #ECECEF 深一档，在任何缩放下都是一条干净的线 */
-  --shell-border: color-mix(in srgb, var(--text-1) 8%, var(--bg-sidebar));
+     颜色取「底层色里混 6% 前景色」的不透明值：比轻透侧栏底深一档，轻盈且在任何缩放下都是一条干净的线 */
+  --shell-border: color-mix(in oklab, var(--text-1) 6%, var(--bg-sidebar));
   /* 右上角控件组几何（与 WindowControls.tsx 同源）：按钮 32 + 左右各 2 外距；分隔线 1 + 两侧各 6；右内距 8 */
   --wc-unit: 36px;
   --wc-sep-w: 13px;
   --wc-pad: 8px;
 }
 :root[data-theme="dark"] {
-  --shell-border: color-mix(in srgb, var(--text-1) 10%, var(--bg-sidebar));
+  --shell-border: color-mix(in oklab, var(--text-1) 8%, var(--bg-sidebar));
 }
 
 /* 控件组宽度：中间卡片标题栏在右面板收起时按 --wc-w 预留；右面板标签栏恒按 --wc-full-w 预留 */
@@ -307,9 +307,8 @@ body.panel-animating .app-center > .titlebar .titlebar-right { opacity: 0; trans
 }
 
 /* ── 底层的主题世界渐变：从左栏移到整个底层——卡片四周的留白与左栏同一张底，不会在左栏边缘断开；
-      默认石墨主题没有渐变（--world-scene-side: none，底色恒为 #ECECEF，见 themes.css），深色主题不叠渐变 ── */
+      浅/深色下 graphite 均为 --world-scene-side: none，有色主题各自叠极淡空气感微晕（见 themes.css） ── */
 :root:not([data-glass="on"]) .app-shell { background-image: var(--world-scene-side, none); }
-:root[data-theme="dark"] .app-shell { background-image: none; }
 /* 左栏透出底层（底色与渐变都由 .app-shell 统一提供），自身不再铺一层同色底。
    特异性要高过 themes.css 的 `:root:not([data-glass="on"]) .sidebar`（它给侧栏单独铺渐变） */
 :root .app-shell .app-pane-left,

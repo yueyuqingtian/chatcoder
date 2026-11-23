@@ -61,6 +61,39 @@ _PLAN_CORRECTION_DRAFT_CHARS = 8000
 
 # v9: 写盘工具集合——执行时记录前后内容（精确回滚依据）
 _WRITE_TOOLS = ("fs_write", "editor_apply_diff", "multi_file_edit")
+_GIT_READONLY_SUBCMDS = frozenset({"diff", "status", "log", "blame", "show", "branch"})
+# plan-20261120-non-tool-capture：MCP 工具默认仍按「可能写盘」处理——未知/导出类工具不能漏捕获；
+# 只有名字明确是查询/读取类的才跳过全工作区扫描，否则读一次远程资源也要 walk 全仓
+# （上限 5 万文件），MCP 密集会话的每一步工具调用都被拖慢。
+_MCP_READONLY_WORDS = frozenset({
+    "read", "get", "list", "search", "query", "find", "fetch", "lookup", "inspect",
+    "describe", "view", "show", "stat", "count", "history", "outline", "preview",
+    "diff", "status", "resolve", "schema", "health",
+})
+
+
+def _should_scan_workspace_tool(tool_name: str, args: dict | None, workspace: str) -> bool:
+    """非写盘工具是否可能改动工作区文件（plan-20261120-non-tool-capture）。
+
+    只读 shell 命令、只读 Git 子命令与只读 MCP 工具直接跳过，保持零扫描开销。
+    """
+    if not workspace or tool_name in _WRITE_TOOLS:
+        return False
+    if tool_name == "terminal_exec":
+        cmd = str((args or {}).get("command") or "").strip()
+        if not cmd:
+            return False
+        from app.orchestration.tools.shell_policy import is_readonly_command
+        return not is_readonly_command(cmd)
+    if tool_name == "ci_run":
+        return True
+    if tool_name == "git":
+        sub = str((args or {}).get("command") or "").strip().lower()
+        return sub not in _GIT_READONLY_SUBCMDS
+    if tool_name.startswith("mcp_"):
+        tokens = [t for t in re.split(r"[^a-z0-9]+", tool_name.casefold()) if t]
+        return not any(tok in _MCP_READONLY_WORDS for tok in tokens)
+    return False
 
 # v34: 只读路径类工具——退化调用过滤范围（误执行无副作用，丢弃安全）
 _READ_PATH_TOOLS = ("fs_read", "view_image", "read_attachment")
@@ -921,19 +954,26 @@ def _desktop_obs_scene(tools: list, write_tools: frozenset) -> str:
 
 
 async def _agent_started_extra(agent) -> dict:
-    """agent.started 的附加字段：工作流节点子代理带上所属程序编号与派发时刻。
+    """agent.started 的附加字段：携带模式/角色及工作流节点位置信息。
 
     节点子代理不经 spawn_subagent 工具调用落库，前端无法按消息序定位其卡片：
     - workflow_program_id：所属程序，卡片挂到同轮该程序的工作流卡附近；
     - spawn_message_id：派发时刻 = 线程首条消息（任务说明）的 id。派发前的主线程消息都已落库（见
       _spawn 的 flush 屏障），其 id 均小于它；卡片据此放在派发前最后一条消息之后。
+    - subagent_mode / subagent_role：子代理真实执行模式与角色，保证只读/计划模式与续跑/未落位卡片角色准确。
     两者都由数据库事实推导，实时事件与 REST 回填（子代理列表）结果一致。
     只读查询，失败只记日志，绝不阻塞子代理启动。
     """
+    extra: dict = {}
+    if getattr(agent, "subagent_mode", None):
+        extra["subagent_mode"] = str(agent.subagent_mode)
+    if getattr(agent, "subagent_profile_name", None):
+        extra["subagent_profile_name"] = agent.subagent_profile_name
+    if getattr(agent, "subagent_role", None):
+        extra["subagent_role"] = str(agent.subagent_role)
     node_id = getattr(agent, "workflow_node_id", None)
     if not node_id:
-        return {}
-    extra: dict = {}
+        return extra
     try:
         from app.orchestration.workflow import store as workflow_store
 
@@ -1136,6 +1176,16 @@ async def run_agent_loop(
         is_subagent=_caller_is_subagent, is_legacy_child=_caller_is_subsession,
     )
 
+    _team = (subagent_context or {}).get("team")
+    if _team is not None:
+        _parallel_reminder = _team.notice() if _team.available() else ""
+    _member_tool_names = (
+        frozenset(schema["function"]["name"] for schema in tool_schemas)
+        if _caller_is_subagent and getattr(agent, "subagent_profile_name", None) else None
+    )
+
+    _workspace_read_only = _member_tool_names is not None and permission_mode == "readonly"
+
     # plan-75-332: 权限模式（ask / auto / full）——与执行模式正交，注入本 turn 所有
     # ToolContext（主代理/子代理共用此入口）。子代理同样继承会话权限模式：子代理的
     # 写操作也应按用户所选口径裁决，不因是子代理就绕开询问。
@@ -1215,7 +1265,7 @@ async def run_agent_loop(
     # （各 provider 按自身协议翻译成 disabled / enable_thinking=false；协议无关闭
     # 字段的供应商保持不下发）；None 不触碰该字段（未指定档位 / provider 不支持思考）。
     _thinking_flag: bool | None = None
-    _eff = reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None)
+    _eff = reasoning_effort or (settings.agent_reasoning_effort if tool_schemas and _member_tool_names is None else None)
     _eff_norm = (_eff or "").strip().lower()
     try:
         if _eff_norm == "none":
@@ -1679,7 +1729,7 @@ async def run_agent_loop(
                 messages=api_messages, model="",
                 tools=tool_schemas or None,
                 temperature=settings.agent_tool_temperature if tool_schemas else settings.agent_text_temperature,
-                reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas else None),
+                reasoning_effort=reasoning_effort or (settings.agent_reasoning_effort if tool_schemas and _member_tool_names is None else None),
                 max_tokens=settings.agent_max_output_tokens or None,
                 # TRAE create_agent_task 要求稳定的云端会话/消息标识；其它 Provider 忽略。
                 session_id=(f"{session_id}:subagent:{thread_id}" if thread_id and getattr(provider, "api_format", "") == "ta3" else str(session_id)),
@@ -2321,6 +2371,11 @@ async def run_agent_loop(
                     is_subagent=_caller_is_subagent,
                     is_subsession=_caller_is_subsession,
                 ):
+                    if _member_tool_names is not None and any(
+                        tc.get("name") not in _member_tool_names
+                        for tc in (response.tool_calls[index] for index in _b)
+                    ):
+                        continue
                     for _i in _b:
                         _par_batch_of[_i] = _b
                         _par_callkeys[_i] = "tc_" + uuid.uuid4().hex[:12]
@@ -2363,7 +2418,7 @@ async def run_agent_loop(
                             step=step, workspace=workspace, session_id=session_id,
                             turn_id=turn_id, agent_id=agent_id, agent_name=agent_name,
                             agent=agent, permission_mode=permission_mode,
-                            approval_mode=approval_mode, sandbox_mode=sandbox_mode,
+                            approval_mode=approval_mode, sandbox_mode=sandbox_mode, workspace_read_only=_workspace_read_only,
                             reasoning_effort=reasoning_effort, model_name=_tool_model_name,
                             cancel_event=cancel_event,
                             read_cache=read_cache_for(session_id, lambda: messages),
@@ -2388,6 +2443,13 @@ async def run_agent_loop(
                         is_subsession=_caller_is_subsession,
                         is_subagent=_caller_is_subagent,
                     )
+                    if _member_tool_names is not None and tool_name not in _member_tool_names:
+                        _identity_err = "Error: 当前智能体的执行模式或会话权限未授予此工具。"
+                    if _team is not None and tool_name in (
+                        "spawn_subagent", "collect_results", "subagent_inspect", "cancel_subagent",
+                        "send_to_subagent", "resume_subagent",
+                    ) and tool_name not in subagent_context.get("parent_tools", ()):
+                        _identity_err = "Error: 本轮未授权此团队工具。"
                     if _identity_err:
                         logger.warning(
                             "[agent] 身份拦截 tool=%s session=%s subsession=%s subagent=%s",
@@ -2470,7 +2532,7 @@ async def run_agent_loop(
                             await _wb.get(session_id, turn_id).flush()
                         except Exception:
                             logger.debug("[agent] 子代理调用消息落库屏障失败(非阻塞)", exc_info=True)
-                        tool_output = await _run_subagent_tool(
+                        dispatch = _run_subagent_tool(
                             db, tool_name=tool_name, args=args,
                             session_id=session_id, turn_id=turn_id,
                             agent=agent, workspace=workspace,
@@ -2480,6 +2542,11 @@ async def run_agent_loop(
                             agent_model_id=agent_model_id,
                             parent_agent_id=agent_id,
                         )
+                        if tool_name == "spawn_subagent" and _team is not None:
+                            async with subagent_context["manager"].dispatch_lock:
+                                tool_output = await dispatch
+                        else:
+                            tool_output = await dispatch
                         tool_output = _present_tool_output(tool_output, tool_name=tool_name, session_id=session_id, call_key=tc.get("id", ""))
                         messages.append(ChatMessage(
                             role="tool", content=tool_output,
@@ -2612,6 +2679,7 @@ async def run_agent_loop(
                             permission_mode=permission_mode,
                             approval_mode=approval_mode,
                             sandbox_mode=sandbox_mode,
+                            workspace_read_only=_workspace_read_only,
                             reasoning_effort=reasoning_effort,
                             on_tool_output=_emit_tool_output,
                             model_name=_tool_model_name,
@@ -2679,6 +2747,54 @@ async def run_agent_loop(
                             for p in _guess_paths if _guess_existed.get(p)
                         }
                         _pre_existed = {p: rollback_service.path_exists(workspace, p) for p in _pre_paths}
+                        _pre_digest = {
+                            p: rollback_service.file_digest(workspace, p)
+                            for p in _pre_paths if _pre_existed.get(p)
+                        }
+                        # plan-20261120-non-tool-capture：对可能写盘的非写盘工具（terminal_exec / ci_run / git / mcp_*）
+                        # 取轻量工作区 stat 快照，并从脚本文件补全写前备份候选（小工作区另缓存写前字节 / Git 记 dirty 集）
+                        _scan_active = _should_scan_workspace_tool(tool_name, args, workspace)
+                        _scan_pre: dict[str, tuple[int, int]] = {}
+                        _scan_pre_bytes: dict[str, bytes] = {}
+                        _scan_git_dirty: set[str] | None = None
+                        if _scan_active:
+                            if tool_name == "terminal_exec":
+                                _cmd_str = str((args or {}).get("command") or "")
+                                _cwd_str = str((args or {}).get("cwd") or "").strip()
+                                _script_cands = rollback_service.extract_script_candidate_paths(
+                                    _cmd_str, workspace, _cwd_str,
+                                )
+                                for _sc in _script_cands:
+                                    if _sc not in _guess_paths:
+                                        _guess_paths.append(_sc)
+                                        _guess_existed[_sc] = rollback_service.path_exists(workspace, _sc)
+                                        _guess_digest[_sc] = rollback_service.file_digest(workspace, _sc)
+                                        _guess_before[_sc] = rollback_service._read_file_text(workspace, _sc)
+                                        _guess_kind[_sc] = rollback_service.inspect_write_target(
+                                            workspace, _sc, settings.rollback_record_max_bytes)[0]
+                                        _guess_bin[_sc] = _write_kind_to_bin(_guess_kind[_sc])
+                                        if _guess_existed[_sc]:
+                                            if not _turn_t0_box:
+                                                _turn_t0_box.append(
+                                                    await rollback_service.turn_started_epoch(db, turn_id)
+                                                )
+                                            _guess_born[_sc] = rollback_service.file_born_after(
+                                                rollback_service._fs_path(workspace, _sc),
+                                                _turn_t0_box[0] if _turn_t0_box else None,
+                                            )
+                            _scan_pre, _scan_bytes_total, _scan_trunc = rollback_service.scan_workspace_stat(workspace)
+                            if not _scan_trunc:
+                                _skip_pre = {
+                                    rollback_service.write_path_key(p)
+                                    for p in [*_ckpt_registered, *_guess_paths]
+                                }
+                                _scan_pre_bytes = rollback_service.capture_pre_bytes(
+                                    workspace, _scan_pre, skip_paths=_skip_pre,
+                                )
+                                if not _scan_pre_bytes:
+                                    _scan_git_dirty = await rollback_service.capture_git_dirty_set(workspace)
+                            if not _turn_t0_box:
+                                _turn_t0_box.append(await rollback_service.turn_started_epoch(db, turn_id))
                         # plan-20261019-toolcard-v2：写前备份必须在工具执行**之前**取。此前在执行之后才复制，
                         # 备份里装的是写后内容，二进制文件被改写 / 删除后无从恢复。
                         # 同一文件每轮只备份一次（登记的是首次写盘前的样子）；没有被登记的备份在下面清理。
@@ -2901,6 +3017,7 @@ async def run_agent_loop(
                                 diff_after=_diff_after,
                                 # plan-20261019-toolcard-v2：操作类型 + 写后字节指纹（撤销前校验「本轮之后有没有被改过」）
                                 op=rollback_service.write_op(_existed_pre, _exists_post),
+                                before_hash=_pre_digest.get(target),
                                 after_hash=rollback_service.file_digest(workspace, target) if _exists_post else None,
                             )
                             # v2.2 (对齐 zcode 3.7): 行级变更统计（+N -M），工具卡摘要展示
@@ -2928,111 +3045,97 @@ async def run_agent_loop(
                                 "payload": {"turn_id": turn_id, "path": str(_pre_paths[0]),
                                             "session_id": session_id},
                             })
-                    elif result.ok and _guess_paths:
-                        # v25: 工具伪装写盘检测——命令解析出的候选路径，前后内容有变化才登记
-                        # （无变化 = 未真正写盘，跳过），并实时广播 file.change 驱动前端刷新。
-                        _detected: list[str] = []
-                        _total_add = 0
-                        _total_del = 0
-                        for target in _guess_paths:
-                            _after = rollback_service._read_file_text(workspace, target)
-                            # plan-20261019-toolcard-v2：先看存在性与字节指纹——删除（前有后无）与新建都必须登记；
-                            # 前后都存在时按指纹判断有没有真改动，指纹不可得（过大 / 读取失败）才退回文本比较。
-                            _existed_g = bool(_guess_existed.get(target))
-                            _exists_post_g = rollback_service.path_exists(workspace, target)
-                            _digest_pre_g = _guess_digest.get(target)
-                            _digest_post_g = rollback_service.file_digest(workspace, target) if _exists_post_g else None
-                            if (_existed_g and not _exists_post_g and _guess_born.get(target)
-                                    and not await rollback_service.has_turn_write(db, turn_id, target)):
-                                continue  # 本轮由未登记途径新建又被删除：零净变更，不记录（备份由下方统一清理）
-                            if _existed_g == _exists_post_g:
-                                if _digest_pre_g is not None and _digest_post_g is not None:
-                                    if _digest_pre_g == _digest_post_g:
-                                        continue
-                                elif _guess_before.get(target) == _after:
-                                    continue
-                            write_paths.append(target)
-                            _detected.append(target)
-                            # v26: 伪装写盘同样登记 checkpoint 到 turn 快照
-                            _target_rel = rollback_service.normalize_workspace_path(workspace, target)
-                            # v2.2 (plan-88): 二进制/超限文件只做 checkpoint 备份
-                            # plan-1085 三态：与精确写盘分支同口径
-                            # plan-20261019-diff: 超限文本仍生成展示窗口
-                            _kind_post_g, _ = rollback_service.inspect_write_target(
-                                workspace, target, settings.rollback_record_max_bytes)
-                            _bin_post_g = _write_kind_to_bin(_kind_post_g)
-                            _is_bin, _after = _resolve_write_record(
-                                bin_pre=_guess_bin.get(target), bin_post=_bin_post_g,
-                                disk_after=_after, result=result, target=target,
-                                turn_id=turn_id, tool_name=tool_name,
+                    _handed_to_bg = False
+                    if tool_name not in _WRITE_TOOLS:
+                        _rdata = result.data if isinstance(result.data, dict) else {}
+                        _was_blocked = bool(_rdata.get("denied") or _rdata.get("approved") is False)
+                        # plan-20261121-build-artifact-filter：打包 / 编译命令的产出整批不计入变更。
+                        # 前台走下面的 elif 短路，后台把命令文本随基线交给退出回填去判断。
+                        _cmd_text = str((args or {}).get("command") or "") if tool_name == "terminal_exec" else ""
+                        _is_build_cmd = not _was_blocked and rollback_service.is_build_command(_cmd_text)
+                        if not _was_blocked and _rdata.get("background") and _rdata.get("shell_id"):
+                            # 后台命令：把写前快照基线交由 bg_process_registry，进程退出时补记变更
+                            from app.orchestration.tools.bg_process import bg_process_registry
+                            bg_process_registry.attach_write_baseline(
+                                str(_rdata["shell_id"]),
+                                {
+                                    "workspace": workspace,
+                                    "call_key": call_key,
+                                    # plan-20261121-build-artifact-filter：退出回填靠它判断这是不是打包 / 编译命令
+                                    "command": _cmd_text,
+                                    "candidates": list(_guess_paths),
+                                    "pre_scan": _scan_pre,
+                                    "pre_bytes": _scan_pre_bytes,
+                                    "pre_ckpts": dict(_pre_ckpt),
+                                    "pre_texts": _guess_before,
+                                    "pre_kinds": _guess_kind,
+                                    "pre_digests": _guess_digest,
+                                    "pre_existed": _guess_existed,
+                                    "pre_born": _guess_born,
+                                    "git_dirty": _scan_git_dirty,
+                                    "turn_started_at": _turn_t0_box[0] if _turn_t0_box else None,
+                                },
                             )
-                            _before_text_g = _guess_before.get(target)
-                            _diff_before_g = _diff_after_g = None
-                            _textual_g = (_guess_kind.get(target) in (
-                                              rollback_service.FILE_KIND_TEXT,
-                                              rollback_service.FILE_KIND_OVERSIZE)
-                                          or _kind_post_g in (
-                                              rollback_service.FILE_KIND_TEXT,
-                                              rollback_service.FILE_KIND_OVERSIZE))
-                            if _is_bin and _textual_g:
-                                _diff_after_text_g = rollback_service.read_diff_text(workspace, target)
-                                if _diff_after_text_g is None:
-                                    _diff_after_text_g = _after
-                                # 同精确写盘分支：写后内容不可得不生成窗口，避免误算整篇删除
-                                if _diff_after_text_g is not None:
-                                    _diff_before_g, _diff_after_g = rollback_service.build_diff_window(
-                                        _before_text_g, _diff_after_text_g)
-                            await _register_pre_checkpoint(
-                                db, turn_id=turn_id, target=target, target_rel=_target_rel,
-                                existed_before=_existed_g, ckpt=_pre_ckpt.get(target),
-                                registered=_ckpt_registered, consumed=_ckpt_consumed,
-                            )
-                            await rollback_service.record_turn_write(
-                                db, session_id=session_id, turn_id=turn_id, tool=tool_name,
-                                path=target, before=None if _is_bin else _before_text_g,
-                                after=None if _is_bin else _after, binary=_is_bin,
-                                # plan-89-387: 伪装写盘同样关联工具调用（terminal_exec 等）
-                                call_key=call_key,
-                                # plan-20261019-diff: 超限文本的展示窗口
-                                diff_before=_diff_before_g,
-                                diff_after=_diff_after_g,
-                                # plan-20261019-toolcard-v2：命令可能新建 / 修改 / 删除文件，按前后状态记录
-                                op=rollback_service.write_op(_existed_g, _exists_post_g),
-                                after_hash=_digest_post_g,
-                            )
-                            if not _is_bin:
-                                _add, _del = rollback_service.diff_stats(_before_text_g, _after)
-                            elif _diff_before_g is not None or _diff_after_g is not None:
-                                _add, _del = rollback_service.diff_stats(_diff_before_g, _diff_after_g)
-                            else:
-                                _add = _del = 0
-                            _total_add += _add
-                            _total_del += _del
-                        if _total_add or _total_del:
-                            _change_stat = {
-                                "path": str(_detected[0]),
-                                "additions": _total_add,
-                                "deletions": _total_del,
-                            }
-                        if _detected:
-                            await broadcast(session_id, {
-                                "event": "file.change",
-                                # 携带 session_id（串会话修复）：与精确写盘分支同口径
-                                "payload": {"turn_id": turn_id, "path": str(_detected[0]),
-                                            "session_id": session_id},
-                            })
+                            _handed_to_bg = True
+                        elif not _was_blocked and not _is_build_cmd and (_guess_paths or _scan_active):
+                            # v25 + plan-20261120-non-tool-capture：合并静态候选路径与工作区 stat 增量，
+                            # 即使命令失败退出（如脚本先写盘后异常），只要真实写了文件也一并捕获并可撤销。
+                            _scan_diff: list[str] = []
+                            if _scan_active:
+                                _scan_post, _, _ = rollback_service.scan_workspace_stat(workspace)
+                                _scan_diff = rollback_service.diff_workspace_scans(_scan_pre, _scan_post)
+                            _candidates = list(dict.fromkeys([*_guess_paths, *_scan_diff]))
+                            if _candidates:
+                                _detected, _total_add, _total_del = await rollback_service.record_detected_file_changes(
+                                    db,
+                                    session_id=session_id,
+                                    turn_id=turn_id,
+                                    workspace=workspace,
+                                    tool_name=tool_name,
+                                    call_key=call_key,
+                                    candidates=_candidates,
+                                    explicit_candidates=set(_guess_paths),
+                                    pre_scan=_scan_pre,
+                                    pre_bytes=_scan_pre_bytes,
+                                    pre_ckpts=_pre_ckpt,
+                                    pre_texts=_guess_before,
+                                    pre_kinds=_guess_kind,
+                                    pre_digests=_guess_digest,
+                                    pre_existed=_guess_existed,
+                                    pre_born=_guess_born,
+                                    git_dirty=_scan_git_dirty,
+                                    ckpt_registered=_ckpt_registered,
+                                    ckpt_consumed=_ckpt_consumed,
+                                    turn_started_at=_turn_t0_box[0] if _turn_t0_box else None,
+                                )
+                                if _detected:
+                                    write_paths.extend(_detected)
+                                    if _total_add or _total_del:
+                                        _change_stat = {
+                                            "path": str(_detected[0]),
+                                            "additions": _total_add,
+                                            "deletions": _total_del,
+                                        }
+                                    await broadcast(session_id, {
+                                        "event": "file.change",
+                                        # 携带 session_id（串会话修复）：与精确写盘分支同口径
+                                        "payload": {"turn_id": turn_id, "path": str(_detected[0]),
+                                                    "session_id": session_id},
+                                    })
 
                     # plan-20261019-toolcard-v2：命令并没有真的改动这些文件（或工具失败）时，
                     # 执行前取的备份没有被登记，清掉——避免备份目录里堆满孤儿文件。
-                    for _cp, _ck in _pre_ckpt.items():
-                        if _ck and (rollback_service.normalize_workspace_path(workspace, _cp) or _cp) not in _ckpt_consumed:
-                            rollback_service.discard_checkpoint(_ck)
+                    if not _handed_to_bg:
+                        for _cp, _ck in _pre_ckpt.items():
+                            if _ck and (rollback_service.normalize_workspace_path(workspace, _cp) or _cp) not in _ckpt_consumed:
+                                rollback_service.discard_checkpoint(_ck)
 
                     # plan-20261015-browser-agent：截图类结果落盘，消息流在该调用的时间线位置展示预览
                     from app.orchestration.tool_images import persist_tool_image
                     _tool_image = persist_tool_image(tool_name, result)
                     _exit_note = result.data.get("exit_note") if isinstance(result.data, dict) else None
                     _returncode = result.data.get("returncode") if isinstance(result.data, dict) else None
+                    _ui_payload = result.data.get("ui_payload") if isinstance(result.data, dict) else None
                     await broadcast(session_id, {
                         "event": "tool.result",
                         # v7(H): 补 call_key——前端据此精确关联写操作/命令行，运行中即可展示 +N-M/diff
@@ -3041,6 +3144,7 @@ async def run_agent_loop(
                                     "output_preview": (result.output or result.error)[:300],
                                     **({"change_stat": _change_stat} if _change_stat else {}),
                                     **({"image": _tool_image} if _tool_image else {}),
+                                    **({"ui_payload": _ui_payload} if _ui_payload else {}),
                                     **({"exit_note": _exit_note} if _exit_note else {}),
                                     **({"returncode": _returncode} if _returncode is not None else {})},
                     })
@@ -3086,6 +3190,7 @@ async def run_agent_loop(
                                  **({"image": _tool_image} if _tool_image else {}),
                                  **({"attachments": result.data["attachments"]}
                                     if tool_name == "ask_user_question" and result.data.get("attachments") else {}),
+                                 **({"ui_payload": _ui_payload} if _ui_payload else {}),
                                  **({"exit_note": _exit_note} if _exit_note else {}),
                                  **({"returncode": _returncode} if _returncode is not None else {})},
                         buffered=True,
@@ -3325,12 +3430,30 @@ async def run_agent_loop(
                                            "agent_name": agent_name})
 
         # 产物抽取（v7: 关联到主 turn 对应的任务；task_id 为空时兜底用 turn_id）
+        # plan-20261120-non-tool-capture：主代理收尾时从 RollbackWrite 汇总本轮实际净变更文件
+        # （覆盖主代理、子代理与命令行/脚本捕获），避免短回复或子代理写盘漏记 MsgType.ARTIFACT。
+        effective_write_paths = list(dict.fromkeys(write_paths))
+        if agent_kind == "main" and workspace:
+            try:
+                _turn_net = await rollback_service.list_turn_changes(
+                    db, session_id=session_id, turn_id=turn_id, workspace=workspace,
+                )
+                if _turn_net:
+                    effective_write_paths = [
+                        c["path"] for c in _turn_net if c.get("action") != "deleted"
+                    ]
+                elif effective_write_paths:
+                    # 本轮曾写盘但最终均已净删除（如临时脚本被删）→ 不再留为产物
+                    effective_write_paths = []
+            except Exception:
+                logger.debug("[agent] 汇总本轮净变更产物失败(回退 write_paths)", exc_info=True)
+
         artifact_ids: list[int] = []
-        if final_text and len(final_text.strip()) > 10:
+        if (final_text and len(final_text.strip()) > 10) or effective_write_paths:
             try:
                 from app.orchestration.artifacts import extract_and_persist_artifacts
                 artifact_ids = await extract_and_persist_artifacts(
-                    db, task_id=task_id or turn_id, text=final_text, write_paths=write_paths,
+                    db, task_id=task_id or turn_id, text=final_text or "", write_paths=effective_write_paths,
                 )
             except Exception:
                 logger.warning("[agent] 产物抽取失败(非阻塞)", exc_info=True)
@@ -3345,7 +3468,7 @@ async def run_agent_loop(
                     "artifact_ids": artifact_ids,
                     "agent_name": agent_name,
                     # v7: 携带实际写盘文件列表，前端产物卡片据此展示文件清单
-                    "files": list(dict.fromkeys(write_paths)),
+                    "files": effective_write_paths,
                 },
             )
 
@@ -3541,6 +3664,7 @@ async def _run_parallel_batch(
     is_subagent: bool,
     is_subsession: bool,
     subagent_title: str = "",
+    workspace_read_only: bool = False,
 ) -> tuple[dict[int, tuple["ToolResult", int]], list[str]]:
     """并行执行一批调用，返回 ({下标: (结果, 耗时毫秒)}, 批内按序排列的钩子注入文本)。
 
@@ -3592,6 +3716,7 @@ async def _run_parallel_batch(
                         permission_mode=permission_mode,
                         approval_mode=approval_mode,
                         sandbox_mode=sandbox_mode,
+                        workspace_read_only=workspace_read_only,
                         reasoning_effort=reasoning_effort,
                         # 只读工具不产生增量输出（on_tool_output 只有 terminal_exec 消费）
                         on_tool_output=None,
@@ -4945,36 +5070,51 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # 护栏被整体跳过。会话里存的模式名不变，只在判定处归一。
         _pm = _mode_kind(subagent_context.get("permission_mode"))
         _is_operator = str(args.get("purpose") or "").strip().lower() == "operator"
-        # plan-560-2311 C3：设置里关掉操控子代理后，spawn 必须真的拒绝，而不是照旧派发并
-        # 套用最低思考档（此前该开关只在提示词处读取，运行时毫无效果）。
-        # 放在只读拦截**之前**：否则只读会话会先报「只读模式不能派 operator」，
-        # 掩盖真实原因（功能已关闭），模型会误以为切模式就能解决。
-        if _is_operator and getattr(settings, "operator_subagent_enabled", True) is False:
-            return (
-                "Error: 操控子代理已在设置中关闭（设置 → 子代理 → 操控子代理），无法派发 purpose=operator。"
-                "请自己完成该界面操作，或让用户在设置里开启后再派发。"
-            )
-        if _pm in ("readonly", "plan"):
-            # v36 (plan-321-1600 R1) + plan-330-1648 M1: 主代理处于只读/计划模式时，只允许派发
-            # 只读子代理——主代理侧的**模式语义护栏**（该模式下不产生业务写入）。
-            # 操控子代理必须可写（点按/输入/下载），只读会话里派它只会得到一个做不了事
-            # 的只读子代理——显式拒绝并给出出路，好过静默降级。
-            if _is_operator:
-                return (
-                    "Error: 当前会话为只读 / 计划模式，不能派发操控子代理（它需要可写权限操作界面）。"
-                    "请自己完成该操作；确需界面自动化时请用户切换到智能体模式。"
-                )
-        explore = resolve_subagent_readonly(
-            args.get("mode"), bool(args.get("explore", False)), _pm,
-        )
+        team = subagent_context.get("team")
+        legacy_operator = _is_operator and team is None
+        if team is None:
+            from app.orchestration.agent_team import load_team
+
+            team = await load_team(db, _pm, parent_models=(subagent_context.get("model_id") or agent_model_id,))
+        requested_mode = args.get("mode")
+        if requested_mode is None and "explore" in args:
+            requested_mode = "readonly" if _as_bool(args["explore"]) else "agent"
+        if requested_mode not in (None, "readonly", "agent"):
+            return "Error: 执行模式必须是 readonly 或 agent。"
+        if _is_operator and (requested_mode == "readonly"
+                             or legacy_operator and not settings.operator_subagent_enabled):
+            return "Error: 当前设置不允许委派界面操作，请由主代理完成。"
+        profile_id = args.get("profile_id")
+        if profile_id is not None and (type(profile_id) is not int or profile_id <= 0):
+            return "Error: profile_id 必须是可用成员的数字标识。"
         if _is_operator:
-            # plan-549-2281 修复：operator 一律可写（要调界面/浏览器工具），不能沿用
-            # explore 档案与 readonly 模式——此前 explore+operator 组合下档案按 explore
-            # 过闸、模式却保持只读，既绕过了 general 类型的停用闸门，也与「可写」语义矛盾。
-            explore = False
-        # plan-330-1648 M1: 子代理执行模式**按类型锁定**（readonly / agent），显式下发给
-        # run_agent_loop——子代理不继承会话的执行模式，也永远拿不到计划模式。
-        _sub_mode = "readonly" if explore else "agent"
+            requested_mode = "agent"
+        member = team.select(profile_id, requested_mode)
+        if member is None:
+            return "Error: 当前分工、成员状态或会话权限不允许此派发，请由主代理完成对应工作。"
+        _sub_mode = member.mode
+        explore = _sub_mode == "readonly"
+        _sub_role = "operator" if legacy_operator else ("explore" if explore else "coder")
+        write_scope: tuple[str, ...] = ()
+        validation_resources: tuple[str, ...] = ()
+        if not explore:
+            from app.orchestration.subagent import SubagentManager
+            from app.orchestration.workflow.conflicts import normalize_scope
+
+            raw_scope = args.get("write_scope") or []
+            raw_resources = args.get("validation_resources") or []
+            if (not isinstance(raw_scope, list) or len(raw_scope) > 40
+                    or any(not isinstance(item, str) or not normalize_scope(item) for item in raw_scope)):
+                return "Error: 写入范围应为工作区内的相对路径。"
+            if (not isinstance(raw_resources, list) or len(raw_resources) > 20
+                    or any(not isinstance(item, str) or not item.strip() for item in raw_resources)):
+                return "Error: 验证资源应为非空名称。"
+            write_scope = tuple(normalize_scope(item) for item in raw_scope)
+            validation_resources = tuple(item.strip().casefold()[:200] for item in raw_resources)
+            if isinstance(manager, SubagentManager):
+                conflict = manager.dispatch_conflict(write_scope, validation_resources)
+                if conflict:
+                    return f"Error: {conflict}"
         if not task_title:
             return "Error: task_title is required"
 
@@ -4989,27 +5129,6 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                 "Do NOT dispatch duplicates: call collect_results (wait=true) to gather its result, "
                 "or use a more specific task_title if this is genuinely a different subtask."
             )
-
-        # v21: 子代理类型开关门禁 —— 设置里停用（is_active=false）的子代理类型不可再被 spawn。
-        # 修复：此前 SubagentProfile.is_active 从未被编排层读取，关闭设置对 AI 毫无效果（用户反馈 Bug）。
-        # 语义：explore=true → 匹配 explore 类型；否则 → general 类型；类型不存在时按系统默认放行。
-        # plan-330-1648 M2: 类型档案在下方被模型/思考深度解析复用，先做默认绑定（异常路径也保证有值）。
-        _profile_name = "explore" if explore else "general"
-        _profile = None
-        try:
-            from app.persistence.models.subagent_profile import SubagentProfile
-            _pres = await db.execute(
-                select(SubagentProfile).where(SubagentProfile.name == _profile_name)
-            )
-            _profile = _pres.scalars().first()
-            if _profile is not None and not _profile.is_active:
-                return (
-                    f"Error: 子代理类型「{_profile_name}」已在设置中停用，无法创建子代理。"
-                    "请在当前主窗口直接完成该任务，不要再次调用 spawn_subagent，"
-                    "也不要尝试用其他子代理类型绕过。"
-                )
-        except Exception:
-            logger.warning("[agent] 子代理类型开关检查失败(非阻塞)", exc_info=True)
 
         # plan-474-2105 / plan-20261022-subagent-reject-fast：只保留「单会话并发」一道闸门——
         # 本轮不限累计总量（每轮派发总量上限已废弃）。并发已满时**立即拒绝**：
@@ -5036,112 +5155,31 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         from app.core.enums import AgentKind
         from app.persistence.database import run_write_locked
 
-        # v36 修复：子代理模型 id 只解析一次（会话级模型优先，回落主代理绑定模型），
-        # 落库行与内存展示对象共用同一个值——此前只有落库行写了 model_id，
-        # 展示对象漏设，导致子代理 run_agent_loop(model_id=None) → provider 解析失败。
-        # plan-330-1648 M2: 模型/思考深度改为「设置中心子代理类型优先 → 会话 → 主代理」；
-        # 设置里指定的模型若已删除/停用，回落会话模型并留 warning（不硬失败）。
-        _spawn_model_id = subagent_context.get("model_id") or agent_model_id
-        # plan-156-619 S4e：设置中心改为「只配模型 + 思考深度」，工具范围与执行模式由主代理
-        # 在创建时按能力矩阵决定。因此这里的优先级翻转为：**全局设置 → 类型档案 → 会话**。
-        # 0 / 空 = 未设置，继续向下回落（旧库里的 profile 配置仍作为兜底，不丢用户历史设置）。
-        _global_model_id = int(getattr(settings, "subagent_model_id", 0) or 0)
-        _profile_model_id = _global_model_id or (
-            getattr(_profile, "model_id", None) if _profile is not None else None
+        _spawn_model_id, _spawn_effort, model_fallback = team.model_for(
+            member, subagent_context.get("model_id") or agent_model_id,
+            subagent_context.get("reasoning_effort"),
         )
-        if _profile_model_id:
-            _mrow = None
-            try:
-                from app.persistence.models.model_reg import Model as _Model
-                _mres = await db.execute(select(_Model).where(_Model.id == int(_profile_model_id)))
-                _mrow = _mres.scalars().first()
-            except Exception:
-                logger.warning("[agent] 子代理类型模型校验查询失败(按回落处理)", exc_info=True)
-            if _mrow is not None and bool(getattr(_mrow, "is_active", True)):
-                _spawn_model_id = int(_profile_model_id)
-            else:
-                logger.warning(
-                    "[agent] 子代理类型 %s 配置的模型 #%s 不存在或已停用，回落模型 #%s",
-                    _profile_name, _profile_model_id, _spawn_model_id,
-                )
-        # None = run_agent_loop 内回落 settings.agent_reasoning_effort（全局默认档位）
-        # plan-156-619 S4e：同一优先级翻转——全局设置（思考深度）> 类型档案 > 本 turn 档位。
-        _spawn_effort = (
-            (getattr(settings, "subagent_reasoning_effort", "") or "")
-            or (getattr(_profile, "reasoning_effort", None) if _profile is not None else None)
-            or subagent_context.get("reasoning_effort")
-            or None
-        )
-        # plan-549-2281：操控子代理（原 purpose=operator 的子会话能力迁到子代理）。
-        # 界面操作每步都是一次模型往返，几乎不需要深度推理，却是延迟大户——统一压到
-        # 设置项 operator_subagent_effort 指定的档位（默认当前模型支持的最低非关闭档）。
-        # 档位解析抽到 resolve_operator_effort（含「不取列表首元素、按档位序取最低」修复）。
-        if _is_operator:
-            try:
-                _levels: list[str] = []
-                if _spawn_model_id:
-                    try:
-                        from app.persistence.models.model_reg import Model as _ModelRow
-                        _mrow = await db.get(_ModelRow, int(_spawn_model_id))
-                        _levels = [str(x) for x in (getattr(_mrow, "reasoning_efforts", None) or [])]
-                    except Exception:  # noqa: BLE001 — 读不到档位按 low 处理
-                        _levels = []
-                _want_effort = resolve_operator_effort(
-                    str(getattr(settings, "operator_subagent_effort", "lowest") or "lowest"),
-                    _levels,
-                )
-                if _want_effort:
-                    _spawn_effort = _want_effort
-            except Exception:  # noqa: BLE001 — 档位解析失败不改默认行为
-                logger.debug("[agent] 操控子代理档位解析失败(用默认)", exc_info=True)
-        logger.info(
-            "[agent] 子代理派发解析 type=%s model=#%s effort=%s (profile_model=%s session_model=%s)",
-            _profile_name, _spawn_model_id, _spawn_effort, _profile_model_id,
-            subagent_context.get("model_id"),
-        )
+        if legacy_operator:
+            levels = team.models.get(_spawn_model_id, (True, ()))[1]
+            desired = resolve_operator_effort(settings.operator_subagent_effort, list(levels))
+            if desired in levels:
+                _spawn_effort = desired
         # plan-330-1648 M7: 子代理 token 预算（0/负数 = 不限）
         _sub_budget = int(getattr(settings, "subagent_token_budget", 0) or 0) or None
 
         # plan-568-2333：子代理工具面必须在**写库之前**定稿并校验。排在 Agent/Task 创建之后
         # 就只能在事后告警——agent 行、task 行、并发名额都已占用，用户看到的是「跑着但永远没结果」。
         # plan-20261107-subagent-mode-tools：解析不出只读工具集时直接拒绝派发。
-        from app.orchestration.subagent_tools import available_subagent_tools
-        sub_tools = await available_subagent_tools(db, readonly=explore)
-
-        # v20: 探索子代理只读工具（探索 = 调研/阅读/分析，不产生写盘副作用）
-        if explore:
-            explore_schemas = sub_tools
-            if not explore_schemas:
-                # 注册表部分模块加载失败 / 工具名漂移时**不能**回落到全量工具：那会把 fs_write、
-                # terminal_exec 一并交给只读子代理，写权限只剩 executor 一层兜底（fail-open）。
-                logger.warning(
-                    "[agent] 只读子代理工具集解析为空（EXPLORE_TOOLS 无可注册项），拒绝派发 type=%s",
-                    _profile_name,
-                )
-                return (
-                    "Error: 无法解析只读子代理的工具集（工具注册表异常），已拒绝以只读模式派发。"
-                    "请改用 mode=\"agent\" 派发，或由你在主会话内直接完成该调研。"
-                )
-            sub_tools = explore_schemas
-
-        # plan-20261107-subagent-mode-tools：类型仅覆盖模型与提示词，工具由执行模式决定。
-        try:
-            from app.orchestration.subagent_tools import SUBAGENT_OWN_TOOLS
-            _have = {s.get("function", {}).get("name") for s in sub_tools}
-            for _own in SUBAGENT_OWN_TOOLS:
-                if _own["function"]["name"] not in _have:
-                    sub_tools.append(_own)
-        except Exception:
-            logger.debug("[agent] 子代理通信工具追加失败(非阻塞)", exc_info=True)
-
-        # plan-474-2105：子代理不得直接问用户，也不得再派生下级执行体（套娃 / 绕过并发上限）。
-        # plan-20261107-subagent-mode-tools：追加通信工具后仍统一维持子代理身份边界。
-        # plan-549-2281：剥离范围已含工作流工具（子代理不进计划模式、不使用工作流）。
-        try:
-            from app.orchestration.subagent_tools import strip_for_subagent
-            sub_tools = strip_for_subagent(sub_tools)
-        except Exception:
-            logger.warning("[agent] 子代理工具边界剥离失败(按原样继续)", exc_info=True)
+        from app.orchestration.subagent_tools import (
+            SUBAGENT_OWN_TOOLS, available_subagent_tools, restrict_member_tools,
+        )
+        sub_tools = restrict_member_tools(await available_subagent_tools(db, readonly=explore),
+                                          readonly=explore,
+                                          parent_tools=subagent_context.get("parent_tools"))
+        if explore and not sub_tools:
+            return "Error: 当前会话没有可分配的代码读取工具，请由主代理完成调查。"
+        own_names = {item["function"]["name"] for item in sub_tools}
+        sub_tools.extend(item for item in SUBAGENT_OWN_TOOLS if item["function"]["name"] not in own_names)
 
         def _persist_spawn(s):
             from app.persistence.models.agent import Agent as _Agent
@@ -5152,7 +5190,8 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
                         model_id=_spawn_model_id,
                         session_id=session_id,
                         turn_id=turn_id, parent_agent_id=parent_agent_id,
-                        status="running")
+                        subagent_mode=_sub_mode, subagent_role=_sub_role,
+                        subagent_profile_id=member.id, subagent_profile_name=member.name, status="running")
             s.add(sa)
             s.flush()
             aid = sa.id
@@ -5175,7 +5214,9 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
         # subagent.spawn 里的 getattr(agent, "model_id") 恒为 None，
         # 子代理固定报「模型不可用(None)」无法执行（用户反馈：子代理调用必失败）。
         sub_agent = Agent(kind=AgentKind.SUB.value, id=_agent_id,
-                          name=task_title[:40], model_id=_spawn_model_id)  # 展示对象（id 已定，供 thread_id 链）
+                          name=task_title[:40], model_id=_spawn_model_id,
+                          subagent_mode=_sub_mode, subagent_role=_sub_role,
+                          subagent_profile_id=member.id, subagent_profile_name=member.name)  # 展示对象（id 已定，供 thread_id 链）
         task = await task_service.get_task(db, task_id)  # async 只读对象（后续仅读属性）
         # v10: 子任务创建后立即提交（写引擎内已提交）并广播
         from app.orchestration.agent_events import broadcast
@@ -5194,7 +5235,9 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             await message_service.create_message(
                 db, session_id=session_id, turn_id=turn_id, thread_id=sub_agent.id,
                 sender_type=SenderType.USER.value, msg_type=MsgType.TEXT.value,
-                content={"text": (f"{task_title}\n\n{task_desc}").strip()},
+                content={"text": (f"{task_title}\n\n{task_desc}" + (
+                    "\n\n成员模型不可用，已跟随会话。" if model_fallback else ""
+                )).strip()},
             )
         except Exception:
             logger.warning("[agent] 子代理任务消息落库失败(非阻塞)", exc_info=True)
@@ -5220,6 +5263,7 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             db, agent=sub_agent, session=session, project=project, task=task,
             handoff_summary=task_desc,
             original_request=_orig_req,
+            member=member,
             # plan-598-2482：对齐官方 SubAgent 的 inherit_context 参数
             inherit_context=bool(args.get("inherit_context", False)),
         )
@@ -5247,11 +5291,15 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             context_snapshot=_subagent_context_snapshot(subagent_context, _orig_req),
             reasoning_effort=_spawn_effort,
             subagent_mode=_sub_mode,
+            write_scope=write_scope,
+            validation_resources=validation_resources,
         )
         await broadcast(session.id, {
             "event": "agent.started",
             "payload": {"agent_id": sub_agent_id, "kind": "sub",
-                        "name": sub_agent.name, "turn_id": turn_id},
+                        "name": sub_agent.name, "turn_id": turn_id,
+                        "subagent_mode": _sub_mode, "subagent_role": _sub_role,
+                        "subagent_profile_name": member.name},
         })
         # v43: 派发即同步前端子代理计数——此前 subagent.pending 只在完成时广播，
         # 运行期前端计数为 0（会话卡不转圈、兜底等待行不出现）。
@@ -5266,6 +5314,8 @@ async def _run_subagent_tool(db, *, tool_name, args, session_id, turn_id, agent,
             f"Subagent #{sub_agent_id} dispatched in the background for task: {task_title}. "
             f"[运行参数] mode={_sub_mode} model=#{_spawn_model_id} "
             f"effort={_spawn_effort or 'default'}. "
+            + ("成员模型不可用，已跟随会话。 " if model_fallback else "")
+            +
             # plan-549-2281（复盘）：并发额度必须**每次派发都回报**——
             # 此前上限与占用只在「已满被拒」时第一次出现，模型派发前毫无信息，
             # 只能按「一次发多条」的建议一路派到撞墙为止。这里的数字是刚派完的实时值。

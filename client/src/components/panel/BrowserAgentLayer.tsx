@@ -107,7 +107,10 @@ export function BrowserPageDialog({ sessionId, dialog }: { sessionId: number | n
   return (
     <div className="bpa-dialog-scrim">
       <div className="bpa-dialog" role="alertdialog" aria-label={title}>
-        <div className="bpa-dialog-title">{title}</div>
+        <div className="bpa-dialog-head">
+          <span className="bpa-dialog-title">{title}</span>
+          <span className="bpa-dialog-badge">网页交互</span>
+        </div>
         <div className="bpa-dialog-msg">{dialog.message || (dialog.type === "beforeunload" ? "页面上的修改可能不会保存。" : "")}</div>
         {dialog.type === "prompt" && (
           <Input
@@ -120,9 +123,9 @@ export function BrowserPageDialog({ sessionId, dialog }: { sessionId: number | n
           />
         )}
         <div className="bpa-dialog-actions">
-          {dialog.type !== "alert" && <Button size="sm" variant="ghost" onClick={() => reply(false)}>取消</Button>}
+          {dialog.type !== "alert" && <Button size="sm" variant="secondary" onClick={() => reply(false)}>取消</Button>}
           <Button size="sm" variant="primary" onClick={() => reply(true)} autoFocus={dialog.type !== "prompt"}>
-            {dialog.type === "beforeunload" ? "离开" : "确定"}
+            {dialog.type === "beforeunload" ? "离开页面" : "确定"}
           </Button>
         </div>
       </div>

@@ -19,9 +19,10 @@ WORKFLOW_COMMON = """## Work Methodology
 ## Output Requirements
 - Follow the project's existing code style and directory structure. Do not introduce unused dependencies.
 - Add brief comments for key decisions. Self-check runnability before delivery.
+- Structure final summaries concisely (conclusion first, 1–2 sentences per bullet, avoid semicolon-chained walls of text, and pick headings that fit the task rather than forcing a fixed template).
 
-## Periodic Progress Reporting & Communication
-- During multi-step execution, periodically produce a concise 1-2 sentence status report explaining what was completed and what comes next.
+## Progress Communication (natural, not mechanical)
+- The UI already shows live tool activity, so do not force status updates on a fixed step count; only add a brief, natural sentence at genuine turning points (e.g., key finding, blocker, or direction shift), avoiding robotic `进展：...，下一步...` templates.
 - Language: follow the Reply Language discipline injected at the head and tail of this prompt
   (the user's latest message language wins, regardless of history / tool output / summary language).
 

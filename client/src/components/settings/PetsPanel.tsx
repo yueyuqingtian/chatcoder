@@ -8,8 +8,7 @@
  * 展示时必须裁出**左上角第一帧**，否则卡片里会露出一整排 8 个帧、认不出是什么宠物。
  */
 import { useEffect, useState } from "react";
-import { Button, Input, List, ListRow, Segmented, Slider, Switch, Tooltip } from "../ui";
-import { Row } from "./shared";
+import { Button, CardRow, Input, List, ListRow, Section, Segmented, Slider, Switch, Tooltip } from "../ui";
 import { usePetsStore } from "../../store/pets";
 import type { GalleryPet } from "../../store/pets";
 import type { InstalledPet } from "../../pet/petApi";
@@ -163,21 +162,21 @@ export function PetsPanel() {
   };
 
   return (
-    <div className="settings-card-stack">
+    <>
       {actionError && <div className="navpage-empty">操作失败：{actionError}</div>}
 
-      <div className="settings-card">
-        <Row title="在桌面显示宠物" desc="宠物常驻桌面（置顶、不占任务栏），实时反映任务执行状况">
+      <Section>
+        <CardRow title="在桌面显示宠物" desc="宠物常驻桌面（置顶、不占任务栏），实时反映任务执行状况">
           <Switch checked={!!pref?.enabled} onChange={(v) => void setPref({ enabled: v })} />
-        </Row>
+        </CardRow>
         {hidden && (
-          <Row title="宠物已隐藏" desc="通过宠物下方角标隐藏后，可从这里重新显示">
+          <CardRow title="宠物已隐藏" desc="通过宠物下方角标隐藏后，可从这里重新显示">
             <Button size="sm" variant="primary" onClick={() => void showPet()}>
               重新显示
             </Button>
-          </Row>
+          </CardRow>
         )}
-        <Row
+        <CardRow
           title="当前宠物"
           desc={
             current
@@ -200,11 +199,11 @@ export function PetsPanel() {
               </Button>
             </>
           ) : null}
-        </Row>
-      </div>
+        </CardRow>
+      </Section>
 
-      <div className="settings-card">
-        <Row
+      <Section>
+        <CardRow
           title="安装目录"
           desc={
             petsDir
@@ -219,12 +218,12 @@ export function PetsPanel() {
               <Button size="sm" variant="ghost" onClick={() => void changePetsDir("")}>恢复默认</Button>
             )}
           </div>
-        </Row>
-        {dirNotice && <Row title="迁移结果" desc={dirNotice}><span /></Row>}
-      </div>
+        </CardRow>
+        {dirNotice && <CardRow title="迁移结果" desc={dirNotice}><span /></CardRow>}
+      </Section>
 
-      <div className="settings-card">
-        <Row title="宠物大小" desc="也可直接在桌面上拖拽宠物右下角角标缩放">
+      <Section>
+        <CardRow title="宠物大小" desc="也可直接在桌面上拖拽宠物右下角角标缩放">
           <Slider
             min={0.6}
             max={1.6}
@@ -233,11 +232,11 @@ export function PetsPanel() {
             onChange={(v) => void setPref({ scale: v })}
             format={(v) => `${Math.round(Number(v) * 100)}%`}
           />
-        </Row>
-        <Row title="悬停显示任务浮窗" desc="鼠标移到宠物上时，浮窗展开显示运行中的任务与实时进度">
+        </CardRow>
+        <CardRow title="悬停显示任务浮窗" desc="鼠标移到宠物上时，浮窗展开显示运行中的任务与实时进度">
           <Switch checked={pref?.showCapsule !== false} onChange={(v) => void setPref({ showCapsule: v })} />
-        </Row>
-        <Row title="浮窗最多显示任务数" desc="未悬停时只显示最新一条，悬停后按此数量展开，其余折叠为「+N」">
+        </CardRow>
+        <CardRow title="浮窗最多显示任务数" desc="未悬停时只显示最新一条，悬停后按此数量展开，其余折叠为「+N」">
           <Slider
             min={1}
             max={3}
@@ -246,8 +245,8 @@ export function PetsPanel() {
             onChange={(v) => void setPref({ maxCapsuleRows: v })}
             format={(v) => `${v} 个`}
           />
-        </Row>
-        <Row title="浮窗底色" desc="按桌面壁纸深浅选择，浅色壁纸上推荐浅色">
+        </CardRow>
+        <CardRow title="浮窗底色" desc="按桌面壁纸深浅选择，浅色壁纸上推荐浅色">
           <Segmented
             size="sm"
             value={pref?.blockTheme === "light" ? "light" : "dark"}
@@ -258,8 +257,8 @@ export function PetsPanel() {
               { value: "light", label: "浅色" },
             ]}
           />
-        </Row>
-        <Row
+        </CardRow>
+        <CardRow
           title="任务顺序"
           desc={
             (pref?.blockOrder?.length ?? 0) > 0
@@ -274,24 +273,24 @@ export function PetsPanel() {
           ) : (
             <span />
           )}
-        </Row>
-        <Row title="显示任务数量徽标" desc="同时运行 2 个以上任务时，在宠物旁显示数量">
+        </CardRow>
+        <CardRow title="显示任务数量徽标" desc="同时运行 2 个以上任务时，在宠物旁显示数量">
           <Switch checked={pref?.showBadge !== false} onChange={(v) => void setPref({ showBadge: v })} />
-        </Row>
-        <Row title="点击穿透" desc="宠物周围的透明区域不挡住桌面点击（推荐开启）">
+        </CardRow>
+        <CardRow title="点击穿透" desc="宠物周围的透明区域不挡住桌面点击（推荐开启）">
           <Switch checked={pref?.clickThrough !== false} onChange={(v) => void setPref({ clickThrough: v })} />
-        </Row>
-        <Row title="主窗最小化时隐藏宠物" desc="避免宠物留在桌面上影响其他工作">
+        </CardRow>
+        <CardRow title="主窗最小化时隐藏宠物" desc="避免宠物留在桌面上影响其他工作">
           <Switch checked={pref?.hideOnMinimize !== false} onChange={(v) => void setPref({ hideOnMinimize: v })} />
-        </Row>
-      </div>
+        </CardRow>
+      </Section>
 
-      <div className="settings-card">
-        <Row title={`已安装（${installed.length}）`} desc="在下方列表中点「设为当前」选择要在桌面显示的宠物；资源损坏的建议移除后重新安装">
+      <Section>
+        <CardRow title={`已安装（${installed.length}）`} desc="在下方列表中点「设为当前」选择要在桌面显示的宠物；资源损坏的建议移除后重新安装">
           <Button size="sm" variant="primary" onClick={() => void importLocal()}>
             从本地导入
           </Button>
-        </Row>
+        </CardRow>
         <List>
           {installed.map((p) => (
             <ListRow
@@ -333,10 +332,10 @@ export function PetsPanel() {
           ))}
           {installed.length === 0 && !installedLoading ? <div className="navpage-empty">尚未安装宠物</div> : null}
         </List>
-      </div>
+      </Section>
 
-      <div className="settings-card">
-        <Row
+      <Section>
+        <CardRow
           title="宠物图库"
           desc={
             galleryError
@@ -355,7 +354,7 @@ export function PetsPanel() {
           <Button loading={galleryLoading} onClick={() => void loadGallery({ force: true, query })}>
             刷新
           </Button>
-        </Row>
+        </CardRow>
 
         {shown.length > 0 ? (
           <div className="pets-gallery">
@@ -389,16 +388,16 @@ export function PetsPanel() {
             </Button>
           </div>
         )}
-      </div>
+      </Section>
 
-      <div className="settings-card">
-        <Row
+      <Section>
+        <CardRow
           title="素材来源与版权"
           desc="宠物素材来自 petdex 社区投稿，版权归各作者所有。本应用仅在本地缓存所选宠物，不做二次分发；如权利人提出异议，可直接移除本地文件。"
         >
           <span />
-        </Row>
-      </div>
-    </div>
+        </CardRow>
+      </Section>
+    </>
   );
 }

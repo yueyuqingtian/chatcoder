@@ -133,6 +133,7 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("rollback_writes", "call_key", "VARCHAR(64)"),
     # plan-20261019-toolcard-v2：写盘操作类型（create / modify / delete）与写后内容指纹（sha1）
     ("rollback_writes", "op", "VARCHAR(8)"),
+    ("rollback_writes", "before_hash", "VARCHAR(40)"),
     ("rollback_writes", "after_hash", "VARCHAR(40)"),
     # ========== rollback_writes（工作流写入归属：回滚与冲突基线，nullable）==========
     ("rollback_writes", "workflow_run_id", "BIGINT"),
@@ -151,6 +152,9 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("agents", "checkpoint_json", "JSON"),
     # ========== agents（工作流运行时：子代理归属的工作流节点，nullable）==========
     ("agents", "workflow_node_id", "BIGINT"),
+    # ========== agents（子代理真实执行模式与角色，用于消息流角色徽章回填）==========
+    ("agents", "subagent_mode", "VARCHAR(20)"),
+    ("agents", "subagent_role", "VARCHAR(20)"),
     ("workflow_tool_calls", "effect_json", "TEXT"),
     ("workflow_runs", "closed_reason", "VARCHAR(32)"),
     # ========== usage_records（plan-152-704：供应商显示名）==========
@@ -203,6 +207,11 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("provider_credentials", "fail_count", "INTEGER DEFAULT 0 NOT NULL"),
     # ========== subagent_profiles（plan-330-1648 M2：子代理思考深度档位覆盖）==========
     ("subagent_profiles", "reasoning_effort", "VARCHAR(20)"),
+    ("subagent_profiles", "display_name", "VARCHAR(60)"),
+    ("subagent_profiles", "execution_mode", "VARCHAR(16)"),
+    ("subagent_profiles", "revision", "INTEGER DEFAULT 0 NOT NULL"),
+    ("agents", "subagent_profile_id", "BIGINT"),
+    ("agents", "subagent_profile_name", "VARCHAR(60)"),
 ]
 
 
@@ -697,6 +706,10 @@ _INDEXES: list[tuple[str, str, str]] = [
     ("idx_messages_window", "messages", "session_id, thread_id, deleted, id"),
     # plan-20261021-usage-update：调用记录表按时间倒序分页，数万行时没有索引会每页全表排序
     ("ix_usage_records_created_at", "usage_records", "created_at"),
+    # plan-771-3177：浏览器书签与历史查询索引
+    ("ix_browser_bookmarks_url", "browser_bookmarks", "url"),
+    ("ix_browser_bookmarks_folder", "browser_bookmarks", "folder"),
+    ("ix_browser_history_last_visited_at", "browser_history", "last_visited_at"),
 ]
 
 
@@ -759,6 +772,15 @@ async def run_migrations(db: AsyncSession) -> dict:
                 await db.rollback()
             except Exception:
                 pass
+    if db.bind.dialect.name == "postgresql":
+        prompt_type = await db.scalar(text(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'subagent_profiles' "
+            "AND column_name = 'system_prompt'"
+        ))
+        if prompt_type == "character varying":
+            await db.execute(text("ALTER TABLE subagent_profiles ALTER COLUMN system_prompt TYPE TEXT"))
+            await db.commit()
     await _ensure_indexes(db)
     await ensure_message_revision(db)
 

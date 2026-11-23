@@ -8,7 +8,7 @@
 .right-panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; overflow: hidden; background: var(--bg-panel); color: var(--text-1); }
 /* plan-20261101-performance：宽度变化只影响内容节奏，状态和标题始终可读。 */
 .subagent-panel { container-type: inline-size; width: 100%; }
-.subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 6px 12px; }
+.subagent-panel .subagent-panel-head { --collapse-gap: 8px; gap: 8px; padding: 8px 14px; }
 /* plan-630-2590：facts 单行、不换行。
  *
  * 为什么改掉 flex-wrap：「已用 N 分 M 秒」每秒变宽（59 秒→1 分 0 秒时位数还会跳），
@@ -17,15 +17,21 @@
  * 每次重写 scrollTop，用户看到的就是「没滚轮、消息流却自己在动」。
  * 改为单行 + 溢出省略（与 global.css 里 facts 的原始设计一致），头部高度恒定；
  * 用时再给固定槽位，秒数变化不推动同行其它项左右移动。 */
-.subagent-panel .subagent-panel-facts { flex-wrap: nowrap; overflow: hidden; gap: 6px; min-height: 28px; }
+.subagent-panel .subagent-panel-facts { flex-wrap: nowrap; overflow: hidden; gap: 8px; min-height: 30px; font-size: 12px; line-height: 1.4; }
 .subagent-panel .subagent-panel-status { flex: 0 1 auto; }
 .subagent-panel .subagent-panel-status svg { width: 12px; height: 12px; }
 .subagent-panel-status-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 12px; width: 12px; height: 12px; }
-.subagent-panel .subagent-panel-meta { flex: 0 0 auto; min-width: 8.5em; text-align: left; font-variant-numeric: tabular-nums; }
+.subagent-panel .subagent-panel-meta { flex: 0 0 auto; min-width: 6.5em; text-align: left; font-variant-numeric: tabular-nums; }
 .subagent-panel .subagent-panel-facts > * + *::before { content: none; }
 .subagent-panel .subagent-panel-facts > .subagent-panel-detail-toggle { margin-left: auto; }
 .subagent-panel .subagent-panel-facts > .subagent-panel-stop { margin-left: 0; }
-.subagent-panel-details { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; line-height: 18px; color: var(--text-2); }
+.subagent-panel-details {
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  padding: 6px 10px; border-radius: var(--r-md);
+  background: var(--surface-tray); border: 1px solid var(--border-light);
+  font-size: 12px; line-height: 1.55; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
 .subagent-panel-facts > .btn::before { content: none; }
 .subagent-panel-facts > .btn { margin-left: 0; }
 .rp-head {
@@ -300,7 +306,7 @@
 .ft-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 /* 没有预览时树占满面板；打开预览后收成侧栏（flex-basis 带弹簧过渡） */
 .ft-tree-col { display: flex; flex-direction: column; flex: 1 1 100%; min-width: 0; overflow: hidden; transition: flex-basis var(--dur-spring) var(--spring-soft); }
-.ft-body.has-preview .ft-tree-col { flex: 0 0 clamp(172px, 34%, 264px); border-right: 1px solid var(--border); }
+.ft-body.has-preview .ft-tree-col { flex: 0 0 clamp(172px, 34%, 264px); border-right: 1px solid var(--divider); }
 /* plan-20261016-ux（问题 10）：预览时收起目录树，预览占满面板。宽度沿用同一条弹簧过渡；
    visibility 在收起方向延迟到过渡结束再隐藏（展开立即可见），收起后树内元素不再参与 Tab 聚焦 */
 .ft-tree-col { transition: flex-basis var(--dur-spring) var(--spring-soft), visibility 0s linear 0s; }
@@ -311,28 +317,17 @@
   transition: flex-basis var(--dur-spring) var(--spring-soft), visibility 0s linear var(--dur-spring);
 }
 .ft-tree-toggle { margin-left: -2px; }
-.ft-tree-head { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 6px 0 12px; flex-shrink: 0; }
-.ft-root { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-1); }
+.ft-tree-head { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 6px 0 12px; flex-shrink: 0; }
+.ft-root { flex: 1; min-width: 0; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--text-1); }
 .ft-root-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ft-tree-head .ui-icon-btn { width: 26px; height: 26px; }
-.ft-filter {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  margin: 0 8px 6px;
-  padding: 0 8px;
-  border-radius: var(--r-ctl);
-  background: color-mix(in oklab, var(--text-1) 5%, transparent);
-  color: var(--text-3);
-  cursor: text;
-  transition: background var(--dur-2) var(--ease-standard), box-shadow var(--dur-2) var(--ease-standard);
-}
-.ft-filter:focus-within { background: var(--color-card); box-shadow: inset 0 0 0 1px var(--border-strong), 0 0 0 3px color-mix(in oklab, var(--info) 14%, transparent); }
-.ft-filter input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text-1); font: inherit; font-size: 12.5px; }
-.ft-filter input::placeholder { color: var(--text-3); }
-.ft-filter-clear { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: var(--r-pill); background: transparent; color: var(--text-3); cursor: pointer; }
-.ft-filter-clear:hover { background: var(--bg-hover); color: var(--text-1); }
+.ft-actions, .ft-search { display: flex; align-items: center; gap: 4px; }
+.ft-search { margin: 0 8px 6px; }
+.ft-search > .ui-input-wrap, .ft-search > .ui-input { min-width: 0; flex: 1; }
+.ft-row .ft-rename { flex: 1; min-width: 0; height: 24px; padding: 0 4px; }
+.ft-git-mark { margin-inline-start: auto; flex: 0 0 14px; text-align: center; line-height: 18px; font-size: 11px; color: var(--warning); }
+.ft-git-mark.mark-a, .ft-git-mark.mark-u { color: var(--success); }
+.ft-git-mark.mark-d { color: var(--error); }
+.ft-git-mark.mark-dir { color: var(--text-3); }
 .ft-tree { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 0 6px 10px; outline: none; }
 .ft-tree-inner { position: relative; width: 100%; }
 .ft-row {
@@ -347,6 +342,7 @@
   border-radius: var(--r-ctl);
   color: var(--text-2);
   font-size: 12.5px;
+  line-height: 28px;
   cursor: pointer;
   user-select: none;
   transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
@@ -370,8 +366,8 @@
 }
 .ft-row:hover { background: var(--bg-hover); color: var(--text-1); }
 .ft-row.active { background: var(--bg-active); color: var(--text-1); font-weight: 500; }
-.ft-tree:focus-visible .ft-row.is-cursor { box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--info) 65%, transparent); }
-.ft-chev { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 12px; color: var(--text-3); }
+.ft-tree:focus-visible .ft-row.is-cursor { box-shadow: inset 0 0 0 1px var(--border-hover, var(--border-strong)); }
+.ft-chev { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 14px; color: var(--text-3); }
 .ft-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* plan-621-2572：清理 3px 硬编码圆角，统一采用 var(--r-xs) 令牌 */
 .ft-mark { padding: 0 1px; border-radius: var(--r-xs); background: color-mix(in oklab, var(--warning) 30%, transparent); color: inherit; }
@@ -443,7 +439,7 @@
 
 /* 文件管理在宽面板（全屏）下：没有预览时目录树也收成侧栏，右侧给出空态说明，
    不再让一行行文件名横跨整个屏幕 */
-.ft-body.is-wide:not(.has-preview) .ft-tree-col { flex: 0 0 clamp(240px, 26%, 340px); border-right: 1px solid var(--border); }
+.ft-body.is-wide:not(.has-preview) .ft-tree-col { flex: 0 0 clamp(240px, 26%, 340px); border-right: 1px solid var(--divider); }
 .ft-wide-empty { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; animation: ft-wide-empty-in var(--dur-3) var(--ease-standard) both; }
 @keyframes ft-wide-empty-in { from { opacity: 0; } to { opacity: 1; } }
 /* 拖拽期间目录树宽度直接跟随面板，不再追着过渡走（松手后档位切换才播放过渡） */

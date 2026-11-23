@@ -330,29 +330,62 @@ class SubagentNodeExecutor:
     async def _spawn(self, manager: Any, req: NodeRequest) -> NodeResult:
         from app.core.enums import MsgType, SenderType
         from app.orchestration.context_manager import build_subagent_context
-        from app.orchestration.subagent_tools import available_subagent_tools
+        from app.orchestration.agent_team import load_team
+        from app.orchestration.subagent_tools import (
+            SUBAGENT_OWN_TOOLS, available_subagent_tools, restrict_member_tools,
+        )
         from app.persistence.database import async_session_factory, run_write_locked
         from app.persistence.models.agent import Agent as AgentRow
         from app.persistence.models.message import Session as SessionRow
         from app.persistence.models.project import Project as ProjectRow
         from app.persistence.models.task import Task as TaskRow
-        from app.services import message_service
+        from app.services import message_service, permission_profile_service
 
         readonly = req.kind in READONLY_KINDS
+        wf_mode = "readonly" if readonly else "agent"
+        async with async_session_factory() as db:
+            session = await db.get(SessionRow, req.session_id)
+            session_mode = getattr(session, "permission_mode", None) or "workflow"
+            if not readonly and permission_profile_service.is_readonly_like(session_mode):
+                return NodeResult(status="failed", error="当前主会话模式不允许启动执行智能体。")
+            team = (await req.load_team() if req.load_team else
+                    await load_team(db, "workflow", parent_models=(getattr(session, "model_id", None),)))
+            member, role_fallback = team.workflow_member(req.role, wf_mode)
+            model_id, effort, model_fallback = team.model_for(member, getattr(session, "model_id", None), None)
+            available = await available_subagent_tools(db, readonly=readonly)
+            allowed = permission_profile_service.resolve_tools(
+                session_mode, {schema["function"]["name"] for schema in available},
+            )
+            schemas = restrict_member_tools(available, readonly=readonly, parent_tools=allowed)
+        if readonly and not schemas:
+            return NodeResult(status="failed", error="工作流没有可用的代码读取工具。")
+        schemas = [*schemas, *SUBAGENT_OWN_TOOLS]
+        notes = []
+        if role_fallback:
+            notes.append(f"原角色不可用，已改用{member.name}")
+        if model_fallback:
+            notes.append("成员模型不可用，已跟随会话")
+        if notes:
+            description_note = "。".join(notes) + "。"
+        else:
+            description_note = ""
+        wf_role = "explore" if req.kind == "explore" else ("verifier" if req.kind in ("check", "review") else "coder")
         title = _title(req)
         description = _description(req)
         handoff = _handoff(req)
 
         def _create(s: Any) -> tuple[int, int]:
-            session_row = s.get(SessionRow, req.session_id)
             agent = AgentRow(
                 kind="sub",
                 name=title,
-                model_id=session_row.model_id if session_row else None,
+                model_id=model_id,
                 session_id=req.session_id,
                 turn_id=req.turn_id,
                 parent_agent_id=None,
                 workflow_node_id=req.node_id,
+                subagent_mode=wf_mode,
+                subagent_role=wf_role,
+                subagent_profile_name=member.name,
                 status="running",
             )
             s.add(agent)
@@ -375,9 +408,6 @@ class SubagentNodeExecutor:
             return agent.id, task.id
 
         agent_id, task_id = await run_write_locked(_create, label="workflow.node.spawn")
-        # plan-20261105-subagent-tools：工作流派发也不能依赖主代理提前注册拓展。
-        async with async_session_factory() as db:
-            schemas = await available_subagent_tools(db, readonly=readonly)
         if not readonly:
             # 可写节点可在执行中申请扩展写入范围（设计 §5A.1 第 4 点）
             from app.orchestration.workflow.guard import REQUEST_SCOPE_SCHEMA
@@ -404,6 +434,7 @@ class SubagentNodeExecutor:
                 task=task_row,
                 handoff_summary=handoff,
                 original_request=req.goal,
+                member=member,
             )
             # 任务说明落库到子代理线程：子代理面板首条即“任务从哪来”，与普通子代理一致
             await message_service.create_message(
@@ -413,7 +444,7 @@ class SubagentNodeExecutor:
                 thread_id=agent_id,
                 sender_type=SenderType.USER.value,
                 msg_type=MsgType.TEXT.value,
-                content={"text": f"{title}\n\n{description}".strip()},
+                content={"text": f"{title}\n\n{description}\n\n{description_note}".strip()},
             )
             await db.commit()
 
@@ -426,7 +457,8 @@ class SubagentNodeExecutor:
             context_bundle=bundle,
             tool_schemas=schemas,
             workspace=req.workspace,
-            subagent_mode="readonly" if readonly else "default",
+            subagent_mode=wf_mode,
+            reasoning_effort=effort,
             task_title=title,
             task_description=description,
         )

@@ -2,9 +2,27 @@ import { useSyncExternalStore } from "react";
 import { api, type MessageOut, type MessagePage } from "../api/client";
 
 interface WindowState {
-  before: number | null; after: number | null; revision: number; hasBefore: boolean; loading: boolean; error: string | null;
+  before: number | null;
+  after: number | null;
+  revision: number;
+  hasBefore: boolean;
+  /** plan-20261123-ux-fixes：是否由跳页（around）在连续窗口之前加载出非连续更早区间。
+   *  仅由 aroundMessages / aroundTurnMessages 置位，绝不受分页 page.context 影响。 */
+  disjointBefore: boolean;
+  disjointMinId: number | null;
+  loading: boolean;
+  error: string | null;
 }
-const EMPTY: WindowState = { before: null, after: null, revision: -1, hasBefore: false, loading: false, error: null };
+const EMPTY: WindowState = {
+  before: null,
+  after: null,
+  revision: -1,
+  hasBefore: false,
+  disjointBefore: false,
+  disjointMinId: null,
+  loading: false,
+  error: null,
+};
 const windows = new Map<string, WindowState>();
 const listeners = new Set<() => void>();
 const requests = new Map<string, { promise: Promise<MessagePage>; controller: AbortController; sid: number }>();
@@ -14,8 +32,11 @@ function publish(key: string, state: WindowState) {
   for (const notify of listeners) notify();
 }
 const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+export function getMessageHistoryState(sid: number | null, thread?: number): WindowState {
+  return sid == null ? EMPTY : windows.get(keyOf(sid, thread)) ?? EMPTY;
+}
 export function useMessageHistory(sid: number | null, thread?: number): WindowState {
-  return useSyncExternalStore(subscribe, () => sid == null ? EMPTY : windows.get(keyOf(sid, thread)) ?? EMPTY);
+  return useSyncExternalStore(subscribe, () => getMessageHistoryState(sid, thread));
 }
 function request(sid: number, thread: number | undefined, cursor: { before_id?: number; after_id?: number; around_id?: number; turn_id?: number } = {}) {
   const key = keyOf(sid, thread) + JSON.stringify(cursor);
@@ -67,10 +88,22 @@ function maxConfirmedMessageId(messages: readonly MessageOut[]): number {
 function accept(sid: number, thread: number | undefined, page: MessagePage, replace = false, prepend = false) {
   const key = keyOf(sid, thread);
   const old = windows.get(key) ?? EMPTY;
-  publish(key, { before: replace ? page.before_id : old.before == null ? page.before_id : Math.min(old.before, page.before_id ?? old.before),
+  const nextBefore = replace ? page.before_id : old.before == null ? page.before_id : Math.min(old.before, page.before_id ?? old.before);
+  const nextDisjointMinId = replace
+    ? null
+    : old.disjointMinId != null && nextBefore != null && nextBefore <= old.disjointMinId
+      ? null
+      : old.disjointMinId;
+  publish(key, {
+    before: nextBefore,
     after: replace ? page.after_id : Math.max(old.after ?? 0, page.after_id ?? 0) || null,
     hasBefore: replace || prepend || old.before == null || (page.before_id != null && page.before_id < old.before) ? page.has_before : old.hasBefore,
-    revision: page.revision, loading: false, error: null });
+    disjointBefore: nextDisjointMinId != null && (nextBefore == null || nextDisjointMinId < nextBefore),
+    disjointMinId: nextDisjointMinId,
+    revision: page.revision,
+    loading: false,
+    error: null,
+  });
 }
 export async function initialMessages(sid: number, thread?: number): Promise<MessageWindowBatch> {
   const page = await request(sid, thread);
@@ -119,11 +152,24 @@ export async function refreshMessageWindow(sid: number, current: MessageOut[], t
   const mergedPage: MessagePage = { ...page, after_id: latest.after_id ?? state.after, has_after: false };
   return { items, checkedIds, commit: () => accept(sid, thread, mergedPage) };
 }
+function markDisjointIfOlder(sid: number, thread: number | undefined, page: MessagePage) {
+  const key = keyOf(sid, thread);
+  const state = windows.get(key);
+  if (!state || state.before == null) return;
+  const firstId = page.items.reduce<number | null>((min, m) => (m.id > 0 && (min == null || m.id < min) ? m.id : min), null);
+  if (firstId == null || firstId >= state.before) return;
+  const nextMin = state.disjointMinId == null ? firstId : Math.min(state.disjointMinId, firstId);
+  if (state.disjointBefore && state.disjointMinId === nextMin) return;
+  publish(key, { ...state, disjointBefore: true, disjointMinId: nextMin });
+}
 export async function aroundMessages(sid: number, id: number, thread?: number): Promise<MessageOut[]> {
   const page = await request(sid, thread, { around_id: id });
-  // 定位页不改变连续历史窗口的游标，避免跳过中间未加载历史。
+  // 定位页不改变连续历史窗口的游标，避免跳过中间未加载历史；仅记录跳页断层供顶部自动加载守卫识别。
+  markDisjointIfOlder(sid, thread, page);
   return messagesOf(page);
 }
 export async function aroundTurnMessages(sid: number, id: number, thread?: number): Promise<MessageOut[]> {
-  return messagesOf(await request(sid, thread, { turn_id: id }));
+  const page = await request(sid, thread, { turn_id: id });
+  markDisjointIfOlder(sid, thread, page);
+  return messagesOf(page);
 }

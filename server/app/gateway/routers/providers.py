@@ -14,6 +14,8 @@ from app.gateway.schemas import (
     ProviderCredentialCreate,
     ProviderCredentialOut,
     ProviderCredentialUpdate,
+    ProviderModelsBatchDeleteIn,
+    ProviderModelsBatchUpdateIn,
     ProviderModelsBulkIn,
     ProviderOut,
     ProviderProxyTestOut,
@@ -82,10 +84,24 @@ async def _to_out(db: AsyncSession, p) -> ProviderOut:
     return _provider_out(
         p, await credential_service.list_credentials(db, p.id),
         await provider_service.count_models(db, p.id),
+        await _antigravity_auth_of(db, p),
     )
 
 
-def _provider_out(p, creds, model_count: int) -> ProviderOut:
+async def _antigravity_auth_of(db: AsyncSession, p):
+    """取 antigravity 供应商的登录态行（其它供应商返回 None）。
+
+    档位与 project 存在 auth 行而不是 Provider 行——一个供应商可挂多账号，
+    每个账号档位不同，存 Provider 级会互相覆盖。
+    """
+    if (getattr(p, "api_format", None) or "").lower() != "antigravity":
+        return None
+    from app.auth.antigravity import session as ag_session
+
+    return await ag_session.load_auth(db, p.id)
+
+
+def _provider_out(p, creds, model_count: int, ag_auth=None) -> ProviderOut:
     # plan-20261020-retry-cred-perf：非 ta3 的「可用」只算健康凭据（暂缓中的不计入），
     # ta3 保持旧的冷却硬过滤口径
     if (p.api_format or "openai").lower() == "ta3":
@@ -119,6 +135,10 @@ def _provider_out(p, creds, model_count: int) -> ProviderOut:
         credential_strategy=getattr(p, "credential_strategy", None) or "sticky",
         # plan-41-225: 排序位（前端拖拽排序的当前值）
         sort_order=getattr(p, "sort_order", 0) or 0,
+        # 方案 antigravity：档位/项目常显（一个供应商可挂多账号，档位存 auth 行）
+        antigravity_tier=getattr(ag_auth, "tier", None),
+        antigravity_project=getattr(ag_auth, "project", None),
+        antigravity_auth_kind=getattr(ag_auth, "auth_kind", None),
     )
 
 
@@ -139,7 +159,20 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
     ).execution_options(populate_existing=True))).all()
     for credential in rows:
         creds_by_provider[credential.provider_id].append(credential)
-    return [_provider_out(p, creds_by_provider[p.id], counts.get(p.id, 0)) for p in providers]
+    # 方案 antigravity：档位/project 从 auth 行读（一次批量，避免每行再查）
+    ag_auth_by_provider: dict[int, object] = {}
+    from app.persistence.models.antigravity_auth import AntigravityAuth
+
+    ag_rows = (await db.scalars(select(AntigravityAuth).order_by(
+        AntigravityAuth.id.asc(),
+    ).execution_options(populate_existing=True))).all()
+    for row in ag_rows:
+        ag_auth_by_provider.setdefault(row.provider_id, row)
+    return [
+        _provider_out(p, creds_by_provider[p.id], counts.get(p.id, 0),
+                      ag_auth_by_provider.get(p.id))
+        for p in providers
+    ]
 
 
 @router.post("/providers", response_model=ProviderOut)
@@ -186,6 +219,8 @@ async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSessi
         provider_service.normalize_ta3_config(body.model_dump(exclude_unset=True), current)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    fields_set = getattr(body, "model_fields_set", set())
+    proxy_url = "" if ("proxy_url" in fields_set and body.proxy_url is None) else body.proxy_url
     ok = await provider_service.update_provider(
         db, provider_id,
         name=body.name.strip() if body.name else None,
@@ -195,7 +230,7 @@ async def update_provider(provider_id: int, body: ProviderUpdate, db: AsyncSessi
         api_format=body.api_format,
         is_active=body.is_active,
         proxy_mode=body.proxy_mode,
-        proxy_url=body.proxy_url,
+        proxy_url=proxy_url,
         credential_strategy=body.credential_strategy,
     )
     if not ok:
@@ -218,8 +253,8 @@ async def test_provider_connectivity(provider_id: int, db: AsyncSession = Depend
     provider = await provider_service.get_provider(db, provider_id)
     if provider is None:
         raise HTTPException(404, "provider not found")
-    if (provider.api_format or "openai").lower() in ("ta3", "trae", "workbuddy"):
-        raise HTTPException(400, "登录态供应商（ta3/trae/workbuddy）请使用「同步模型」验证连通性")
+    if (provider.api_format or "openai").lower() in ("ta3", "trae", "workbuddy", "antigravity"):
+        raise HTTPException(400, "登录态供应商（ta3/trae/workbuddy/antigravity）请使用「同步模型」验证连通性")
     try:
         result = await provider_service.test_connectivity(db, provider_id)
     except ValueError as e:
@@ -236,7 +271,7 @@ async def scan_provider_models(provider_id: int, db: AsyncSession = Depends(get_
     provider = await provider_service.get_provider(db, provider_id)
     if provider is None:
         raise HTTPException(404, "provider not found")
-    if (provider.api_format or "openai").lower() in ("ta3", "trae", "workbuddy"):
+    if (provider.api_format or "openai").lower() in ("ta3", "trae", "workbuddy", "antigravity"):
         raise HTTPException(400, "登录态供应商的模型目录来自账号登录，请使用「同步模型」")
     try:
         models = await provider_service.scan_models(db, provider_id)
@@ -289,7 +324,12 @@ async def list_provider_models(provider_id: int, db: AsyncSession = Depends(get_
     from sqlalchemy import select
 
     from app.persistence.models.model_reg import Model
-    res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
+    res = await db.execute(
+        select(Model)
+        .where(Model.provider_id == provider_id)
+        .order_by(Model.name.asc())
+        .execution_options(populate_existing=True)
+    )
     order = int(getattr(provider, "sort_order", 0) or 0)
     return [_model_to_out(m, order) for m in res.scalars().all()]
 
@@ -307,8 +347,59 @@ async def bulk_save_provider_models(provider_id: int, body: ProviderModelsBulkIn
     from app.persistence.models.model_reg import Model
     provider = await provider_service.get_provider(db, provider_id)
     order = int(getattr(provider, "sort_order", 0) or 0) if provider else 0
-    res = await db.execute(select(Model).where(Model.provider_id == provider_id).order_by(Model.name.asc()))
+    res = await db.execute(
+        select(Model)
+        .where(Model.provider_id == provider_id)
+        .order_by(Model.name.asc())
+        .execution_options(populate_existing=True)
+    )
     return [_model_to_out(m, order) for m in res.scalars().all()]
+
+
+@router.patch("/providers/{provider_id}/models/batch", response_model=list[ModelOut])
+async def batch_update_provider_models(
+    provider_id: int,
+    body: ProviderModelsBatchUpdateIn,
+    db: AsyncSession = Depends(get_db),
+):
+    """plan-20261123-ux-fixes：批量修改供应商下多个模型的启停、多模态、上下文窗口与思考深度。"""
+    if not body.model_ids:
+        raise HTTPException(400, "请至少选择一个模型")
+    patch_fields = body.model_dump(exclude={"model_ids"}, exclude_unset=True)
+    if not patch_fields:
+        raise HTTPException(400, "请至少指定一项需要修改的配置")
+    try:
+        await provider_service.batch_update_models(db, provider_id, body.model_ids, patch_fields)
+    except ValueError as e:
+        msg = str(e)
+        raise HTTPException(404 if msg == "provider not found" else 400, msg)
+    from sqlalchemy import select
+    from app.persistence.models.model_reg import Model
+    provider = await provider_service.get_provider(db, provider_id)
+    order = int(getattr(provider, "sort_order", 0) or 0) if provider else 0
+    res = await db.execute(
+        select(Model)
+        .where(Model.provider_id == provider_id)
+        .order_by(Model.name.asc())
+        .execution_options(populate_existing=True)
+    )
+    return [_model_to_out(m, order) for m in res.scalars().all()]
+
+
+@router.post("/providers/{provider_id}/models/batch-delete", response_model=dict)
+async def batch_delete_provider_models(
+    provider_id: int,
+    body: ProviderModelsBatchDeleteIn,
+    db: AsyncSession = Depends(get_db),
+):
+    """plan-20261123-ux-fixes：批量删除供应商下多个模型。"""
+    if not body.model_ids:
+        raise HTTPException(400, "请至少选择一个模型")
+    try:
+        deleted = await provider_service.batch_delete_models(db, provider_id, body.model_ids)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, "deleted": deleted}
 
 
 # ── plan-248-1258 M2.2: 供应商凭据（多 API Key / 多登录账号）──

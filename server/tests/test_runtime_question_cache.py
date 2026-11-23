@@ -82,7 +82,7 @@ async def test_question_resolution_keeps_first_answer():
 
 
 @pytest.mark.parametrize("protocol", [
-    "openai", "gemini", "anthropic", "commandcode", "kiro", "trae", "workbuddy",
+    "openai", "gemini", "anthropic", "commandcode", "kiro", "trae", "workbuddy", "antigravity",
     "ta3-openai", "ta3-anthropic", "ta3-deepseek",
 ])
 async def test_answer_attachments_reach_provider_after_complete_tool_batch(protocol, uploads, tmp_path):
@@ -110,6 +110,12 @@ async def test_answer_attachments_reach_provider_after_complete_tool_batch(proto
         body = AnthropicProvider(model="claude-sonnet", **key)._build_payload(request, stream=True)
     elif protocol == "commandcode":
         body = CommandCodeProvider(model="command", **key)._build_payload(request)
+    elif protocol == "antigravity":
+        from app.models.providers.antigravity import AntigravityProvider
+
+        body = AntigravityProvider(
+            model="gemini-3-flash", **key, meta={"project": "aicode-consumers"},
+        )._build_payload(request)
     elif protocol == "kiro":
         body = KiroProvider(model="claude-sonnet", **key)._build_payload(request)
     elif protocol == "trae":

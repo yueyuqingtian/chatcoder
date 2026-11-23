@@ -59,14 +59,18 @@ async def create_provider(db: AsyncSession, **kwargs) -> int:
 
 
 async def get_provider(db: AsyncSession, provider_id: int) -> Provider | None:
-    return await db.get(Provider, provider_id)
+    # plan-20261123-ux-fixes：写操作走独立同步写引擎提交，populate_existing=True 确保同 AsyncSession
+    # 读到刚提交的最新值，不命中过期 identity map（同时不触发 expire_all 导致异步 MissingGreenlet）。
+    return await db.get(Provider, provider_id, populate_existing=True)
 
 
 async def list_providers(db: AsyncSession) -> list[Provider]:
     # plan-41-225: 按用户自定义顺序（sort_order）排序，id 兜底保证顺序稳定不抖动
     # （老库迁移后 sort_order 全为 0 → 等价于原 id 升序，升级零感知）。
     res = await db.execute(
-        select(Provider).order_by(Provider.sort_order.asc(), Provider.id.asc())
+        select(Provider)
+        .order_by(Provider.sort_order.asc(), Provider.id.asc())
+        .execution_options(populate_existing=True)
     )
     return list(res.scalars().all())
 
@@ -92,7 +96,7 @@ async def update_provider(db: AsyncSession, provider_id: int, **kwargs) -> bool:
         for k, v in kwargs.items():
             if v is None:
                 continue
-            if k == "api_key" and v == "":
+            if k in ("api_key", "proxy_url") and v == "":
                 setattr(provider, k, None)
             else:
                 setattr(provider, k, v)
@@ -159,7 +163,7 @@ async def delete_provider(db: AsyncSession, provider_id: int) -> bool:
 async def _resolve_scan_key(db: AsyncSession, provider: Provider) -> str | None:
     """plan-248-1258 M2.2: 扫描/测试用 key——优先取首个可用凭据，回落 provider.api_key。
 
-    OAuth 类供应商（workbuddy/ta3/trae）的凭据 key 来自各自 auth 表的 access_token。
+    OAuth 类供应商（workbuddy/ta3/trae/kiro/antigravity）的凭据 key 来自各自 auth 表的 access_token。
     """
     from app.services import credential_service
 
@@ -174,7 +178,7 @@ async def _resolve_scan_key(db: AsyncSession, provider: Provider) -> str | None:
     for c in ranked:
         if c.api_key:
             return c.api_key
-        if fmt in ("workbuddy", "ta3", "trae"):
+        if fmt in ("workbuddy", "ta3", "trae", "kiro", "antigravity"):
             from app.models.registry import _load_auth_for_credential
 
             auth = await _load_auth_for_credential(db, fmt, provider.id, c.id)
@@ -210,6 +214,23 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
                 "reasoning_efforts": e.get("reasoning_efforts"),
             }
             for e in merge_entries()
+        ]
+
+    # antigravity 无 /models 接口，目录来自账号登录后的 fetchAvailableModels
+    # （用「同步模型」拉取）；此处用内置兜底清单保证界面不是空白
+    if api_format == "antigravity":
+        from app.auth.antigravity.catalog import BUILTIN_MODELS, display_name
+
+        return [
+            {
+                "id": mid,
+                "context_window": None,
+                "owned_by": "antigravity",
+                "is_multimodal": False,
+                "reasoning_efforts": None,
+                "display_name": display_name(mid),
+            }
+            for mid in BUILTIN_MODELS
         ]
 
     if not provider.base_url:
@@ -294,8 +315,24 @@ async def scan_models(db: AsyncSession, provider_id: int) -> list[dict]:
     return out
 
 
-async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dict]) -> list[int]:
-    """按 (provider_id, name) upsert 模型配置（写引擎单写线程）；返回该供应商模型 id 列表。"""
+async def bulk_upsert_models(
+    db: AsyncSession,
+    provider_id: int,
+    items: list[dict],
+    *,
+    preserve_existing_config: bool = False,
+    default_multimodal: bool = False,
+) -> list[int]:
+    """按 (provider_id, name) upsert 模型配置（写引擎单写线程）；返回该供应商模型 id 列表。
+
+    plan-20261123-ux-fixes：
+    - preserve_existing_config=True（目录同步路径，如 antigravity_sync）：
+      已存在模型保留用户配置好的上下文窗口、思考深度、多模态与启用状态；
+      仅在上下文窗口缺失时补默认值。
+    - default_multimodal=True：新同步模型默认开启多模态。
+    - 扫描保存路径（preserve_existing_config=False）若未显式传入 reasoning_efforts，
+      也不覆盖已存在模型原有的思考深度配置。
+    """
     from app.persistence.database import run_write_locked
 
     def patch(s):
@@ -314,6 +351,8 @@ async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dic
                 continue
             # v2.2 (对齐 zcode 3.11): 目录补全——用户未填元数据时自动补全
             from app.models.catalog import apply_metadata
+            has_explicit_multimodal = "is_multimodal" in item and item.get("is_multimodal") is not None
+            has_explicit_efforts = "reasoning_efforts" in item and item.get("reasoning_efforts") is not None
             _meta = apply_metadata(
                 name,
                 context_window=item.get("context_window"),
@@ -321,18 +360,37 @@ async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dic
                 reasoning_efforts=item.get("reasoning_efforts"),
             )
             m = by_name.get(name)
-            if m is None:
+            is_new = m is None
+            if is_new:
                 m = Model(tenant_id=1, name=name, provider_id=provider_id, source_type="byok")
                 s.add(m)
                 by_name[name] = m
+
+            if preserve_existing_config and not is_new:
+                if not m.context_window:
+                    m.context_window = _meta.get("context_window") or 200000
+                continue
+
             m.is_active = bool(item.get("is_active", True))
-            if _meta.get("context_window"):
-                m.context_window = _meta["context_window"]
-            elif m.context_window is None:
-                m.context_window = 200000
-            m.is_multimodal = bool(_meta.get("is_multimodal", False))
-            if _meta.get("reasoning_efforts") is not None:
-                m.reasoning_efforts = _meta["reasoning_efforts"]
+            if is_new:
+                m.context_window = _meta.get("context_window") or 200000
+                if default_multimodal and not has_explicit_multimodal:
+                    m.is_multimodal = True
+                elif has_explicit_multimodal:
+                    m.is_multimodal = bool(item["is_multimodal"])
+                else:
+                    m.is_multimodal = bool(_meta.get("is_multimodal", False))
+                if _meta.get("reasoning_efforts") is not None:
+                    m.reasoning_efforts = _meta["reasoning_efforts"]
+            else:
+                if item.get("context_window"):
+                    m.context_window = item["context_window"]
+                elif not m.context_window:
+                    m.context_window = _meta.get("context_window") or 200000
+                if has_explicit_multimodal:
+                    m.is_multimodal = bool(item["is_multimodal"])
+                if has_explicit_efforts:
+                    m.reasoning_efforts = item["reasoning_efforts"]
             # plan-147-674: ta3 模型的手动多模态设置打 override 标记，
             # 目录重新同步时保留用户修正（catalog.py 同步逻辑读取该标记）
             if provider.api_format == "ta3":
@@ -347,6 +405,82 @@ async def bulk_upsert_models(db: AsyncSession, provider_id: int, items: list[dic
         return ids
 
     return await run_write_locked(patch, label="provider.bulk_upsert")
+
+
+async def batch_update_models(
+    db: AsyncSession,
+    provider_id: int,
+    model_ids: list[int],
+    patch_fields: dict,
+) -> int:
+    """plan-20261123-ux-fixes：单事务批量修改某供应商下指定模型的配置（未传字段不改动）。"""
+    from app.persistence.database import run_write_locked
+
+    ids = [int(i) for i in dict.fromkeys(model_ids) if int(i) > 0]
+    if not ids:
+        return 0
+    if "context_window" in patch_fields:
+        ctx = patch_fields["context_window"]
+        if not isinstance(ctx, int) or isinstance(ctx, bool) or ctx <= 0:
+            raise ValueError("上下文窗口需为大于 0 的整数")
+
+    def patch(s):
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            raise ValueError("provider not found")
+        rows = list(s.execute(
+            select(Model).where(Model.provider_id == provider_id, Model.id.in_(ids))
+        ).scalars().all())
+        for m in rows:
+            if "is_active" in patch_fields and patch_fields["is_active"] is not None:
+                m.is_active = bool(patch_fields["is_active"])
+            if "is_multimodal" in patch_fields and patch_fields["is_multimodal"] is not None:
+                m.is_multimodal = bool(patch_fields["is_multimodal"])
+                if provider.api_format == "ta3":
+                    meta = dict(m.ta3_meta or {})
+                    meta["multimodal_override"] = True
+                    m.ta3_meta = meta
+            if "context_window" in patch_fields and patch_fields["context_window"] is not None:
+                m.context_window = int(patch_fields["context_window"])
+            if "reasoning_efforts" in patch_fields:
+                effs = patch_fields["reasoning_efforts"]
+                m.reasoning_efforts = list(effs) if effs else []
+        s.commit()
+        return len(rows)
+
+    return await run_write_locked(patch, label=f"provider.models.batch_update.{provider_id}")
+
+
+async def batch_delete_models(
+    db: AsyncSession,
+    provider_id: int,
+    model_ids: list[int],
+) -> int:
+    """plan-20261123-ux-fixes：单事务批量删除某供应商下指定模型（删除前置空外键引用）。"""
+    from app.persistence.database import run_write_locked
+    from app.services.model_service import detach_model_refs
+
+    ids = [int(i) for i in dict.fromkeys(model_ids) if int(i) > 0]
+    if not ids:
+        return 0
+
+    def patch(s):
+        provider = s.get(Provider, provider_id)
+        if provider is None:
+            raise ValueError("provider not found")
+        rows = list(s.execute(
+            select(Model).where(Model.provider_id == provider_id, Model.id.in_(ids))
+        ).scalars().all())
+        found_ids = [m.id for m in rows]
+        if not found_ids:
+            return 0
+        detach_model_refs(s, found_ids)
+        for m in rows:
+            s.delete(m)
+        s.commit()
+        return len(found_ids)
+
+    return await run_write_locked(patch, label=f"provider.models.batch_delete.{provider_id}")
 
 
 async def count_models(db: AsyncSession, provider_id: int) -> int:

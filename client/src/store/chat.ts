@@ -7,6 +7,7 @@ import { wsClient, globalWsClient } from "../api/ws";
 import { questionAttachmentRefs, rejectQuestionSubmission, type QuestionAttachments } from "./questionDrafts";
 import { normalizeApprovalMode, normalizeDraftMode } from "./drafts";
 import { parseRefLines } from "../utils/refLines";
+import type { MessageDelivery } from "../components/composer/queueDelivery";
 // R4：任务完成系统通知（仅桌面版，三档见设置 → 常规）
 import { notifyTaskFinished } from "../utils/taskNotify";
 import { parseServerTime } from "../utils/time";
@@ -95,6 +96,8 @@ export interface RunningToolResult {
   duration_ms?: number;
   /** plan-20261015-browser-agent：截图类工具的预览（落库前即可在时间线原位显示） */
   image?: ToolImage;
+  /** plan-interactive-ui：消息流内嵌交互界面的实时载荷（tool.result 到达即渲染） */
+  ui_payload?: Record<string, unknown>;
   /** plan-flow-redesign：良性退出码 1 的中性状态说明（如「无匹配（退出码 1）」） */
   exit_note?: string;
   returncode?: number;
@@ -132,7 +135,8 @@ export interface QueuedInput {
 /** 浏览器引用贴条（元素标注 / 网页截图 / DOM 快照 / 控制台求值）。 */
 export interface BrowserRef {
   id: string;
-  kind: "element" | "screenshot" | "dom" | "console";
+  kind: "element" | "screenshot" | "dom" | "console" | "page" | "diagnostic" | "selection";
+  sessionId?: number | null;
   url: string;
   pageTitle: string;
   selector?: string;
@@ -168,6 +172,9 @@ export interface SubagentMeta {
   turnId: number | null;
   taskId: number | null;
   status: string;
+  subagentMode?: string | null;
+  subagentRole?: string | null;
+  subagentProfileName?: string | null;
   /** v36 (plan-321-1600 M2): 面板头部展示——起止时间（算用时）、变更文件数、token 用量 */
   startedAt?: string | null;
   endedAt?: string | null;
@@ -388,6 +395,8 @@ interface ChatState {
   tasks: TaskOut[];
   /** v12: 当前会话产物聚合（Artifact 表，含 title/summary/files）。 */
   artifacts: ArtifactOut[];
+  /** plan-20261120-non-tool-capture：撤销/回滚后强制通知摘要面板重拉产物清单。 */
+  productsRefreshTick: number;
   /** 当前正在运行的 turnId（无则 null）。 */
   runningTurnId: number | null;
   isRunning: boolean;
@@ -588,8 +597,9 @@ interface ChatState {
   forkingSessions: Record<number, boolean>;
   sessionLoadError: boolean;
   forkSession: (sessionId: number) => Promise<void>;
-/** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。 */
-sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) => Promise<number | null>;
+/** plan-547: 返回新 turn id（null=未创建，如运行中入队/发送失败），供队列续发失败回队判断。
+ *  plan-20261120-queue-message-mode：delivery="immediate" 时在运行中直接注入当前 turn；默认 "queue" 入队。 */
+sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[], delivery?: MessageDelivery) => Promise<number | null>;
 cancelTurn: () => Promise<void>;
   /** 停止按钮的全量停止：中断主代理（连带子代理）、后台子代理与运行中的工作流（暂停保留进度） */
   stopSessionExecution: () => Promise<void>;
@@ -650,7 +660,7 @@ resumeTurn: () => Promise<void>;
   /** 移除单个浏览器标注引用。 */
   removeComposerBrowserRef: (id: string) => void;
   /** 清空所有浏览器标注引用。 */
-  clearComposerBrowserRefs: () => void;
+  clearComposerBrowserRefs: (sessionId?: number | null) => void;
   clearError: () => void;
   /** plan-308-1542 需求1：把任务执行类错误投递到消息流（附带归属 turnId，可为 null）。 */
   setFlowError: (text: string, turnId?: number | null) => void;
@@ -906,6 +916,9 @@ function mergeSubagentMeta(
       programId: it.workflow?.program_id ?? p?.programId ?? null,
       spawnMessageId: it.spawn_message_id ?? p?.spawnMessageId ?? null,
       messageCount: it.message_count ?? p?.messageCount ?? 0,
+      subagentMode: it.subagent_mode ?? p?.subagentMode ?? null,
+      subagentRole: it.subagent_role ?? p?.subagentRole ?? null,
+      subagentProfileName: it.subagent_profile_name ?? p?.subagentProfileName ?? null,
       status: finalStatus,
       // plan-20261030-subagent-resume-status：续跑成功后旧失败原因必须清掉，
       // 否则卡片与面板还会把上一次的错误原样挂在运行中的条目下面。
@@ -1407,6 +1420,7 @@ function _resetSessionState(): Partial<ChatState> {
     turns: [],
     tasks: [],
     artifacts: [],
+  productsRefreshTick: 0,
     // plan-156-620：建议卡属于会话——切换时先清空，由 loadSuggestion 按新会话重建（此前会残留上个会话的卡片）
     pendingSuggestion: null,
     runningTurnId: null,
@@ -1458,6 +1472,23 @@ function _resetSessionState(): Partial<ChatState> {
   };
 }
 
+/** 按会话 id 改写输入队列：当前会话改顶层投影，其它会话改分桶切片。
+ *
+ * 「立即发送」的排队项在注入在途时用户可能已经切走会话，ACK/失败都必须写回**发起那条消息的
+ * 会话**，否则切走后切片里的 flushing 标记没人复位，回去后 _drainQueue 会把它再发一遍。 */
+function _withQueuedInputs(
+  state: ChatState,
+  sessionId: number,
+  fn: (list: QueuedInput[]) => QueuedInput[],
+): Partial<ChatState> {
+  if (state.currentSessionId === sessionId) return { queuedInputs: fn(state.queuedInputs) };
+  const slice = state.sessionState[sessionId];
+  if (!slice) return {};
+  return {
+    sessionState: { ...state.sessionState, [sessionId]: { ...slice, queuedInputs: fn(slice.queuedInputs) } },
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   projects: [],
   sessions: [],
@@ -1479,6 +1510,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   turns: [],
   tasks: [],
   artifacts: [],
+  productsRefreshTick: 0,
   runningTurnId: null,
   isRunning: false,
   // plan-723-3029 R3：初值 null——只有切回有缓存快照的会话时才由 _sliceToView 置位
@@ -1760,6 +1792,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   createSession: async (projectId, title, opts) => {
+    const navigation = _sessionNavigationVersion;
+    const { currentSessionId, currentProjectId } = get();
     try {
       // plan-547: 模型与权限模式在创建时一次落准（避免事后 updateSession 竞态与 UI 不同步）
       // plan-676: 首页目标同样随创建一次落准
@@ -1775,7 +1809,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         goal_text: opts?.goal_text ?? undefined,
       });
       set((s) => ({ sessions: [session, ...s.sessions] }));
-      await get().switchSession(session.id);
+      // plan-20261122-message-send：创建请求迟到时，首条消息不能打断已发生的会话切换。
+      if (_sessionNavigationVersion === navigation && get().currentSessionId === currentSessionId
+        && get().currentProjectId === currentProjectId) await get().switchSession(session.id);
       return session.id;
     } catch (e) {
       set({ error: String(e) });
@@ -1785,6 +1821,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: async (sessionId, fromHist) => {
     _sessionNavigationVersion += 1;
+    const navigation = _sessionNavigationVersion;
     // 导航历史入栈（histGo 触发的切换跳过，避免重复入栈）
     if (!fromHist) {
       const h = get().sessionHist;
@@ -1934,12 +1971,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 胶囊一直显示最后一步在跑。心跳 60s 无事件即 refreshTurns 纠偏。
       if (running) _startHeartbeat();
 
-      // 加载会话 token 占用估算（解决重启后 usage 为 null 显示 0% 问题）
-      try {
-        const usage = await api.getSessionUsage(sessionId);
+      // plan-20261122-message-send：占用统计只用于展示，首页首发无需等它完成。
+      const usageAtLoad = get().usage;
+      void api.getSessionUsage(sessionId).then((usage) => {
         // plan-560-2311 E5：请求期间可能已经切走——usage 是当前会话的顶层状态，
         // 写入别的会话会把旧会话的占用率显示在新会话胶囊上（切走越频繁越明显）。
-        if (get().currentSessionId !== sessionId) return;
+        if (get().currentSessionId !== sessionId || _sessionNavigationVersion !== navigation
+          || get().usage !== usageAtLoad) return;
         set({ usage: {
           input: usage.input,
           cached_input: usage.cached_input,
@@ -1950,7 +1988,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agent_name: usage.agent_name,
           source: usage.source, // v1.1: 口径标注（api_last / est）
         }});
-      } catch { /* usage 加载失败不阻塞 */ }
+      }).catch(() => { /* 占用统计独立于会话加载 */ });
 
       // v11/v23: 恢复变更审核数据——∪(含 artifact 消息的 turn, 最近 10 个已完成 turn)。
       // 贴条需展示「从开始到现在」的未审核分组；artifact 消息精准标记有变更的历史 turn，
@@ -2180,7 +2218,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendTurn: async (content, attachments, reasoningEffort, mode, modelId, refs) => {
+  sendTurn: async (content, attachments, reasoningEffort, mode, modelId, refs, delivery = "queue") => {
     // plan-723-3029 R3：runtimeHintTurnId 只用于行为口判定（见 ChatState 上的注释）
     const { currentSessionId, isRunning, runtimeHintTurnId } = get();
     if (!currentSessionId || get().sessionLoading || get().sessionLoadError) return null;
@@ -2205,20 +2243,130 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       return null;
     }
-    /* plan-723-3029 R3：hint 存在时同样走排队分支——复位窗口里后端 turn 可能仍在跑，
+    /* plan-723-3029 R3：hint 存在时同样走运行中分支——复位窗口里后端 turn 可能仍在跑，
      * 直发 api.createTurn 会双发（后端 create_turn 无会话级并发守卫，engine.start_turn 只防同 turn 重入）。 */
     if (isRunning || runtimeHintTurnId != null) {
-      set((s) => ({
-        queuedInputs: [...s.queuedInputs, {
-          id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          content,
-          attachments,
-          reasoningEffort,
-          mode,
-          refs,
-        }],
-      }));
-      return null;
+      if (delivery !== "immediate") {
+        set((s) => ({
+          queuedInputs: [...s.queuedInputs, {
+            id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            content,
+            attachments,
+            reasoningEffort,
+            mode,
+            refs,
+          }],
+        }));
+        return null;
+      }
+
+      // plan-20261120-queue-message-mode：立即发送——注入运行中的 turn（不进入排队托盘）
+      const findBackendRunningTurnId = async (): Promise<number | null> => {
+        try {
+          const turns = await api.listTurns(currentSessionId);
+          const running = turns
+            .filter((t) => t.status === "running")
+            .sort((a, b) => b.id - a.id)[0];
+          return running ? running.id : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const tryInjectToTurn = async (targetTurnId: number): Promise<{ injected: boolean; notRunning: boolean }> => {
+        const optimisticId = nextOptimisticMessageId();
+        const optimisticInjectedMsg: MessageOut = {
+          id: optimisticId,
+          session_id: currentSessionId,
+          turn_id: targetTurnId,
+          thread_id: null,
+          sender_type: "user",
+          sender_id: null,
+          msg_type: "text",
+          content: {
+            text: content || "",
+            ...(hasAtts ? { attachments } : {}),
+            ...(refs && refs.length > 0 ? { refs } : {}),
+          },
+          token_usage: 0,
+          created_at: new Date().toISOString(),
+        };
+        const showOptimistic = get().currentSessionId === currentSessionId;
+        if (showOptimistic) get().addMessage(optimisticInjectedMsg);
+        const removeOptimistic = () => {
+          if (get().currentSessionId !== currentSessionId) return;
+          set((s) => ({ messages: s.messages.filter((m) => m.id !== optimisticId) }));
+        };
+        try {
+          const res = await api.injectTurnInput(targetTurnId, {
+            content,
+            attachments,
+            model_id: modelId ?? undefined,
+            refs,
+          });
+          if (res.ok) return { injected: true, notRunning: false };
+          removeOptimistic();
+          return { injected: false, notRunning: true };
+        } catch (e) {
+          removeOptimistic();
+          const stNow = get();
+          const stillMine = stNow.currentSessionId === currentSessionId;
+          // plan-20261120-queue-message-mode：超时/断连时服务端可能已经落库并注入，直接回退排队
+          // 会让同一条消息出现两次（后端 inject_input 不按 request_id 去重）——先回读确认。
+          let persisted = false;
+          if (stillMine) {
+            const text = content || "";
+            try {
+              const msgs = await api.listSessionMessages(currentSessionId);
+              persisted = msgs.some((m) => m.sender_type === "user" && m.turn_id === targetTurnId
+                && String((m.content as { text?: string } | undefined)?.text ?? "") === text);
+            } catch { /* 回读失败按未入库处理：宁可排队也不丢消息 */ }
+          }
+          if (persisted) {
+            if (get().currentSessionId === currentSessionId) void get().refreshMessages();
+            return { injected: true, notRunning: false };
+          }
+          if (stillMine && (stNow.isRunning || stNow.runtimeHintTurnId != null)) {
+            set((s) => ({
+              queuedInputs: [...s.queuedInputs, {
+                id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                content, attachments, reasoningEffort, mode, refs,
+              }],
+              error: `直接发送失败，已加入排队：${String(e)}`,
+            }));
+          } else if (stillMine) {
+            get().setFlowError(String(e), null);
+          }
+          return { injected: false, notRunning: false };
+        }
+      };
+
+      let targetTurnId = get().runningTurnId ?? get().runtimeHintTurnId;
+      if (targetTurnId == null) {
+        targetTurnId = await findBackendRunningTurnId();
+      }
+      if (targetTurnId != null) {
+        const first = await tryInjectToTurn(targetTurnId);
+        if (first.injected) return targetTurnId;
+        if (!first.notRunning) return null;
+        // 原 turn 恰好结束：再查一次后端是否已开启新 turn，若已彻底空闲则回落新建 turn
+        const nextRunningId = await findBackendRunningTurnId();
+        if (nextRunningId != null && nextRunningId !== targetTurnId) {
+          const retry = await tryInjectToTurn(nextRunningId);
+          if (retry.injected) return nextRunningId;
+          if (!retry.notRunning) return null;
+        }
+      }
+      // 后端已无运行中 turn：清理陈旧运行态，直接走下方新建 turn 流程立即发出
+      if (get().currentSessionId === currentSessionId) {
+        _clearHeartbeat();
+        set((s) => ({
+          isRunning: false,
+          runningTurnId: null,
+          runtimeHintTurnId: null,
+          ...patchSession(s, currentSessionId, (x) => setSessionRunning(x, false)),
+        }));
+      }
     }
     _sendingGuard = true;
     // 立即添加用户消息到本地状态，实现即时显示（流式体验）
@@ -2300,6 +2448,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!_hasOtherRunningSession(currentSessionId)) _clearHeartbeat();
         set((s) => ({
           isRunning: false, runningTurnId: null, pendingPlan: null, pendingPlanTurn: null,
+          messages: s.messages.filter((m) => m.id !== optimisticUserMsg.id),
           ...patchSession(s, currentSessionId, (x) => setSessionRunning(x, false)),
         }));
       } else {
@@ -2308,8 +2457,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!_hasOtherRunningSession(currentSessionId)) _clearHeartbeat();
       }
       // plan-308-1542 需求1：发送失败属任务执行类错误——只进消息流错误卡，不弹右上角 Toast。
-      // 切走时不写到新会话的消息流（错误卡属于发起失败的会话）。
+      // 切走时错误卡和临时消息仍归原会话，避免给新会话显示错误。
       if (stillOnSession) get().setFlowError(String(e), null);
+      else set((s) => {
+        const slice = s.sessionState[currentSessionId];
+        if (!slice) return {};
+        return {
+          sessionState: {
+            ...s.sessionState,
+            [currentSessionId]: {
+              ...slice,
+              isRunning: false,
+              messages: slice.messages.filter((m) => m.id !== optimisticUserMsg.id),
+              flowError: { text: String(e), turnId: null, at: Date.now() },
+            },
+          },
+        };
+      });
       return null;
     } finally {
       _sendingGuard = false;
@@ -2521,6 +2685,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // plan-404-1892（图5）：进入新任务空态——各处入口此前手写清空子集，漏 artifacts / turnChanges /
   // plansByTurn / todos / 子代理数据等，导致新任务下右侧任务摘要继续渲染上一会话产物。
   startNewTask: () => {
+    _sessionNavigationVersion += 1;
     set({ currentSessionId: null, ..._resetSessionState() });
   },
 
@@ -2577,7 +2742,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           delete next[id];
           delete nextSig[id];
         }
-        return { turnChanges: next, turnChangesSig: nextSig };
+        return { turnChanges: next, turnChangesSig: nextSig, productsRefreshTick: s.productsRefreshTick + 1 };
       });
       void get().loadRevertLock(sid);
       // 后端已删除该组写盘记录 → 重拉返回空，卡片随之消失（双保险）
@@ -2995,7 +3160,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   addComposerBrowserRef: (ref) => set((s) => ({ composerBrowserRefs: [...s.composerBrowserRefs, ref] })),
   removeComposerBrowserRef: (id) => set((s) => ({ composerBrowserRefs: s.composerBrowserRefs.filter((r) => r.id !== id) })),
-  clearComposerBrowserRefs: () => set({ composerBrowserRefs: [] }),
+  clearComposerBrowserRefs: (sessionId) => set((state) => ({
+    composerBrowserRefs: sessionId === undefined ? [] : state.composerBrowserRefs.filter((ref) => ref.sessionId != null && ref.sessionId !== sessionId),
+  })),
   clearError: () => set({ error: null }),
   setFlowError: (text, turnId = null) => set({ flowError: { text: String(text), turnId, at: Date.now() } }),
   clearFlowError: () => set({ flowError: null }),
@@ -3055,28 +3222,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
    * 无运行 turn 时等效出队直发；注入失败保留队列走 turn 结束续发兜底。 */
   flushQueuedInput: async (id) => {
     const st = get();
+    const sessionId = st.currentSessionId;
     const q = st.queuedInputs.find((x) => x.id === id);
-    if (!q || q.flushing) return;
+    if (!q || q.flushing || sessionId == null) return;
     if (st.runningTurnId == null) {
       set((s) => ({ queuedInputs: s.queuedInputs.filter((x) => x.id !== id) }));
-      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode, undefined, q.refs);
+      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode, undefined, q.refs, "immediate");
       return;
     }
+    const targetTurnId = st.runningTurnId;
     set((s) => ({
       queuedInputs: s.queuedInputs.map((x) => (x.id === id ? { ...x, flushing: true } : x)),
     }));
     try {
-      await api.injectTurnInput(st.runningTurnId, {
+      const res = await api.injectTurnInput(targetTurnId, {
         request_id: q.id,
         content: q.content,
         attachments: q.attachments,
         refs: q.refs,
       });
-      // 注入成功由 user_input.injected 事件从队列移除（避免双发）
+      if (res.ok) {
+        /* 注入已确认入队：按 id 从**发起会话**的队列摘除。
+         * 不能只依赖 user_input.injected 事件：它没有 session_id，切走会话后过滤不到原会话切片，
+         * 那条 flushing 项会在回去后被 _drainQueue 当成普通队头再发一次（同一条消息发两遍）。 */
+        set((s) => _withQueuedInputs(s, sessionId, (list) => list.filter((x) => x.id !== id)));
+        return;
+      }
+      /* plan-20261120-queue-message-mode：注入在途时用户可能已经切走会话。
+       * 后端明确返回 queued=false（turn 已结束、落库副本已软删），所以先复位在途标记并留在
+       * 原会话队列里等 turn 结束时续发——绝不能被 _drainQueue 当成「已送达」丢掉。 */
+      set((s) => _withQueuedInputs(s, sessionId,
+        (list) => list.map((x) => (x.id === id ? { ...x, flushing: false } : x))));
+      if (get().currentSessionId !== sessionId) return;
+      // turn 恰好已结束：摘掉队列项，经 sendTurn(..., "immediate") 立即发送
+      set((s) => ({ queuedInputs: s.queuedInputs.filter((x) => x.id !== id) }));
+      await get().sendTurn(q.content, q.attachments, q.reasoningEffort, q.mode, undefined, q.refs, "immediate");
     } catch (e) {
-      set((s) => ({
-        queuedInputs: s.queuedInputs.map((x) => (x.id === id ? { ...x, flushing: false } : x)),
-      }));
+      // 失败同样要写回发起会话：切走时只改当前视图会把原切片永久钉在 flushing。
+      set((s) => _withQueuedInputs(s, sessionId,
+        (list) => list.map((x) => (x.id === id ? { ...x, flushing: false } : x))));
+      if (get().currentSessionId !== sessionId) return;
       set({ error: `立即发送失败：${String(e)}（已保留队列，任务结束后自动发送）` });
     }
   },
@@ -3095,6 +3280,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!currentSessionId || isRunning || runtimeHintTurnId != null || pendingPlan || _sendingGuard) return;
         const next = queuedInputs[0];
         if (!next) return;
+        // 注入请求在途（flushing）：既不能重发也不能出队，等 HTTP 结果复位或摘除后再续发。
+        if (next.flushing) return;
         set((s) => ({ queuedInputs: s.queuedInputs.slice(1) }));
         const turnId = await get().sendTurn(next.content, next.attachments, next.reasoningEffort, next.mode, undefined, next.refs);
         if (turnId == null) {
@@ -3586,6 +3773,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
            * 随后的 refreshMessages 再按 DB 真值补齐（无 turn_id 的独立消息不参与）。 */
           return {
             ...(changed ? { turnChanges: next, turnChangesSig: nextSig } : {}),
+            productsRefreshTick: s.productsRefreshTick + 1,
             messages: s.messages.filter((m) => m.turn_id == null || m.turn_id < rollbackTurnId),
           };
         });
@@ -3624,8 +3812,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               delete next[id];
               delete nextSig[id];
             }
-            return { turnChanges: next, turnChangesSig: nextSig };
+            return { turnChanges: next, turnChangesSig: nextSig, productsRefreshTick: s.productsRefreshTick + 1 };
           });
+        } else {
+          set((s) => ({ productsRefreshTick: s.productsRefreshTick + 1 }));
         }
         const revCur = get().currentSessionId;
         if (revCur != null) void get().loadRevertLock(revCur);
@@ -3764,6 +3954,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // 工作流节点子代理：启动事件携带所属程序编号与派发时刻（服务端 _agent_started_extra），卡片据此即刻定位
           const programId = payload.workflow_program_id != null ? Number(payload.workflow_program_id) : null;
           const spawnMessageId = payload.spawn_message_id != null ? Number(payload.spawn_message_id) : null;
+          const subagentMode = typeof payload.subagent_mode === "string" && payload.subagent_mode ? payload.subagent_mode : null;
+          const subagentProfileName = typeof payload.subagent_profile_name === "string" ? payload.subagent_profile_name : null;
+          const subagentRole = typeof payload.subagent_role === "string" && payload.subagent_role ? payload.subagent_role : null;
           set((s) => {
             const prev = s.subagentMeta[aid];
             /* plan-20261018-subagent-status-fix：终态不可逆。
@@ -3794,6 +3987,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...(resumedAgain ? { error: null } : {}),
                   programId: programId ?? prev?.programId ?? null,
                   spawnMessageId: spawnMessageId ?? prev?.spawnMessageId ?? null,
+                  subagentMode: subagentMode ?? prev?.subagentMode ?? null,
+                  subagentRole: subagentRole ?? prev?.subagentRole ?? null,
+                  subagentProfileName: subagentProfileName ?? prev?.subagentProfileName ?? null,
                 },
               },
             };
@@ -3919,6 +4115,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             image: (payload.image && typeof (payload.image as { url?: unknown }).url === "string"
               ? (payload.image as ToolImage)
               : prev?.image),
+            ui_payload: (payload.ui_payload && typeof payload.ui_payload === "object"
+              ? (payload.ui_payload as Record<string, unknown>)
+              : prev?.ui_payload),
             exit_note: (typeof payload.exit_note === "string" ? payload.exit_note : prev?.exit_note),
             returncode: (typeof payload.returncode === "number" ? payload.returncode : prev?.returncode),
           };

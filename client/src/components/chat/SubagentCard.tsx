@@ -8,7 +8,7 @@ import { Tooltip } from "../ui";
 import { parseUtc } from "../../utils/time";
 import { useRunningTicker } from "./useRunningTicker";
 import { subagentState, type SubagentState } from "./subagentStatus";
-import { SubagentAvatar, SUBAGENT_ROLE_LABEL, resolveSubagentRole } from "./SubagentAvatar";
+import { SubagentAvatar, SUBAGENT_ROLE_LABEL, resolveSubagentRole, type SubagentRoleArgs } from "./SubagentAvatar";
 import { subagentActivity } from "./subagentActivity";
 
 function fmtElapsed(startMs: number, endMs: number): string {
@@ -38,7 +38,10 @@ export interface SubagentMetaLite {
   startedAt?: string | null;
   endedAt?: string | null;
   workflowKind?: string | null;
-  roleArgs?: { mode?: string; explore?: boolean; purpose?: string; agent_type?: string };
+  subagentMode?: string | null;
+  subagentRole?: string | null;
+  subagentProfileName?: string | null;
+  roleArgs?: SubagentRoleArgs;
 }
 
 export const SubagentCard = memo(function SubagentCard({ meta }: { meta: SubagentMetaLite }) {
@@ -46,6 +49,8 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
   const status = useChatStore((s) => s.subagentMeta[meta.agentId]?.status ?? meta.status);
   const startedAtRaw = useChatStore((s) => s.subagentMeta[meta.agentId]?.startedAt ?? meta.startedAt ?? null);
   const endedAtRaw = useChatStore((s) => s.subagentMeta[meta.agentId]?.endedAt ?? meta.endedAt ?? null);
+  const storeMode = useChatStore((s) => s.subagentMeta[meta.agentId]?.subagentMode ?? null);
+  const storeRole = useChatStore((s) => s.subagentMeta[meta.agentId]?.subagentRole ?? null);
   const state = subagentState(status);
   const running = state === "running";
   const failed = state === "failed";
@@ -64,9 +69,12 @@ export const SubagentCard = memo(function SubagentCard({ meta }: { meta: Subagen
   const role = resolveSubagentRole({
     name: meta.name,
     workflowKind: meta.workflowKind,
+    subagentMode: meta.subagentMode ?? storeMode,
+    subagentRole: meta.subagentRole ?? storeRole,
     roleArgs: meta.roleArgs,
   });
-  const roleLabel = SUBAGENT_ROLE_LABEL[role];
+  const profileName = useChatStore((s) => s.subagentMeta[meta.agentId]?.subagentProfileName);
+  const roleLabel = meta.subagentProfileName ?? profileName ?? SUBAGENT_ROLE_LABEL[role];
   const displayTitle = meta.name.replace(/^探索[·:：\s]*/, "") || meta.name;
 
   // plan-20261114-message-flow：只在本线程输入变化时重算，主会话逐字更新不会扫描所有子代理历史。

@@ -10,9 +10,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { ScheduledRunStatus, ScheduledTaskOut } from "@chatcoder/shared";
 import { IconClock, IconPlay, IconPlus, IconRefresh, IconChevronDown, IconTrash } from "../icons";
-import { Collapse, Empty, Tooltip } from "../ui";
+import { Button, Collapse, Empty, IconButton, PageActions, Section, Switch, Tooltip } from "../ui";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Sw } from "./shared";
 import {
   absTime, describeCron, relTime, ScheduledTaskFormModal,
 } from "./ScheduledTaskFormModal";
@@ -82,19 +81,17 @@ export function ScheduledPanel() {
 
   return (
     <div className="sc-page">
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void load()}>刷新</Button>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditing(null); setShowForm(true); }}>新建自动化</Button>
+      </PageActions>
+
       <div className="sched-note">
         自动化任务会在到点时以你的身份向指定会话注入指令并启动一轮对话。服务端未运行时不会触发，
         错过的触发点按任务的「错过策略」处理。
       </div>
 
       {err && <div className="sched-error">{err}</div>}
-
-      <div className="settings-toolbar">
-        <button className="btn btn-ghost btn-sm" onClick={() => void load()}><IconRefresh size={13} /> 刷新</button>
-        <button className="btn btn-primary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}>
-          <IconPlus size={13} /> 新建自动化
-        </button>
-      </div>
 
       <ScheduledTaskFormModal
         open={showForm}
@@ -103,69 +100,69 @@ export function ScheduledPanel() {
         onSaved={() => void load()}
       />
 
-      <div className="settings-resource-list sc-list">
-        {tasks.map((t) => {
-          const st = t.last_status ? STATUS_META[t.last_status] : null;
-          const preview = previews[t.id];
-          return (
-            <div key={t.id} className="settings-resource-item sched-item sc-row">
-              {/* plan-91-393：与其它列表一致的图标块 */}
-              <span className="sc-tile"><IconClock size={15} /></span>
-              <div className="settings-resource-info sc-row-main">
-                <div className="settings-resource-name">
-                  {t.name}
-                  {st && <span className="sched-status" style={{ color: st.color, borderColor: st.color }}>{st.label}</span>}
+      <Section title={tasks.length > 0 ? `自动化任务（${tasks.length}）` : undefined} bare>
+        <div className="sc-list">
+          {tasks.map((t) => {
+            const st = t.last_status ? STATUS_META[t.last_status] : null;
+            const preview = previews[t.id];
+            return (
+              <div key={t.id} className="sc-row sched-item">
+                {/* plan-91-393：与其它列表一致的图标块 */}
+                <span className="sc-tile"><IconClock size={15} /></span>
+                <div className="sc-row-main">
+                  <div className="sc-row-title">
+                    {t.name}
+                    {st && <span className="sched-status" style={{ color: st.color, borderColor: st.color }}>{st.label}</span>}
+                  </div>
+                  <div className="sc-row-desc">
+                    <Tooltip content={t.cron}><span className="sched-human">{describeCron(t.cron)}</span></Tooltip>
+                    <span>会话 #{t.session_id}</span>
+                    {t.missed_policy === "run_once" && <span className="sched-tag">错过补跑</span>}
+                  </div>
+                  <div className="sched-times">
+                    <Tooltip content={absTime(t.next_run_at)}>
+                      <span>
+                        下次运行：<b>{t.enabled ? relTime(t.next_run_at, nowMs) : "已停用"}</b>
+                      </span>
+                    </Tooltip>
+                    <Tooltip content={absTime(t.last_run_at)}><span>上次：{relTime(t.last_run_at, nowMs)}</span></Tooltip>
+                  </div>
+                  {t.last_error && <div className="sched-last-error">{t.last_error}</div>}
+                  {/* plan-20261019-motion-sweep：排程预览展开走 Collapse（此前只有淡入、没有高度过渡与收起动画） */}
+                  <Collapse open={expandedPreview === t.id && !!preview} lazy className="in-gap">
+                    {() => (
+                      <div className="sched-preview">
+                        {(preview ?? []).length === 0
+                          ? <span className="sched-preview-empty">该表达式不会触发</span>
+                          : (preview ?? []).map((p, i) => <Tooltip key={i} content={p}><div>{i + 1}. {absTime(p)}</div></Tooltip>)}
+                      </div>
+                    )}
+                  </Collapse>
                 </div>
-                <div className="settings-resource-desc">
-                  <Tooltip content={t.cron}><span className="sched-human">{describeCron(t.cron)}</span></Tooltip>
-                  <span>会话 #{t.session_id}</span>
-                  {t.missed_policy === "run_once" && <span className="sched-tag">错过补跑</span>}
-                </div>
-                <div className="sched-times">
-                  <Tooltip content={absTime(t.next_run_at)}>
-                    <span>
-                      下次运行：<b>{t.enabled ? relTime(t.next_run_at, nowMs) : "已停用"}</b>
-                    </span>
+                <div className="sc-row-actions">
+                  <Switch checked={t.enabled} onChange={(v) => void handleToggle(t, v)} aria-label={`启用 ${t.name}`} />
+                  <Tooltip content="立即试跑一次">
+                    <Button variant="ghost" size="sm" icon={<IconPlay size={12} />} disabled={busyId === t.id} onClick={() => void handleRun(t)}>
+                      试跑
+                    </Button>
                   </Tooltip>
-                  <Tooltip content={absTime(t.last_run_at)}><span>上次：{relTime(t.last_run_at, nowMs)}</span></Tooltip>
+                  <Tooltip content="预览接下来 5 次触发时刻">
+                    <Button variant="ghost" size="sm" icon={<IconChevronDown size={12} />} disabled={busyId === t.id} onClick={() => void togglePreview(t)}>
+                      排程
+                    </Button>
+                  </Tooltip>
+                  <Button variant="ghost" size="sm" onClick={() => { setEditing(t); setShowForm(true); }}>编辑</Button>
+                  <IconButton size="xs" tone="danger" title="删除任务" aria-label="删除任务" icon={<IconTrash size={12} />} onClick={() => setConfirmDelete(t)} />
                 </div>
-                {t.last_error && <div className="sched-last-error">{t.last_error}</div>}
-                {/* plan-20261019-motion-sweep：排程预览展开走 Collapse（此前只有淡入、没有高度过渡与收起动画） */}
-                <Collapse open={expandedPreview === t.id && !!preview} lazy className="in-gap">
-                  {() => (
-                    <div className="sched-preview">
-                      {(preview ?? []).length === 0
-                        ? <span className="sched-preview-empty">该表达式不会触发</span>
-                        : (preview ?? []).map((p, i) => <Tooltip key={i} content={p}><div>{i + 1}. {absTime(p)}</div></Tooltip>)}
-                    </div>
-                  )}
-                </Collapse>
               </div>
-              <div className="settings-resource-actions">
-                <Sw checked={t.enabled} onChange={(v) => void handleToggle(t, v)} />
-                <Tooltip content="立即试跑一次">
-                  <button className="btn btn-ghost btn-sm" disabled={busyId === t.id} onClick={() => void handleRun(t)}>
-                    <IconPlay size={12} /> 试跑
-                  </button>
-                </Tooltip>
-                <Tooltip content="预览接下来 5 次触发时刻">
-                  <button className="btn btn-ghost btn-sm" disabled={busyId === t.id} onClick={() => void togglePreview(t)}>
-                    <IconChevronDown size={12} /> 排程
-                  </button>
-                </Tooltip>
-                <button className="btn btn-ghost btn-sm" onClick={() => { setEditing(t); setShowForm(true); }}>编辑</button>
-                <Tooltip content="删除任务">
-                  <button className="btn btn-ghost btn-sm" aria-label="删除任务" onClick={() => setConfirmDelete(t)}><IconTrash size={12} /></button>
-                </Tooltip>
-              </div>
-            </div>
-          );
-        })}
-        {tasks.length === 0 && (
-          <Empty title="暂无自动化任务" desc="定时让嗒嗒去跑一个任务，比如每天早上汇总昨天的提交"
-            action={<button className="btn btn-secondary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}><IconPlus size={12} /> 新建自动化</button>} />
-        )}
-      </div>
+            );
+          })}
+          {tasks.length === 0 && (
+            <Empty title="暂无自动化任务" desc="定时让嗒嗒去跑一个任务，比如每天早上汇总昨天的提交"
+              action={<Button variant="secondary" size="sm" icon={<IconPlus size={12} />} onClick={() => { setEditing(null); setShowForm(true); }}>新建自动化</Button>} />
+          )}
+        </div>
+      </Section>
 
       <ConfirmDialog
         open={confirmDelete !== null}

@@ -10,7 +10,7 @@ from typing import Any
 
 from app.orchestration.tools.base import Tool, ToolContext, ToolResult
 from app.orchestration.tools.read_cache import UNCHANGED_STUB, norm_path
-from app.orchestration.tools.safe_path import safe_resolve_read
+from app.orchestration.tools.safe_path import safe_resolve, safe_resolve_read
 from app.orchestration.tools.text_edit import TextFileError, read_text_file
 
 _DEFAULT_LINES = 600  # 默认行数：多数源文件一次读完，减少分段重读
@@ -110,7 +110,8 @@ class FsReadTool(Tool):
             limit = _DEFAULT_LINES
 
         # 附件目录兜底：用户消息附件在工作区外的 uploads 目录，允许只读
-        target = safe_resolve_read(ctx.workspace_root, path)
+        resolver = safe_resolve if ctx.workspace_read_only else safe_resolve_read
+        target = resolver(ctx.workspace_root, path)
         # plan-20261020-pts：上下文折叠的落盘文件（.compact-cache/<hash>.txt）——旧会话的占位提示指向全局工作区，
         # 会话工作区里没有时回落过去读（本软件自己的缓存，不走工作区外读取的审批）
         if target is None or not target.exists():

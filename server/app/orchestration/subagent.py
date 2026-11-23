@@ -190,6 +190,7 @@ class SubagentManager:
     def __init__(self, session_id: int) -> None:
         self.session_id = session_id
         self._handles: dict[int, SubagentHandle] = {}
+        self.dispatch_lock = asyncio.Lock()
         # v36 (plan-321-1600 M3): 子代理终态“完成通知”队列 + 已读集合。
         # 对齐 ZCode（background-task-notifications）的 claim 语义：终态入队一次；
         # 主代理若已通过 collect_results 读到该结果，则不再重复推送，
@@ -214,7 +215,9 @@ class SubagentManager:
               task_title: str = "", task_description: str = "",
               context_snapshot: dict | None = None,
               reasoning_effort: str | None = None,
-              subagent_mode: str | None = None) -> int:
+              subagent_mode: str | None = None,
+              write_scope: tuple[str, ...] = (),
+              validation_resources: tuple[str, ...] = ()) -> int:
         """后台启动子代理 agent_loop，返回 subagent id（派发即返回，不阻塞调用方）。
 
         plan-541-2264：同步派发能力已彻底删除，这里是唯一的派发入口。
@@ -243,7 +246,10 @@ class SubagentManager:
             subagent_mode=subagent_mode, reasoning_effort=reasoning_effort, token_budget=token_budget,
             reply_language=getattr(context_bundle, "reply_language", "auto"),
             reply_language_source=getattr(context_bundle, "reply_language_source", "user"),
+            subagent_role=getattr(agent, "subagent_role", None),
         )
+        handle.run_spec["dispatch_scope"] = list(write_scope)
+        handle.run_spec["validation_resources"] = list(validation_resources)
         handle.live_messages = list(context_bundle.to_messages())
         handle.task = asyncio.create_task(self._drive(
             handle, agent_id=agent.id, task_id=getattr(task, "id", None), turn_id=turn_id,
@@ -719,6 +725,23 @@ class SubagentManager:
         """
         return bool(self._completion_queue)
 
+    def dispatch_conflict(self, write_scope: tuple[str, ...],
+                          validation_resources: tuple[str, ...]) -> str | None:
+        from app.orchestration.workflow.conflicts import scopes_overlap
+
+        for handle in self._handles.values():
+            if handle.status != "running" or (handle.task and handle.task.done()):
+                continue
+            spec = handle.run_spec or {}
+            if spec.get("subagent_mode") == "readonly":
+                continue
+            occupied = spec.get("dispatch_scope") or ()
+            if not occupied or not write_scope or any(
+                scopes_overlap(a.casefold(), b.casefold()) for a in write_scope for b in occupied
+            ) or set(validation_resources).intersection(spec.get("validation_resources") or ()):
+                return f"成员 #{handle.agent_id} 的写入范围或验证资源可能冲突，请等它完成后再派发。"
+        return None
+
     def pending_count(self) -> int:
         # 任务已结束而状态仍停在 running（驱动循环收尾时抛异常）的 handle 已经没有人在跑：
         # 不能再算运行中，否则主代理的「等待子代理结束」会空等到总超时，并发名额也被永久占着
@@ -891,7 +914,8 @@ def _sanitize_messages(messages: list) -> list:
 
 
 def _build_run_spec(*, agent, task_id, turn_id, task_title, workspace, tool_schemas, subagent_mode,
-                    reasoning_effort, token_budget, reply_language, reply_language_source) -> dict:
+                    reasoning_effort, token_budget, reply_language, reply_language_source,
+                    subagent_role=None) -> dict:
     """运行参数（可落库的 JSON 子集）。工具 schema 按名保存，续跑时重建。"""
     names = [s.get("function", {}).get("name") for s in (tool_schemas or [])]
     return {
@@ -901,6 +925,8 @@ def _build_run_spec(*, agent, task_id, turn_id, task_title, workspace, tool_sche
         "workspace": workspace or "",
         "tool_names": [n for n in names if n],
         "subagent_mode": subagent_mode,
+        "subagent_role": subagent_role or getattr(agent, "subagent_role", None),
+        "subagent_profile_name": getattr(agent, "subagent_profile_name", None),
         "reasoning_effort": reasoning_effort,
         "token_budget": token_budget,
         "reply_language": reply_language,
@@ -952,12 +978,33 @@ def _checkpoint_payload(handle: "SubagentHandle", spec: dict, reason: str) -> di
     }
 
 
-async def _restore_tool_schemas(spec: dict) -> list[dict]:
+async def _restore_tool_schemas(spec: dict, session_id: int | None = None) -> list[dict]:
     """plan-20261107-subagent-mode-tools：按执行模式重建，旧工具快照不再充当隐藏白名单。"""
     from app.orchestration.subagent_tools import available_subagent_tools, SUBAGENT_OWN_TOOLS
 
     async with async_session_factory() as db:
         schemas = await available_subagent_tools(db, readonly=spec.get("subagent_mode") == "readonly")
+        if session_id is not None and spec.get("subagent_profile_name"):
+            from app.persistence.models.message import Session
+            from app.services.permission_profile_service import mcp_allowed_tools, resolve_tools
+
+            session = await db.get(Session, session_id)
+            mode = getattr(session, "permission_mode", None) or "agent"
+            allowed = resolve_tools(mode, {schema["function"]["name"] for schema in schemas})
+            mcp_allowed = mcp_allowed_tools(mode)
+            schemas = [schema for schema in schemas
+                       if ((mcp_allowed is None or name in mcp_allowed) if
+                           (name := schema["function"]["name"]).startswith("mcp_")
+                           else (allowed is None or name in allowed))]
+    if spec.get("subagent_profile_name"):
+        from app.orchestration.subagent_tools import restrict_member_tools
+
+        schemas = restrict_member_tools(schemas, readonly=spec.get("subagent_mode") == "readonly",
+                                        parent_tools=frozenset(spec.get("tool_names") or ()))
+        if "request_write_scope" in (spec.get("tool_names") or ()):
+            from app.orchestration.workflow.guard import REQUEST_SCOPE_SCHEMA
+
+            schemas.append(REQUEST_SCOPE_SCHEMA)
     return [*schemas, *SUBAGENT_OWN_TOOLS]
 
 
@@ -1035,6 +1082,15 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
         ck = dict(row.checkpoint_json or {}) if row.checkpoint_json else {}
         db_status = row.status
         row_name = row.name
+        row_mode = getattr(row, "subagent_mode", None)
+        row_role = getattr(row, "subagent_role", None)
+        if getattr(row, "subagent_profile_name", None):
+            from app.persistence.models.message import Session
+            from app.services.permission_profile_service import is_readonly_like
+
+            session = await s.get(Session, session_id)
+            readonly_only = readonly_only or is_readonly_like(getattr(session, "permission_mode", None) or "agent")
+
 
     if not ck.get("messages"):
         return "not_resumable", "没有可用的检查点（任务已完成或从未运行）"
@@ -1066,7 +1122,7 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     handle.last_activity_at = handle.started_at
     handle.stall_detected = False
     handle.run_spec = spec
-    handle.tool_schemas = await _restore_tool_schemas(spec)
+    handle.tool_schemas = await _restore_tool_schemas(spec, session_id)
     handle.live_messages = messages
     manager._handles[agent_id] = handle
     # 续跑是新一轮交付：清除该子代理的旧“已读/旧完成通知”，保证续跑结果会正常送达主代理
@@ -1087,12 +1143,15 @@ async def resume_subagent(session_id: int, agent_id: int, *, turn_id: int,
     # 与派发路径一致：前端卡片重新进入运行态、待完成计数同步（失败不影响续跑本身）
     try:
         from app.orchestration.agent_events import broadcast
+        _sub_mode = row_mode or spec.get("subagent_mode")
+        _sub_role = row_role or spec.get("subagent_role") or ("explore" if _sub_mode == "readonly" else None)
         await broadcast(session_id, {
             "event": "agent.started",
             # resumed=True 明确告知前端「这是续跑，不是迟到的重放启动」：
             # 前端据此把已进入失败/暂停终态的条目恢复成运行中并清空失败原因。
             "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name,
                         "turn_id": turn_id, "task_id": spec.get("task_id"),
+                        "subagent_mode": _sub_mode, "subagent_role": _sub_role,
                         "resumed": True},
         })
         await broadcast(session_id, {
@@ -1121,6 +1180,8 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     async with async_session_factory() as s:
         row = await s.get(_AgentRow, agent_id)
         row_name = row.name if row is not None else ""
+        row_mode = getattr(row, "subagent_mode", None) if row is not None else None
+        row_role = getattr(row, "subagent_role", None) if row is not None else None
         ck = dict(row.checkpoint_json or {}) if row is not None and row.session_id == session_id else {}
     if live is not None and live.live_messages:
         messages = _sanitize_messages(list(live.live_messages))
@@ -1167,10 +1228,14 @@ async def continue_subagent(session_id: int, agent_id: int, *, turn_id: int, not
     # 与派发 / 续跑一致：子代理面板与卡片重新进入运行态（否则节点在转圈、点开却显示已完成）
     try:
         from app.orchestration.agent_events import broadcast
+        _sub_mode = row_mode or spec.get("subagent_mode")
+        _sub_role = row_role or spec.get("subagent_role") or ("explore" if _sub_mode == "readonly" else None)
         await broadcast(session_id, {
             "event": "agent.started",
             "payload": {"agent_id": agent_id, "kind": "sub", "name": row_name or live.task_title,
-                        "turn_id": turn_id, "task_id": spec.get("task_id"), "resumed": True},
+                        "turn_id": turn_id, "task_id": spec.get("task_id"),
+                        "subagent_mode": _sub_mode, "subagent_role": _sub_role,
+                        "resumed": True},
         })
     except Exception:
         logger.debug("[subagent] 续做事件广播失败(非阻塞)", exc_info=True)

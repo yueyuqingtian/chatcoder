@@ -111,26 +111,14 @@ textarea.sb-code-editor, .sb-code-editor textarea {
 .plugin-slot-row { display: flex; align-items: center; gap: 12px; }
 @keyframes sb-spin { to { transform: rotate(360deg); } }
 
-/* 执行规则行（plan-91-393）：图标块 + 等宽规则名 + 决策胶囊；操作悬停浮现、固定槽位 */
-/* plan-121-482：padding/圆角由基础协议承担，此处只保留行内间距与选中态 */
-.pol-rule { gap: 12px; }
-.pol-rule.is-sel { background: var(--accent-soft); }
-.pol-rule-tile { width: 32px; height: 32px; border-radius: var(--r-md); display: grid; place-items: center; flex-shrink: 0; background: var(--bg-hover); color: var(--text-2); }
-.pol-rule[data-decision="allow"] .pol-rule-tile { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
-.pol-rule[data-decision="deny"] .pol-rule-tile { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
-.pol-rule[data-decision="ask"] .pol-rule-tile { background: color-mix(in oklab, var(--warning) 16%, transparent); color: var(--warning); }
-.pol-rule-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.pol-rule-name code { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pol-rule-kind { flex-shrink: 0; font-size: 10.5px; padding: 0 7px; line-height: 18px; border-radius: 999px; background: var(--bg-hover); color: var(--text-3); }
-.pol-rule-meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; color: var(--text-3); min-width: 0; }
-.pol-rule-decision { flex-shrink: 0; font-size: 11px; font-weight: 500; padding: 0 8px; line-height: 18px; border-radius: 999px; }
-.pol-rule[data-decision="allow"] .pol-rule-decision { background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success); }
-.pol-rule[data-decision="deny"] .pol-rule-decision { background: color-mix(in oklab, var(--error) 14%, transparent); color: var(--error); }
-.pol-rule[data-decision="ask"] .pol-rule-decision { background: color-mix(in oklab, var(--warning) 16%, transparent); color: var(--warning); }
-.pol-rule-why { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pol-rule-actions { opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
-.pol-rule:hover .pol-rule-actions, .pol-rule:focus-within .pol-rule-actions { opacity: 1; }
+/* plan-20261121-file-tree-settings：规则类型和决策各有独立标签，窄宽时随名称自然换行。 */
+.pol-rule-name { display: flex; align-items: center; flex-wrap: wrap; gap: 4px var(--sp-2); min-width: 0; }
+.pol-rule-name code {
+  min-width: 0; max-width: 100%;
+  font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; line-height: 20px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pol-rule .ui-list-row-actions { gap: 2px; }
+.pol-rule-why { line-height: 18px; overflow-wrap: anywhere; }
 
-/* 执行策略 · 审批解释段（plan-121-482）：不再套第二层卡片，行直接排在卡片上并全宽贴边 */
-.ui-card .explain-sec .ui-card-row { margin-inline: calc(var(--sp-5) * -1); }
-.ui-card .explain-sec > .ui-card-row:last-child { border-bottom: none; }
+/* 执行策略 · 审批解释段：直接由 Section + CardRow 承载，无需负边距贴边 */

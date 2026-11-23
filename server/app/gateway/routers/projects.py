@@ -1,6 +1,14 @@
 """项目（工作目录）路由；plan-282-1441（#5）追加工作树管理端点。"""
 from pathlib import Path
-from app.services.preview_service import safe_project_path, decode_text, TEXT_LIMIT
+from typing import Literal
+from starlette.concurrency import run_in_threadpool
+from app.services.preview_service import (
+    DEFAULT_IGNORED_DIRS,
+    TEXT_LIMIT,
+    decode_text,
+    is_hidden_entry,
+    safe_project_path,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.gateway.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 from app.orchestration.rules_loader import scan_rules_docs
 from app.persistence.database import get_db
-from app.services import project_service, worktree_service
+from app.services import file_ops_service, project_service, worktree_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -118,59 +126,93 @@ async def project_read_file(project_id: int, path: str,
 
 
 @router.get("/{project_id}/tree", response_model=dict)
-async def project_tree(project_id: int, depth: int = Query(2, ge=1, le=8),
-                       db: AsyncSession = Depends(get_db)):
+async def project_tree(
+    project_id: int,
+    depth: int = Query(2, ge=1, le=8),
+    show_hidden: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
     """项目目录树（供右侧文件管理面板）。"""
     project = await project_service.get_project(db, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
-    return _build_tree(project.path, max_depth=depth)
+    return _build_tree(project.path, max_depth=depth, show_hidden=show_hidden)
 
 
 # 问题13: 文件搜索排除的常见忽略目录（与消息流工具一致）
-_SEARCH_EXCLUDE_DIRS = {
-    "node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build",
-    ".next", ".nuxt", "target", ".idea", ".vscode", "logs", ".cache",
-    "coverage", ".pytest_cache", ".ruff_cache",
-}
+_SEARCH_EXCLUDE_DIRS = set(DEFAULT_IGNORED_DIRS) | {".idea", ".vscode", "logs", "coverage"}
 
 
 @router.get("/{project_id}/files/search", response_model=list[str])
-async def project_file_search(project_id: int, q: str = "", limit: int = 100,
-                              db: AsyncSession = Depends(get_db)):
-    """问题13: 按文件名/路径子串搜索项目内全部文件（不设深度限制，排除常见忽略目录）。
-
-    供输入框 @ 引用文件补全使用；空查询返回空列表。
-    """
-    import os
-    project = await project_service.get_project(db, project_id)
-    if project is None:
-        raise HTTPException(404, "项目不存在")
-    needle = q.strip().lower()
+async def project_file_search(
+    project_id: int,
+    q: str = "",
+    limit: int = Query(100, ge=1, le=500),
+    show_hidden: bool = Query(False),
+    session_id: int | None = None,
+    mode: Literal["path", "content"] = "path",
+    extension: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """plan-771-3177：搜索当前会话工作目录，同时保留输入框原有按路径补全。"""
+    workspace = await file_ops_service.resolve_workspace_root(db, project_id, session_id=session_id)
+    needle = q.strip().casefold()
     if not needle:
         return []
-    root = project.path
+    return await run_in_threadpool(_search_project_files, workspace, needle, limit, show_hidden, mode, extension)
+
+
+def _search_project_files(root: Path, needle: str, limit: int, show_hidden: bool, mode: str, extension: str) -> list[str]:
+    import os
+
     results: list[str] = []
     scanned = 0
+    bytes_left = 64 * 1024 * 1024
+    suffix = extension.strip().casefold().lstrip(".")
     for dirpath, dirnames, filenames in os.walk(root):
-        # 原地过滤忽略目录（含隐藏目录）
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _SEARCH_EXCLUDE_DIRS and not d.startswith(".")
-        ]
+        if show_hidden:
+            # 即使开启 show_hidden，也避免递归进入 .git 对象库与 node_modules 造成阻塞
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in {".git", "node_modules", "__pycache__"}
+            ]
+        else:
+            # 原地过滤忽略目录（含隐藏目录）
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in _SEARCH_EXCLUDE_DIRS and not d.startswith(".")
+            ]
         for fn in filenames:
+            if not show_hidden and fn.startswith("."):
+                continue
             scanned += 1
             if scanned > 200_000:  # 防御性上限：超大仓库避免无限扫描
                 return results
-            rel = os.path.relpath(os.path.join(dirpath, fn), root).replace("\\", "/")
-            if needle in rel.lower():
+            if suffix and not fn.casefold().endswith("." + suffix):
+                continue
+            rel = (Path(dirpath) / fn).relative_to(root).as_posix()
+            matched = needle in rel.casefold()
+            if mode == "content":
+                try:
+                    path = safe_project_path(root, rel)
+                    if not path.is_file() or path.stat().st_size > TEXT_LIMIT:
+                        continue
+                    with path.open("rb") as stream:
+                        data = stream.read(min(TEXT_LIMIT + 1, bytes_left))
+                    bytes_left -= len(data)
+                    if bytes_left <= 0:
+                        return results
+                    matched = needle in decode_text(data, truncated=len(data) < path.stat().st_size).casefold()
+                except (OSError, ValueError, HTTPException):
+                    continue
+            if matched:
                 results.append(rel)
                 if len(results) >= limit:
                     return results
     return results
 
 
-def _build_tree(root: str, max_depth: int) -> dict:
+def _build_tree(root: str, max_depth: int, show_hidden: bool = False) -> dict:
     import os
 
     def walk(path: str, depth: int) -> list[dict]:
@@ -181,17 +223,113 @@ def _build_tree(root: str, max_depth: int) -> dict:
         except OSError:
             return []
         out = []
-        # 先排除不可引用的目录，再限制数量，避免无关条目占满前 200 项。
-        visible = [e for e in entries if not e.name.startswith(".") and e.name != "node_modules"]
+        visible = [
+            e for e in entries
+            if show_hidden or not is_hidden_entry(e.name, is_dir=e.is_dir())
+        ]
         for e in visible[:200]:
-            node = {"name": e.name, "type": "dir" if e.is_dir() else "file",
+            is_dir = e.is_dir()
+            node = {"name": e.name, "type": "dir" if is_dir else "file",
                     "path": e.path.replace("\\", "/")}
-            if e.is_dir():
-                node["children"] = walk(e.path, depth + 1)
+            if is_dir:
+                # show_hidden=True 时对超重目录不深入递归
+                node["children"] = [] if (show_hidden and e.name in DEFAULT_IGNORED_DIRS) else walk(e.path, depth + 1)
             out.append(node)
         return out
 
     return {"path": root.replace("\\", "/"), "children": walk(root, 0)}
+
+
+class FileCreateBody(BaseModel):
+    path: str
+    type: Literal["file", "dir"]
+    content: str | None = None
+    session_id: int | None = None
+
+
+class FileRenameBody(BaseModel):
+    src: str
+    dst: str
+    session_id: int | None = None
+
+
+class FileDeleteBody(BaseModel):
+    path: str
+    recursive: bool = False
+    permanent: bool = False
+    session_id: int | None = None
+
+
+class FileDuplicateBody(BaseModel):
+    path: str
+    dst: str | None = None
+    session_id: int | None = None
+
+
+@router.post("/{project_id}/files/create", response_model=dict)
+async def project_file_create(
+    project_id: int,
+    body: FileCreateBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """在项目（或会话 worktree）内安全创建文件或目录。"""
+    root = await file_ops_service.resolve_workspace_root(db, project_id, session_id=body.session_id)
+    return await run_in_threadpool(
+        file_ops_service.create_entry,
+        root,
+        path=body.path,
+        entry_type=body.type,
+        content=body.content,
+    )
+
+
+@router.post("/{project_id}/files/rename", response_model=dict)
+async def project_file_rename(
+    project_id: int,
+    body: FileRenameBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """在项目（或会话 worktree）内安全重命名或移动文件/目录。"""
+    root = await file_ops_service.resolve_workspace_root(db, project_id, session_id=body.session_id)
+    return await run_in_threadpool(
+        file_ops_service.rename_entry,
+        root,
+        src=body.src,
+        dst=body.dst,
+    )
+
+
+@router.post("/{project_id}/files/delete", response_model=dict)
+async def project_file_delete(
+    project_id: int,
+    body: FileDeleteBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """安全删除项目（或会话 worktree）内文件或目录（非空目录需 recursive=true）。"""
+    root = await file_ops_service.resolve_workspace_root(db, project_id, session_id=body.session_id)
+    return await run_in_threadpool(
+        file_ops_service.delete_entry,
+        root,
+        path=body.path,
+        recursive=body.recursive,
+        permanent=body.permanent,
+    )
+
+
+@router.post("/{project_id}/files/duplicate", response_model=dict)
+async def project_file_duplicate(
+    project_id: int,
+    body: FileDuplicateBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """安全创建项目（或会话 worktree）内文件或目录副本。"""
+    root = await file_ops_service.resolve_workspace_root(db, project_id, session_id=body.session_id)
+    return await run_in_threadpool(
+        file_ops_service.duplicate_entry,
+        root,
+        path=body.path,
+        dst=body.dst,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════

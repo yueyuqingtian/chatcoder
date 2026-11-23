@@ -39,7 +39,7 @@
 .es-sub { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--text-3); max-width: 520px; }
 
 /* 输入框区：与 .chat-panel-composer 同一套内边距，首页 / 会话态位置一致 */
-.es-composer { flex: 0 0 auto; padding: 0 var(--scrollbar-gutter-w, 12px) 7px 0; } /* 7 = 会话态的 6px + 其 1px 下边框，首页发送后输入卡零位移 */
+.es-composer { flex: 0 0 auto; padding: 0 var(--scrollbar-gutter-w, 12px) 7px 0; } /* plan-20261121-center-card-edge：底部留白与会话态一致，发送后输入卡不会跳位。 */
 .es-composer .composer { max-width: var(--content-max-w); }
 .es-composer .composer-home .composer-input { min-height: 52px; font-size: 14px; }
 

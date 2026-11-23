@@ -8,6 +8,7 @@ import ts from "typescript";
 import { MsgType, type MessageOut } from "@chatcoder/shared";
 import * as timeline from "../src/components/chat/timeline";
 import * as toolLabels from "../src/components/chat/toolLabels";
+import * as subagentRole from "../src/components/chat/subagentRole";
 import * as time from "../src/utils/time";
 import type { TurnGroup as TurnGroupComponent } from "../src/components/chat/TurnGroup";
 
@@ -21,6 +22,7 @@ const state = { requestRollbackPreview: empty, turns: [], subagentMeta: {}, thin
 const dependencies: Record<string, unknown> = {
   "./timeline": timeline,
   "./toolLabels": toolLabels,
+  "./subagentRole": subagentRole,
   "../../utils/time": time,
   "../../store/chat": { useChatStore: (selector: (s: typeof state) => unknown) => selector(state) },
   "../../store/flowExpand": { dropFlowExpand: empty, turnCollapseKey: String, subagentCollapseKey: String,
@@ -39,6 +41,7 @@ const dependencies: Record<string, unknown> = {
   "../workflow/WorkflowCard": { WorkflowCard: () => createElement("span", null, "工作流卡") },
   "../workflow/WorkflowNotice": { WorkflowNotice: empty },
   "./ToolShotCard": { ToolShotCard: empty },
+  "./InteractiveUiCard": { InteractiveUiCard: empty },
   "./ErrorCard": { DismissibleErrorCard: empty },
   "./ProcessGroup": { ProcessGroup: ({ indices, renderItem }: { indices: number[]; renderItem: (i: number) => ReactNode }) => indices.map((i) => renderItem(i)) },
   "../../plugins/registry": { PluginSlot: ({ slot, meta, nodes }: { slot: string; meta?: { name: string }; nodes?: unknown }) =>

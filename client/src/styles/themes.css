@@ -75,7 +75,7 @@
  * 做法：底色本身几乎中性（彩度 ≤0.004），真正的世界感来自叠在上面的多层径向渐变——
  * 每层是一种风景里的颜色（森林 = 树冠嫩绿 + 苔藓灰绿 + 林间透光暖黄 + 远山雾蓝），
  * 各层不透明度 4%~9%，大半径柔边，彼此融合成一张很轻的画面。
- * --world-scene 铺在主区与设置页；--world-scene-side 是侧栏版（更收敛，只取两层）。
+ * plan-771-3177：侧栏只保留一个低透明度的渐变，卡片之间也能维持中性底色。
  * --world-2 为副色，供热力图、插画使用。 */
 /* plan-20261019-toolcard-v2：不再把 --color-panel 绑到世界底色——消息流 / 标题栏 / 右侧面板的底色
    固定为中性（浅 #F8F8F8 / 深 neutral-900，见 tokens.css），不随主题世界变化；
@@ -84,8 +84,8 @@
 
 :root[data-world="graphite"] {
   --color-background: oklch(98.6% 0.001 85);
-  /* plan-20261025-shell：默认石墨主题的全局底色（左栏 + 卡片四周留白）固定为中性 #ECECEF，左栏不再叠渐变 */
-  --color-sidebar: #ECECEF;
+  /* plan-20261025-shell：默认石墨主题的全局底色（左栏 + 卡片四周留白）提亮为轻透柔雾白灰，左栏不叠渐变 */
+  --color-sidebar: oklch(97.8% 0.001 260);
   --color-card: oklch(99.8% 0.001 85);
   --world-2: oklch(62% 0.02 250);
   /* 石墨：宣纸暖白 + 铅灰晕 + 一点墨蓝，像摊开的速写本 */
@@ -97,7 +97,7 @@
 }
 :root[data-world="forest"] {
   --color-background: oklch(98.7% 0.003 120);
-  --color-sidebar: oklch(96.6% 0.004 130);
+  --color-sidebar: oklch(97.8% 0.0025 135);
   --color-card: oklch(99.8% 0.002 110);
   --world-2: oklch(68% 0.09 85);
   /* 森林：左上树冠嫩绿、右上林间透光暖黄、右下苔藓灰绿、左下远山雾青、中部一抹蕨叶绿 */
@@ -107,11 +107,11 @@
     radial-gradient(55% 50% at 92% 92%, oklch(93% 0.025 130 / 0.5), transparent 70%),
     radial-gradient(50% 45% at 6% 94%, oklch(94% 0.02 190 / 0.45), transparent 70%),
     radial-gradient(35% 30% at 55% 55%, oklch(96% 0.02 150 / 0.3), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96.4% 0.012 135), oklch(96.6% 0.01 100) 55%, oklch(96.2% 0.008 185));
+  --world-scene-side: linear-gradient(180deg, oklch(95.2% 0.011 135 / 0.24), transparent 75%);
 }
 :root[data-world="campfire"] {
   --color-background: oklch(98.7% 0.003 70);
-  --color-sidebar: oklch(96.6% 0.004 60);
+  --color-sidebar: oklch(97.7% 0.0025 60);
   --color-card: oklch(99.8% 0.002 75);
   --world-2: oklch(70% 0.12 85);
   /* 篝火：底部中央火光橘、火边琥珀、顶部夜空淡紫灰、两侧木炭暖灰 */
@@ -121,11 +121,11 @@
     radial-gradient(60% 45% at 70% 0%, oklch(95% 0.015 300 / 0.45), transparent 70%),
     radial-gradient(40% 50% at 0% 40%, oklch(95.5% 0.012 50 / 0.4), transparent 70%),
     radial-gradient(40% 50% at 100% 50%, oklch(96% 0.02 30 / 0.35), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96.4% 0.008 300), oklch(96.6% 0.012 60) 70%, oklch(96.2% 0.02 50));
+  --world-scene-side: linear-gradient(180deg, oklch(95.4% 0.012 60 / 0.24), transparent 75%);
 }
 :root[data-world="breeze"] {
   --color-background: oklch(98.8% 0.003 210);
-  --color-sidebar: oklch(96.8% 0.004 205);
+  --color-sidebar: oklch(97.9% 0.0025 205);
   --color-card: oklch(99.9% 0.001 210);
   --world-2: oklch(76% 0.08 175);
   /* 煦风：天空浅蓝、云朵奶白、草坡薄荷、阳光淡柠檬，像晴天的天台 */
@@ -135,11 +135,11 @@
     radial-gradient(60% 40% at 80% 100%, oklch(95% 0.03 165 / 0.5), transparent 70%),
     radial-gradient(35% 30% at 95% 5%, oklch(97% 0.04 100 / 0.45), transparent 70%),
     radial-gradient(40% 35% at 5% 80%, oklch(95.5% 0.02 200 / 0.4), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96.2% 0.014 225), oklch(97% 0.006 90) 50%, oklch(96.4% 0.012 165));
+  --world-scene-side: linear-gradient(180deg, oklch(95.7% 0.011 205 / 0.24), transparent 75%);
 }
 :root[data-world="tide"] {
   --color-background: oklch(98.7% 0.003 235);
-  --color-sidebar: oklch(96.6% 0.004 240);
+  --color-sidebar: oklch(97.7% 0.003 240);
   --color-card: oklch(99.8% 0.002 230);
   --world-2: oklch(80% 0.07 80);
   /* 潮汐：上方海天淡蓝、中部浪花青、下方沙滩米黄、角落贝壳粉 */
@@ -149,11 +149,11 @@
     radial-gradient(70% 40% at 55% 100%, oklch(96.5% 0.03 85 / 0.55), transparent 70%),
     radial-gradient(30% 25% at 92% 85%, oklch(96% 0.025 30 / 0.4), transparent 70%),
     radial-gradient(40% 35% at 90% 30%, oklch(95% 0.025 220 / 0.35), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96% 0.014 240), oklch(96.4% 0.012 205) 55%, oklch(96.8% 0.014 85));
+  --world-scene-side: linear-gradient(180deg, oklch(95.5% 0.012 240 / 0.25), transparent 75%);
 }
 :root[data-world="sakura"] {
   --color-background: oklch(98.8% 0.003 10);
-  --color-sidebar: oklch(96.8% 0.004 0);
+  --color-sidebar: oklch(97.9% 0.0025 0);
   --color-card: oklch(99.9% 0.001 15);
   --world-2: oklch(72% 0.06 140);
   /* 樱时：花云粉、晨光杏、新叶嫩绿、庭院石灰紫 */
@@ -163,42 +163,46 @@
     radial-gradient(45% 40% at 15% 95%, oklch(95.5% 0.03 135 / 0.45), transparent 70%),
     radial-gradient(50% 40% at 90% 90%, oklch(95.5% 0.015 310 / 0.4), transparent 70%),
     radial-gradient(35% 30% at 50% 50%, oklch(97% 0.02 0 / 0.3), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(96.6% 0.012 0), oklch(97% 0.01 60) 50%, oklch(96.6% 0.01 135));
+  --world-scene-side: linear-gradient(180deg, oklch(95.5% 0.011 0 / 0.24), transparent 75%);
 }
 /* 深色：画面换成夜景，同样多层但更收敛（不透明度更低），底色近中性 */
 :root[data-theme="dark"][data-world] {
   --color-background: oklch(20% 0.002 85);
-  --color-sidebar: oklch(17% 0.002 85);
+  --color-sidebar: oklch(20.8% 0.002 260);
   --color-card: oklch(23% 0.002 85);
 }
 :root[data-theme="dark"][data-world="graphite"] { --world-scene: radial-gradient(60% 50% at 10% 5%, oklch(26% 0.008 250 / 0.6), transparent 70%); --world-scene-side: none; }
 :root[data-theme="dark"][data-world="forest"] {
+  --color-sidebar: oklch(20.8% 0.004 150);
   --world-scene: radial-gradient(55% 45% at 8% 6%, oklch(27% 0.035 150 / 0.55), transparent 70%), radial-gradient(45% 40% at 90% 10%, oklch(27% 0.03 95 / 0.4), transparent 70%), radial-gradient(55% 50% at 92% 92%, oklch(26% 0.025 180 / 0.45), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(18.5% 0.012 150), oklch(17.5% 0.008 120));
+  --world-scene-side: linear-gradient(180deg, oklch(22.8% 0.009 150 / 0.25), transparent 75%);
 }
 :root[data-theme="dark"][data-world="campfire"] {
+  --color-sidebar: oklch(20.8% 0.005 60);
   --world-scene: radial-gradient(50% 40% at 50% 100%, oklch(30% 0.05 50 / 0.55), transparent 70%), radial-gradient(60% 45% at 70% 0%, oklch(25% 0.02 290 / 0.5), transparent 70%), radial-gradient(40% 35% at 25% 90%, oklch(27% 0.04 75 / 0.4), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(17.5% 0.01 290), oklch(18.5% 0.016 50));
+  --world-scene-side: linear-gradient(180deg, oklch(22.8% 0.010 60 / 0.25), transparent 75%);
 }
 :root[data-theme="dark"][data-world="breeze"] {
+  --color-sidebar: oklch(20.9% 0.004 205);
   --world-scene: radial-gradient(70% 45% at 30% 0%, oklch(27% 0.03 230 / 0.55), transparent 70%), radial-gradient(60% 40% at 80% 100%, oklch(26% 0.025 170 / 0.45), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(18.5% 0.012 225), oklch(17.5% 0.01 170));
+  --world-scene-side: linear-gradient(180deg, oklch(22.9% 0.009 205 / 0.25), transparent 75%);
 }
 :root[data-theme="dark"][data-world="tide"] {
+  --color-sidebar: oklch(20.8% 0.005 240);
   --world-scene: radial-gradient(70% 45% at 50% 0%, oklch(26% 0.035 245 / 0.6), transparent 70%), radial-gradient(45% 35% at 15% 45%, oklch(26% 0.03 205 / 0.45), transparent 70%), radial-gradient(70% 40% at 55% 100%, oklch(26% 0.02 80 / 0.35), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(18% 0.014 245), oklch(17.5% 0.01 205));
+  --world-scene-side: linear-gradient(180deg, oklch(22.8% 0.010 240 / 0.25), transparent 75%);
 }
 :root[data-theme="dark"][data-world="sakura"] {
+  --color-sidebar: oklch(20.9% 0.004 0);
   --world-scene: radial-gradient(55% 45% at 85% 5%, oklch(27% 0.03 355 / 0.55), transparent 70%), radial-gradient(45% 40% at 15% 95%, oklch(26% 0.025 135 / 0.4), transparent 70%), radial-gradient(50% 40% at 90% 90%, oklch(26% 0.02 310 / 0.4), transparent 70%);
-  --world-scene-side: linear-gradient(180deg, oklch(18.5% 0.012 0), oklch(17.5% 0.01 310));
+  --world-scene-side: linear-gradient(180deg, oklch(22.9% 0.009 0 / 0.25), transparent 75%);
 }
 
 /* 风景铺设位置：主内容区、设置页底、侧栏（只在毛玻璃关闭时；开启时由桌面材质透出） */
 .app-main { background-image: var(--world-scene, none); }
 :root:not([data-glass="on"]) .sidebar { background-image: var(--world-scene-side, none); }
-/* 深色主题：主区与侧栏底色保持中性（与浅色的中性底色反相），不叠加世界配色的渐变 */
-:root[data-theme="dark"] .app-main,
-:root[data-theme="dark"] .sidebar { background-image: none; }
+/* 深色主题：主区保持中性底；侧栏允许极淡的 --world-scene-side 透出（graphite 自身为 none） */
+:root[data-theme="dark"] .app-main { background-image: none; }
 /* 设置卡片与首页卡片微透：让风景淡淡透过来，又不影响文字对比
    （plan-121-482：.mem-list / .inst-list 是「记忆 / 拓展」页的独立列表卡片，跟随同一半透规则；
     plan-20261019-dsh-ui：第三方插件分组的空态壳也是同页卡片，必须同源，否则与相邻列表背景割裂）。

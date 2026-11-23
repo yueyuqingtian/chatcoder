@@ -1,35 +1,15 @@
 /** plan-flow-redesign：子代理 Q 版角色头像——共享 Dada.tsx 骨架常量，不复制底层 SVG 路径。 */
 import { memo, useId } from "react";
 import { DADA_BODY, DADA_EYE, DADA_TUFT } from "../mascot/Dada";
+import type { SubagentRole } from "./subagentRole";
 
-export type SubagentRole = "explore" | "coder" | "operator" | "verifier";
-
-export const SUBAGENT_ROLE_LABEL: Record<SubagentRole, string> = {
-  explore: "探索嗒",
-  coder: "编码嗒",
-  operator: "操控嗒",
-  verifier: "校验嗒",
-};
-
-export function resolveSubagentRole(opts: {
-  name: string;
-  workflowKind?: string | null;
-  roleArgs?: { mode?: string; explore?: boolean; purpose?: string; agent_type?: string };
-}): SubagentRole {
-  const { name, workflowKind, roleArgs } = opts;
-  if (roleArgs?.purpose === "operator") return "operator";
-  if (workflowKind === "check" || workflowKind === "review") return "verifier";
-  if (
-    roleArgs?.explore === true
-    || roleArgs?.mode === "readonly"
-    || roleArgs?.agent_type === "explore"
-    || workflowKind === "explore"
-    || /^探索[·:：\s]/.test(name)
-  ) {
-    return "explore";
-  }
-  return "coder";
-}
+export {
+  SUBAGENT_ROLE_LABEL,
+  extractSubagentRoleArgs,
+  resolveSubagentRole,
+  type SubagentRole,
+  type SubagentRoleArgs,
+} from "./subagentRole";
 
 const TONE_END: Record<SubagentRole, string> = {
   explore: "#d5e6f8",

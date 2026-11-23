@@ -673,6 +673,10 @@ class ProviderOut(BaseModel):
     credential_strategy: str = "sticky"
     # plan-41-225: 供应商排序位（前端拖拽排序依据）
     sort_order: int = 0
+    # 方案 antigravity：档位/项目/认证方式常显（从 auth 行读，仅 antigravity 有值）
+    antigravity_tier: str | None = None
+    antigravity_project: str | None = None
+    antigravity_auth_kind: str | None = None
 
 
 # ── ta3 登录/同步（v23）──
@@ -713,6 +717,91 @@ class KiroLoginStatusOut(BaseModel):
 class KiroSyncOut(BaseModel):
     synced: int
     models: list[dict]
+
+
+# ── antigravity（Google Antigravity）登录/同步（方案 §6）──
+class AntigravityLoginImportOut(BaseModel):
+    ok: bool = True
+    account: str | None = None
+    project: str | None = None
+    tier: str | None = None
+    error: str | None = None
+
+
+class AntigravityLoginStartOut(BaseModel):
+    ok: bool = True
+    auth_url: str | None = None
+    state: str | None = None
+    error: str | None = None
+
+
+class AntigravityLoginStatusOut(BaseModel):
+    status: str  # idle | pending | success | failed | cancelled
+    message: str | None = None
+    account: str | None = None
+
+
+class AntigravitySyncOut(BaseModel):
+    ok: bool = True
+    added: int = 0
+    total: int = 0
+    error: str | None = None
+
+
+class AntigravityQuotaBucketOut(BaseModel):
+    bucket_id: str = ""
+    display_name: str = ""
+    window: str = ""
+    reset_time: str | None = None
+    description: str | None = None
+    # 剩余百分比（0-100，一位小数）；网关未给时为 None
+    remaining_percent: float | None = None
+
+
+class AntigravityQuotaGroupOut(BaseModel):
+    display_name: str = ""
+    description: str | None = None
+    buckets: list[AntigravityQuotaBucketOut] = []
+
+
+class AntigravityQuotaModelOut(BaseModel):
+    model_id: str
+    token_type: str = ""
+    reset_time: str | None = None
+    remaining_percent: float | None = None
+
+
+class AntigravityQuotaPoolOut(BaseModel):
+    name: str = ""
+    pool: str = ""
+    used_percent: float | None = None
+    remaining_percent: float | None = None
+    reset_time: str | None = None
+    aside: bool = True
+    span_seconds: int | None = None
+
+
+class AntigravityQuotaModelWindowOut(BaseModel):
+    name: str = ""
+    model_id: str = ""
+    vendor: str = ""
+    used_percent: float | None = None
+    remaining_percent: float | None = None
+    reset_time: str | None = None
+    pool: str = ""
+    span_seconds: int | None = None
+
+
+class AntigravityQuotaOut(BaseModel):
+    ok: bool = True
+    summary: dict | None = None
+    models: list[AntigravityQuotaModelOut] = []
+    pools: list[AntigravityQuotaPoolOut] = []
+    model_windows: list[AntigravityQuotaModelWindowOut] = []
+    project: str | None = None
+    tier: str | None = None
+    account: str | None = None
+    error: str | None = None
 
 
 # ── workbuddy（腾讯 CodeBuddy/WorkBuddy）登录/同步（v24）──
@@ -783,6 +872,20 @@ class ProviderModelItem(BaseModel):
 
 class ProviderModelsBulkIn(BaseModel):
     models: list[ProviderModelItem]
+
+
+class ProviderModelsBatchUpdateIn(BaseModel):
+    """plan-20261123-ux-fixes：批量修改供应商下多个模型的配置（未传字段保持各模型原值）。"""
+    model_ids: list[int]
+    is_active: bool | None = None
+    is_multimodal: bool | None = None
+    context_window: int | None = None
+    reasoning_efforts: list[str] | None = None
+
+
+class ProviderModelsBatchDeleteIn(BaseModel):
+    """plan-20261123-ux-fixes：批量删除供应商下多个模型。"""
+    model_ids: list[int]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -920,6 +1023,8 @@ class EvAgentEvent(WsEventPayload):
     status: str | None = None
     summary: str | None = None
     artifact_ids: list[int] | None = None
+    subagent_mode: str | None = None
+    subagent_role: str | None = None
     # plan-20261030-subagent-resume-status：resume_subagent / continue_subagent 再次广播
     # agent.started 时置 True——前端据此区分「续跑」与「迟到的重放启动」（后者不得把终态改回运行中）
     resumed: bool | None = None

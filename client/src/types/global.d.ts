@@ -155,15 +155,34 @@ declare global {
       ptyKill?: (id: number) => void;
       onPtyData?: (cb: (id: number, data: string) => void) => () => void;
       onPtyExit?: (cb: (id: number, code: number) => void) => () => void;
-      onBrowserAnnotation?: (cb: (payload: unknown) => void) => () => void;
+      writeBrowserImage?: (png: string) => Promise<boolean>;
       openBrowserDevTools?: (webContentsId?: number) => Promise<boolean>;
       captureBrowserPage?: (webContentsId?: number) => Promise<string | null>;
       /** plan-20261015-browser-agent：面板 webview 交给主进程（关闭节流、挂 CDP、接管弹窗与新窗口） */
       browserAgentPrepare?: (webContentsId: number) => Promise<{ ok: boolean; debugger?: boolean; error?: string }>;
       /** 主进程侧浏览器操作：capture / network / netBody / aiWindow / events / dialogReply / clipboard */
       browserAgentExec?: (webContentsId: number, op: string, args?: Record<string, unknown>) => Promise<{ ok: boolean; result?: any; error?: string }>;
-      /** 主进程事件：网页弹窗待用户处理（dialog / dialog-closed）、网页请求新窗口（popup） */
+      /** 主进程事件：网页弹窗待用户处理（dialog / dialog-closed）、网页请求新窗口（popup）、原生右键动作（context-action） */
       onBrowserAgentEvent?: (cb: (payload: { type: string; wcId: number; [k: string]: unknown }) => void) => () => void;
+      /** plan-771-3177：内置浏览器加密密码库（safeStorage；列表绝不返回明文密码） */
+      browserVaultList?: (origin?: string) => Promise<{
+        ok: boolean;
+        encryptedAvailable?: boolean;
+        items?: Array<{ id: string; origin: string; url: string; username: string; label?: string; updatedAt: string }>;
+        neverOrigins?: string[];
+        isNever?: boolean;
+        error?: string;
+      }>;
+      browserVaultSave?: (entry: { id?: string; url: string; username: string; password?: string; label?: string }) => Promise<{
+        ok: boolean;
+        item?: { id: string; origin: string; url: string; username: string; label?: string; updatedAt: string };
+        error?: string;
+      }>;
+      browserVaultDelete?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+      browserVaultCopyPassword?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+      browserVaultAutofill?: (webContentsId: number, id: string) => Promise<{ ok: boolean; error?: string }>;
+      browserVaultSetNever?: (origin: string, never: boolean) => Promise<{ ok: boolean; origin?: string; never?: boolean; neverOrigins?: string[]; error?: string }>;
+      browserVaultResolveLogin?: (id: string, action: "save" | "skip" | "never") => Promise<{ ok: boolean; error?: string }>;
       /* ── plan-693-2868 · docs/app1/11-host-bridge-protocol.md §4-§6：微应用宿主桥的渲染层三通道 ──
          主进程把微应用页面的 window.microapp.invoke 转成 hostRequest 抛给渲染层，渲染层转发后端后
          用 hostReply 回执；下行流式日志用 hostPush 直达目标 guest（按 uid 定位）。

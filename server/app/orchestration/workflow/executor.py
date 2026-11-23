@@ -37,6 +37,7 @@ class NodeRequest:
     question: str = ""  # 闸门节点等待决定的问题
     rework_source: str = ""  # 返工来源：review 表示评估打回（记入返工记录）；其它为冲突重做等
     # 子代理一经派发即回报（plan-workflow-collab）：节点运行中就指向当前子代理，点开不会进错线程
+    load_team: Callable[[], Awaitable[Any]] | None = field(default=None, compare=False)
     on_agent: Callable[[int], Awaitable[None]] | None = field(default=None, compare=False)
 
 

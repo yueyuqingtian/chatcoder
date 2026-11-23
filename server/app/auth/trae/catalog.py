@@ -305,10 +305,6 @@ async def sync_trae_models(db: AsyncSession, provider, agent_host: str) -> list[
                        provider.id, total)
         return []
 
-    existing = (await db.execute(
-        select(Model).where(Model.provider_id == provider.id)
-    )).scalars().all()
-    by_name = {m.name: m for m in existing}
     # 缓存目录原文（不含敏感字段）
     sanitized_catalog = {
         "models": [
@@ -321,28 +317,38 @@ async def sync_trae_models(db: AsyncSession, provider, agent_host: str) -> list[
     from app.persistence.database import run_write_locked
 
     def _persist(s):
-        by_name_local = dict(by_name)
+        # plan-20261123-ux-fixes：在同步写会话内查询既有模型，已有模型保留用户配置的
+        # 上下文窗口、思考深度与多模态；新同步模型默认开启多模态。
+        by_name_local = {
+            m.name: m for m in s.execute(
+                select(Model).where(Model.provider_id == provider.id)
+            ).scalars().all()
+        }
         created_local = 0
         updated_local = 0
         for name, entry in entries.items():
             m = by_name_local.get(name)
-            if m is None:
+            is_new = m is None
+            if is_new:
                 m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
                 s.add(m)
                 by_name_local[name] = m
                 created_local += 1
             m.api_key = "__trae_session__"  # 占位：真实 token 由 registry 从 trae_auth 动态取
             m.base_url = agent_host
-            m.context_window = entry.get("context_window") or 200000
-            m.is_multimodal = bool(entry.get("is_multimodal"))
             m.api_format = "trae"
-            # 思考档位：归一化 options；仅当模型本身支持思考（options 非空）时追加 max 档。
-            # 目录里部分模型 max_mode=True 但无 reasoning_effort_config（如 DeepSeek-V4-Flash /
-            # Doubao-Seed-Evolving），客户端不显示思考档位，不能把 max 混入。
-            reasoning = list(entry.get("reasoning_options") or [])
-            if entry.get("max_mode") and reasoning and "max" not in reasoning:
-                reasoning.append("max")
-            m.reasoning_efforts = reasoning or None
+            if is_new:
+                m.context_window = entry.get("context_window") or 200000
+                m.is_multimodal = True
+                # 思考档位：归一化 options；仅当模型本身支持思考（options 非空）时追加 max 档。
+                # 目录里部分模型 max_mode=True 但无 reasoning_effort_config（如 DeepSeek-V4-Flash /
+                # Doubao-Seed-Evolving），客户端不显示思考档位，不能把 max 混入。
+                reasoning = list(entry.get("reasoning_options") or [])
+                if entry.get("max_mode") and reasoning and "max" not in reasoning:
+                    reasoning.append("max")
+                m.reasoning_efforts = reasoning or None
+            elif not m.context_window:
+                m.context_window = entry.get("context_window") or 200000
             meta2 = dict(m.trae_meta or {})
             meta2.update({
                 "config_name": entry.get("config_name") or name,

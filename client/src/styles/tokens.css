@@ -69,7 +69,7 @@
   --color-background: var(--color-neutral-50);
   --color-background-alt: color-mix(in oklab, var(--color-neutral-100) 60%, transparent);
   --color-background-win-alt: var(--color-neutral-200);
-  --color-sidebar: #ECECEF;
+  --color-sidebar: oklch(97.8% 0.001 260);
   --color-header: var(--color-neutral-100);
   /* plan-20261019-toolcard-v2：舞台底色（消息流 / 标题栏 / 右侧面板，及一切以 --bg-panel 为「页面底」的派生混色）。
      浅色固定 #F8F8F8，且不再随主题世界染色（themes.css 不再覆盖本令牌）；深色见下方 neutral-900。 */
@@ -108,10 +108,10 @@
   --color-surface: color-mix(in oklab, var(--color-neutral-950) 3%, transparent);
   --color-surface-hover: color-mix(in oklab, var(--color-neutral-950) 5%, transparent);
 
-  --color-foreground: var(--color-neutral-700);
-  /* plan-621-2572: 浅色次级前景色对比度提升至 72% 与 56% */
-  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-700) 72%, transparent);
-  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-700) 56%, transparent);
+  /* plan-20261121-flow-typography：浅色主前景色由 neutral-700 提深至近炭黑，增强正文对比与锐利度 */
+  --color-foreground: oklch(22.5% 0.005 260);
+  --color-foreground-subtle: color-mix(in oklab, var(--color-foreground) 68%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-foreground) 50%, transparent);
   --color-foreground-inverse: var(--color-white);
 
   --color-success: var(--color-green-600);
@@ -171,7 +171,7 @@
   --color-background: var(--color-neutral-900);
   --color-background-alt: color-mix(in oklab, var(--color-neutral-800) 60%, transparent);
   --color-background-win-alt: var(--color-neutral-800);
-  --color-sidebar: var(--color-neutral-950);
+  --color-sidebar: oklch(20.8% 0.002 260);
   --color-header: var(--color-neutral-900);
   --color-panel: var(--color-neutral-900);
   --color-card: var(--color-neutral-800);
@@ -198,10 +198,10 @@
   --color-surface: color-mix(in oklab, var(--color-white) 5%, transparent);
   --color-surface-hover: color-mix(in oklab, var(--color-white) 10%, transparent);
 
-  --color-foreground: var(--color-neutral-200);
-  /* plan-621-2572: 深色次级前景色对比度提升至 72% 与 50% */
-  --color-foreground-subtle: color-mix(in oklab, var(--color-neutral-200) 72%, transparent);
-  --color-foreground-subtlest: color-mix(in oklab, var(--color-neutral-200) 50%, transparent);
+  --color-foreground: oklch(93% 0.004 260);
+  /* plan-621-2572 / plan-20261121-flow-typography: 深色次级前景色对比度保持 70% 与 48% */
+  --color-foreground-subtle: color-mix(in oklab, var(--color-foreground) 70%, transparent);
+  --color-foreground-subtlest: color-mix(in oklab, var(--color-foreground) 48%, transparent);
   --color-foreground-inverse: var(--color-white);
 
   --color-success: var(--color-green-500);
@@ -293,8 +293,8 @@
        * --frost-selected / --frost-selected-line：左列选中态柔和高亮。
      高斯模糊由 electron 主进程的系统材质提供（Win11 acrylic / Win10 ACCENT / mac vibrancy），
      CSS 只表达材质与边界；页面**不叠加全屏 backdrop-filter**（双重模糊 = 浑浊 + 卡顿）。 */
-  --frost-left-tint: var(--bg-sidebar);
-  --frost-left-alpha: 0.90;
+  --frost-left-tint: color-mix(in oklab, var(--bg-sidebar) 82%, white);
+  --frost-left-alpha: 0.80;
   --frost-divider: color-mix(in srgb, var(--color-neutral-950) 12%, transparent);
   /* 中/右接缝专用色（用户反馈"竖线有时看得见有时看不见"）：
      比 --frost-divider 更实——1px 线在非整数缩放屏（1.5×）上会落在半物理像素，
@@ -378,7 +378,7 @@
      底色取近黑带一丝白（#14161B）与深色壁纸可辨分层；
      **不使用任何白色边缘描边**（深色下白描边会形成发亮的彩边）；
      分割线 / 选中态改用显式白色低透明度（深色下中性深色不可用）。 */
-  --frost-left-tint: var(--sidebar-paper-dark);
+  --frost-left-tint: color-mix(in oklab, var(--bg-sidebar) 98%, white);
   --frost-divider: rgb(255 255 255 / 0.10);
   /* 深色档接缝：显式白色低透明度，比 --frost-divider 更实以抵消 1.5× 屏的抗锯齿稀释 */
   --frost-seam: rgb(255 255 255 / 0.20);
@@ -391,15 +391,15 @@
    用户切换深浅主题时不会重算（applyUiVars 不随主题变化调用），深色档会失效。
    驱动属性：data-glass(on/off) / data-glass-strength(0|1|2) / data-theme(light|dark) /
             data-glass-degraded(1)；具体值对应方案 3.2 的"低透明"区间（0.84~0.94）。 */
-/* ── plan-26-126 / S5（plan-41-197）：左列不透明度（三档 × 浅/深 + 降级） ──
-    S5 重标定（用户反馈“三档透明度再细化一下：深邃再加深、标准次之、轻柔最浅，但轻柔现在太浅了”）：
-    三档整体上移通透度并拉开档差——深邃透出最多、标准居中、轻柔仍保留玻璃感（不再接近实色）。 */
-:root[data-glass="on"] { --frost-left-alpha: 0.87; }                          /* 标准 · 浅色 */
-:root[data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.92; } /* 轻柔 · 浅色 */
-:root[data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.82; } /* 深邃 · 浅色 */
-:root[data-theme="dark"][data-glass="on"] { --frost-left-alpha: 0.85; }       /* 标准 · 深色 */
-:root[data-theme="dark"][data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.90; }
-:root[data-theme="dark"][data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.80; }
+/* ── plan-26-126 / S5：左列不透明度（三档 × 浅/深 + 降级） ──
+   轻柔 / 标准 / 深邃三档重标定：浅色 0.88 / 0.80 / 0.72，深色 0.86 / 0.78 / 0.68，
+   配合轻透侧栏底色保持通透层次感。 */
+:root[data-glass="on"] { --frost-left-alpha: 0.80; }                          /* 标准 · 浅色 */
+:root[data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.88; } /* 轻柔 · 浅色 */
+:root[data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.72; } /* 深邃 · 浅色 */
+:root[data-theme="dark"][data-glass="on"] { --frost-left-alpha: 0.78; }       /* 标准 · 深色 */
+:root[data-theme="dark"][data-glass="on"][data-glass-strength="0"] { --frost-left-alpha: 0.86; }
+:root[data-theme="dark"][data-glass="on"][data-glass-strength="2"] { --frost-left-alpha: 0.68; }
 /* 无系统模糊材质：退到近实 0.97（宁可"不透"，也不给"透但没模糊"的脏状态）。
    必须用 !important —— 它需要**无条件覆盖**上面的主题/档位组合（那些选择器最高到 0-4-0）。 */
 :root[data-glass="on"][data-glass-degraded="1"] { --frost-left-alpha: 0.97 !important; }
@@ -543,16 +543,14 @@
   /* plan-238-1210: 已删除 --focus-ring（品牌色 sky 方环）——用户要求清理所有蓝色边框装饰；
      键盘可达性改由 focus.css 的中性 outline 承担。 */
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  /* 消息流阅读列宽（由外观设置覆盖：默认 1000px，上限 1600px；0=不限时写 100%） */
-  --content-max-w: 1000px;
-  /* v40.1: 消息流统一垂直节奏——工具/思考行高直接取正文行高（同一 token 派生），
-     项间距随字号缩放；运行时 applyUiVars 会用外观设置覆盖 --fs-md/--chat-line-height，
-     行与文本始终等高、间距始终一致（节距 = 行高 + --flow-gap = 段落节奏）。
-     注意 --chat-line-height 是无单位倍率（与外观设置语义一致）。 */
-  --chat-line-height: 2.2;
-  --flow-gap: calc(var(--fs-md, 13px) * var(--chat-line-height, 2.2) * 0.28);
+  /* 消息流阅读列宽（由外观设置覆盖：默认 860px，上限 1600px；0=不限时写 100%） */
+  --content-max-w: 860px;
+  /* plan-20261121-flow-typography：正文行高默认 1.62（黄金阅读节奏），--flow-gap 直接按 --fs-md 派生（约 9px），
+     避免此前 2.2 行高导致行内比段间更宽、文字松散发飘。 */
+  --chat-line-height: 1.62;
+  --flow-gap: calc(var(--fs-md, 14px) * 0.65);
   /* plan-20261017-ux-overhaul 阶段 B：四处消息流（主流 / 子代理 / 侧边对话 / 工作流）共用的工具行规格 */
   --flow-icon: 16px;          /* 工具图标槽位，图标替换 / 运行态切换不改变宽度 */
   --flow-icon-gap: 8px;       /* 图标与动作文字 */
@@ -564,9 +562,8 @@
   --sidebar-active-bar: transparent;
   /* plan-114-447：侧栏状态唯一来源——悬停/选中都用同一中性墨色的不同浓度，
      不随主题世界变化，毛玻璃开关也共用，根治「底色/聚焦色割裂」 */
-  --sidebar-hover: color-mix(in oklab, var(--text-1) 5%, transparent);
-  --sidebar-selected: color-mix(in oklab, var(--text-1) 9%, transparent);
-  --sidebar-paper-dark: oklch(18.5% 0.003 80);
+  --sidebar-hover: color-mix(in oklab, var(--text-1) 4%, transparent);
+  --sidebar-selected: color-mix(in oklab, var(--text-1) 7.5%, transparent);
   /* 用户消息气泡：中性底。
    * plan-633-2604：原来用 color-mix(text-1 6%) 叠透明——深色主题下等于「近白 6% 盖在深底上」，
    * 渲染出来是一块比面板更亮的灰块，配上边框/内距就成了「深色大卡片」。改引既有实底令牌：
@@ -576,7 +573,7 @@
   --ok: var(--success);
   --radius: var(--r-md);
   --fs-sm: 12px;
-  --fs-md: 13px;
+  --fs-md: 14px;
   --fs-lg: 15px;
   --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16), 0 6px 16px rgba(0, 0, 0, 0.08);
 }
@@ -599,6 +596,8 @@
 }
 
 :root[data-theme="dark"] {
+  --sidebar-hover: color-mix(in oklab, var(--text-1) 5.5%, transparent);
+  --sidebar-selected: color-mix(in oklab, var(--text-1) 9.5%, transparent);
   --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 

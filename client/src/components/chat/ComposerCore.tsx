@@ -9,6 +9,7 @@ import {
   useId,
   useState,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -46,6 +47,7 @@ import {
   IconRingProgress,
   IconPuzzle,
   IconSparkles,
+  IconLayoutGrid,
 } from "../icons";
 // plan-20261009-ui U2：输入框重做——+ 浮窗 / 思考深度滑块 / 权限 / 工作区 / 排队托盘拆为独立组件
 import { IconPlusX, IconSendStop } from "../iconkit/MorphIcons";
@@ -55,6 +57,7 @@ import { ModelEffortPicker } from "../composer/ModelEffortPicker";
 import { ApprovalPicker } from "../composer/ApprovalPicker";
 import { WorkspaceChip } from "../composer/WorkspaceChip";
 import { QueueTray } from "../composer/QueueTray";
+import { resolveEnterDelivery, resolveSendButtonState, type MessageDelivery } from "../composer/queueDelivery";
 import { useToolbarFit } from "../composer/useToolbarFit";
 import { BUILTIN_MODES, GOAL_MODE, MODE_META, customModeIcon, EFFORT_RANK } from "../composer/modeMeta";
 import type { ExtKind } from "../../store/navIntent";
@@ -62,8 +65,9 @@ import { Modal } from "../Modal";
 import { createPortal } from "react-dom";
 // plan-75-332: 审批卡——与 QuestionWizardBox 同构，需要审批时替换输入框主体
 import { ApprovalCard } from "./ApprovalCard";
-import { useChatStore, persistLastReasoning, patchSession, findSession, useCurrentSession, type UsageDetail } from "../../store/chat";
-import { useScoped } from "./convoScope";
+import { useChatStore, persistLastReasoning, patchSession, findSession, useCurrentSession, type BrowserRef, type UsageDetail } from "../../store/chat";
+import { ConvoScopeContext, useScoped } from "./convoScope";
+import { useUiStore } from "../../store/ui";
 import { firstVisiblePending } from "../../store/pendingInteractions";
 import { selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
 import { useDraftsStore, normalizeDraftMode, normalizeApprovalMode, type ApprovalMode } from "../../store/drafts";
@@ -79,11 +83,15 @@ import { baseName } from "../iconkit/FileIcon";
 import { api, resolveFileUrl, type AttachmentInfo, type ComposerRefOut, type McpServerOut, type PermissionProfileOut, type PluginMarketItem, type SessionOut, type SkillOut } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 // plan-75-332: 权限模式菜单说明文案走统一 Tooltip（遵循“禁止新增原生 title”）
-import { Button, Tooltip, Collapse } from "../ui";
+import { Button, IconButton, Tooltip, Collapse } from "../ui";
 
 /** plan-20261009-ui U2：+ 浮窗中执行模式的顺序改为「智能体 → 计划 → 只读」——
  *  最常用的默认模式排在最上，自定义模式排在其后（保持后端返回的相对顺序）。 */
 const BUILTIN_MODE_ORDER: readonly string[] = BUILTIN_MODES;
+const BROWSER_REF_LABEL: Record<BrowserRef["kind"], string> = {
+  element: "元素标注", screenshot: "网页截图", dom: "DOM 快照", console: "控制台求值",
+  page: "网页分析", diagnostic: "页面诊断", selection: "选区问 AI",
+};
 
 /** v7: 取模型支持的最高思考档位（无支持返回 null）——新建任务冷启动默认 */
 function maxEffortOf(reasoningEfforts?: string[] | null): string | null {
@@ -106,13 +114,14 @@ export interface ComposerCoreProps {
 /** plan-238-1210 (A2): 引用 chips（@文件 / $技能）——不再内嵌进输入文本。
  *  plan-693-2868（P1）：新增 "microapp"（微应用引用，值为 appId）——
  *  与 client.ComposerRefOut、drafts.ComposerRefDraft 三处必须同步，漏一处 tsc 就报错。 */
-export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
+export type ComposerRefKind = "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp" | "ui-selection";
 
 export interface ComposerRef {
   project_label?: string;
   /** plan-282-1441（#9）：新增 "mcp"（连接器）与 "plugin"（插件）引用
    *  plan-633-2604（R3）：新增 "dir"（拖入的文件夹，值为目录路径，AI 侧用 fs_list 自行查看）
-   *  plan-693-2868（P1）：新增 "microapp"（微应用，值为 appId；version 另存，供「查看界面」按版本开标签） */
+   *  plan-693-2868（P1）：新增 "microapp"（微应用，值为 appId；version 另存，供「查看界面」按版本开标签）
+   *  plan-interactive-ui：新增 "ui-selection"（消息流交互版式勾选引用） */
   kind: ComposerRefKind;
   /** 原始值：文件为工作区相对路径，目录为绝对路径，技能为技能名，连接器/插件为各自名称，微应用为 appId */
   value: string;
@@ -120,6 +129,8 @@ export interface ComposerRef {
   label: string;
   /** plan-693-2868（P1）：仅微应用引用使用——记录注入时的版本，避免升级后打开成另一个版本 */
   version?: string;
+  /** plan-interactive-ui：交互方案引用携带的选中详情与源码摘要 */
+  detail?: string;
 }
 
 /** 引用 chips → 随消息文本追加的可读引用行（模型可见；后端仍为纯文本透传）。
@@ -148,6 +159,10 @@ export function buildRefsSuffix(refs: ComposerRef[], workspaceRoot?: string | nu
   if (microApps.length > 0) {
     lines.push(`使用微应用：${microApps.map((r) => `${r.label}（appId=${r.value}${r.version ? `, version=${r.version}` : ""}）`).join("、")}（用 microapp_call 调用其方法；用户只注入了引用，界面未打开）`);
   }
+  const uiSelections = refs.filter((r) => r.kind === "ui-selection");
+  if (uiSelections.length > 0) {
+    lines.push(`已选交互方案：${uiSelections.map((r) => `${r.label}（${r.value}）`).join("、")}`);
+  }
   return lines.join("\n");
 }
 
@@ -172,6 +187,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
    * 行为口（发送/停止/排队三态、停止键）要按「可能在跑」保守处理，否则停止键会退化成发送键。
    * 它只在这里参与交互判定，绝不传给任何渲染态。 */
   const runtimeHintTurnId = useScoped("runtimeHintTurnId");
+  const isSideScope = useContext(ConvoScopeContext) != null;
+  const supportsQueue = !isHome && !isSideScope;
+  const queueMessageMode = useUiStore((s) => s.queueMessageMode);
+  const turnRunning = supportsQueue && (isRunning || runtimeHintTurnId != null);
   const currentSessionId = useScoped("currentSessionId");
   const currentProjectId = useChatStore((s) => s.currentProjectId);
   // 会话级「执行中」：主代理轮次在跑、后台工作流在跑（含工作流结束后等待唤醒主代理的空档）、或后台子代理未结束——任一即算。
@@ -429,10 +448,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   const flushQueuedInput = useScoped("flushQueuedInput");
   const respondApproval = useScoped("respondApproval");
 
-  const composerBrowserRefs = useScoped("composerBrowserRefs");
+  const composerBrowserRefs = useScoped("composerBrowserRefs").filter((ref) => ref.sessionId === undefined || ref.sessionId === currentSessionId);
   const removeComposerBrowserRef = useScoped("removeComposerBrowserRef");
   const clearComposerBrowserRefs = useScoped("clearComposerBrowserRefs");
-  const [browserRefPreview, setBrowserRefPreview] = useState<any | null>(null);
+  const [browserRefPreview, setBrowserRefPreview] = useState<BrowserRef | null>(null);
 
   const [uploading, setUploading] = useState(false);
   const pendingUploads = useRef(0);
@@ -519,6 +538,21 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
       })));
     }
   }, [draftKey, composerBackfill]);
+
+  // plan-771-3177：面板引用文件时保留正在编辑的正文、附件和其他引用。
+  useEffect(() => {
+    if (isHome || currentSessionId == null || isSideScope) return;
+    const onFileReference = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId: number; path: string }>).detail;
+      if (detail?.sessionId !== currentSessionId || !detail.path) return;
+      const path = detail.path;
+      setRefs((old) => old.some((ref) => ref.kind === "file" && ref.value === path)
+        ? old : [...old, { kind: "file", value: path, label: path.split("/").pop() || path }]);
+      taRef.current?.focus();
+    };
+    window.addEventListener("chatcoder:composer-file-reference", onFileReference);
+    return () => window.removeEventListener("chatcoder:composer-file-reference", onFileReference);
+  }, [isHome, currentSessionId, isSideScope]);
 
   /** 会话切换（主对话靠重挂载、侧边对话等场景复用同一实例）：chip 属于上一个 key。
    *  不换桶的话，上一会话的微应用/文件引用会显示在新会话的输入框上（看起来像「引用已提交并被
@@ -1134,6 +1168,42 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     return () => window.removeEventListener("chatcoder:composer-microapp", onInjectMicroApp);
   }, []);
 
+  // plan-interactive-ui：交互界面卡片「填入输入框」→ 注入/替换同名方案引用并可选预填批注
+  useEffect(() => {
+    const onInjectUiSelection = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        sessionId?: number | null;
+        value?: string;
+        label?: string;
+        detailText?: string;
+        note?: string;
+      }>).detail;
+      if (detail?.sessionId !== undefined && detail.sessionId !== currentSessionId) return;
+      const value = String(detail?.value || "").trim();
+      if (!value) return;
+      const label = String(detail?.label || value);
+      const detailText = detail?.detailText;
+      setRefs((prev) => {
+        const next: ComposerRef = { kind: "ui-selection", value, label, ...(detailText ? { detail: detailText } : {}) };
+        const idx = prev.findIndex((r) => r.kind === "ui-selection" && r.value === value);
+        if (idx >= 0) {
+          const copy = prev.slice();
+          copy[idx] = next;
+          return copy;
+        }
+        return [...prev, next];
+      });
+      const note = String(detail?.note || "").trim();
+      if (note) {
+        setInput((prev) => (prev.trim() ? `${prev.trim()}\n${note}` : note));
+      }
+      setShowSlash(false);
+      window.setTimeout(() => taRef.current?.focus(), 0);
+    };
+    window.addEventListener("chatcoder:composer-ui-selection", onInjectUiSelection);
+    return () => window.removeEventListener("chatcoder:composer-ui-selection", onInjectUiSelection);
+  }, [currentSessionId]);
+
   /** plan-693-2868（P1）：空态「让 AI 创建」——只把诉求写进输入框，不替用户按发送。
    *  技能正文（microapp-create）在 P2 落地，这里先用一句通用诉求引导。 */
   const requestCreateMicroApp = () => {
@@ -1320,8 +1390,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
 
   // plan-633-2604（R3）：只有引用 chips（典型是刚拖进来的文件夹）也算有话可说——
   // 发送时引用会被拼成「可查看目录：…」引用行，模型据此去看目录，正文可以是空的。
-  const historyLoadFailed = useChatStore((s) => s.sessionLoadError);
-  const historyUnavailable = useChatStore((s) => s.sessionLoading || s.sessionLoadError);
+  const historyLoadFailed = useChatStore((s) => !isHome && !isSideScope && s.sessionLoadError);
+  const historyUnavailable = useChatStore((s) => !isHome && !isSideScope && (s.sessionLoading || s.sessionLoadError));
   /** plan-693-2868（P1）曾把微应用 chip 定为「发送后保留」（便于连续追问同一个应用），
    *  实际表现是缺陷：发完消息 chip 还挂在输入框上，看起来像引用没提交；后续输入还会把它
    *  同步回草稿，切走再切回来又出现（跨会话、跨消息重复携带）。
@@ -1339,7 +1409,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
   };
 
   const [sending, setSending] = useState(false);
-  const handleSend = async () => {
+  const handleSend = async (deliveryOverride?: MessageDelivery) => {
     if (!canSend || sending || pendingUploads.current > 0) return;
     setSending(true);
     // 浏览器标注/截图引用 → 转换为消息附件 + 结构化文本，随消息一并发送
@@ -1361,6 +1431,10 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         lines.push(`快照: ${ref.text}`);
       } else if (ref.kind === "console" && ref.text) {
         lines.push(`求值: ${ref.text}`);
+      } else if (ref.kind === "screenshot" && ref.note) {
+        lines.push(`说明: ${ref.note}`);
+      } else if (ref.text && (ref.kind === "page" || ref.kind === "diagnostic" || ref.kind === "selection")) {
+        lines.push(ref.text);
       }
       refTextParts.push(lines.join("\n"));
     }
@@ -1377,17 +1451,16 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     const goalText0 = goalArmed ? input.trim() : "";
     const mode = composerMode === GOAL_MODE ? "agent" : composerMode;
 
-    if (composerBrowserRefs.length > 0) {
-      clearComposerBrowserRefs();
-    }
-
     const sendEffort = activeEffort ?? undefined;
     const usedModelId = sessionModelId;
 
     if (isHome) {
       try {
         const pId = activeProjectId ?? activeProjects[0]?.id ?? null;
-        if (pId == null) return;
+        if (pId == null) {
+          useChatStore.setState({ error: "请先选择或新建工作区，再发送消息" });
+          return;
+        }
         // plan-546/547: 模型与模式随创建一次落准；深度写入新会话草稿；全局最近值同步
         // plan-676: 首页目标同样随创建一次落准（goal_status=active）
         // plan-75-332: 权限模式（approval_mode）同样随创建一次落准
@@ -1399,19 +1472,25 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
           reasoning_effort: sendEffort ?? null,
           goal_text: goalText0 || homeGoalText,
         });
-        if (sessionId == null) return;
-        useDraftsStore.getState().patchDraft(`s${sessionId}`, { reasoningEffort: sendEffort ?? null });
+        if (sessionId == null || useChatStore.getState().currentSessionId !== sessionId) return;
+        useDraftsStore.getState().patchDraft(String(sessionId), { reasoningEffort: sendEffort ?? null });
         if (usedModelId != null) useChatStore.setState({ lastModelId: usedModelId });
         // plan-75-332: agent（智能体模式）即原来的 default，透传 null 让引擎走默认全量工具；
         // 其余模式（含自定义模式名）必须透传，否则后端按默认解析出全量工具集，
         // 出现"选了受限模式但模型仍看到全量工具"的错位。
-    const sendMode = mode === "agent" ? null : mode;
-        await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId, refPayload);
+        const sendMode = mode === "agent" ? null : mode;
+        const turnId = await sendTurn(content, attachmentPayload, sendEffort, sendMode, usedModelId, refPayload);
+        // plan-20261122-message-send：创建会话只完成了第一步，首条消息确认后才能清首页草稿。
+        if (turnId == null) {
+          if (useChatStore.getState().currentSessionId === sessionId) {
+            useChatStore.setState({ error: "首条消息未发送，草稿已保留在「新建任务」" });
+          }
+          return;
+        }
+        if (composerBrowserRefs.length > 0) clearComposerBrowserRefs(currentSessionId);
         skipDraftSyncRef.current = true;
         setInput("");
         setAttachments([]);
-        // 引用已随消息送达（refsSuffix / refPayload 在上方取用过）→ chip 全部清空。
-        // 发送失败走 catch，到不了这里，chip 因此原样保留。
         setRefs((prev) => refsAfterSend(prev, true));
         setEffort(null);
         setShowSlash(false);
@@ -1421,8 +1500,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         setHomeGoalText(null);
         setGoalArmed(false);
         onStarted?.();
-      } catch {
-        /* ignore */
+      } catch (error) {
+        useChatStore.setState({ error: String(error) });
       } finally {
         setSending(false);
       }
@@ -1443,23 +1522,29 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     }
     // sendTurn 的 null 既可能是失败也可能是「运行中入队」——队列里多了新项说明本次发送已被接收
     const queuedBefore = new Set(useChatStore.getState().queuedInputs.map((q) => q.id));
-    const turnId = await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload);
+    const delivery: MessageDelivery = deliveryOverride ?? queueMessageMode;
+    const turnId = await sendTurn(content, attachmentPayload, sendEffort, sendMode, sessionModelId, refPayload, delivery);
     const delivered = turnId != null
       || deliveredFromQueue(queuedBefore, useChatStore.getState().queuedInputs);
     if (goalText0) setGoalArmed(false);
+    // 发送失败（既没建出 turn，也没进队列）：正文、附件、草稿原样保留，用户可直接重试。
+    // 回归点：此前这里无条件清空，只有引用 chip 按 delivered 保留——后端 500 / 断网时
+    // 整段输入连同落盘草稿一起消失，用户无处找回。
+    if (!delivered) {
+      setSending(false);
+      return;
+    }
+    if (composerBrowserRefs.length > 0) clearComposerBrowserRefs(currentSessionId);
     skipDraftSyncRef.current = true;
     setInput("");
     setAttachments([]);
-    // 引用 chip：送达（含入队）→ 清空，避免"看起来引用没提交"以及下一条消息重复携带；
-    // 发送失败 → 原样保留，用户挑好的引用不丢，直接重试即可。
+    // 引用 chip：送达（含入队）→ 清空，避免"看起来引用没提交"以及下一条消息重复携带。
     setRefs((prev) => refsAfterSend(prev, delivered));
     setShowSlash(false);
     setShowAt(false);
     // v7: 发送后仅清文字/附件，保留思考深度等输入框配置——深度按会话持久化（重进/重启不丢）
     if (draftKey !== "new") {
       useDraftsStore.getState().clearDraftText(draftKey);
-      // 失败时保留的 chip 一并写回草稿：否则用户切走再切回来，刚挑好的引用就没了
-      if (!delivered) useDraftsStore.getState().patchDraft(draftKey, { refs });
     }
     setSending(false);
   };
@@ -1608,6 +1693,8 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
     ? t("composer.placeholder_home")
     : pendingPlan
     ? t("composer.placeholder_plan")
+    : turnRunning
+    ? t(queueMessageMode === "immediate" ? "composer.placeholder_running_immediate" : "composer.placeholder_running_queue")
     : t("composer.placeholder_followup");
 
   return (
@@ -1695,35 +1782,26 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                         {ref.kind === "screenshot" && <IconImage size={13} />}
                         {ref.kind === "dom" && <IconCode size={13} />}
                         {ref.kind === "console" && <IconTerminal size={13} />}
+                        {(ref.kind === "page" || ref.kind === "diagnostic" || ref.kind === "selection") && <IconSparkles size={13} />}
                       </div>
                     )}
                     <div className="composer-ref-card-info">
                       <span className="ref-chip-kind-label">
-                        {ref.kind === "element"
-                          ? "元素标注"
-                          : ref.kind === "screenshot"
-                          ? "网页截图"
-                          : ref.kind === "dom"
-                          ? "DOM快照"
-                          : "控制台"}
+                        {BROWSER_REF_LABEL[ref.kind]}
                       </span>
                       <span className="composer-ref-card-page">{ref.pageTitle}</span>
                       {ref.selector && <span className="composer-ref-card-selector">{ref.selector}</span>}
                       {ref.note && <span className="composer-ref-card-note-brief">· {ref.note}</span>}
                     </div>
-                    <Tooltip content="移除此标注">
-                      <button
-                        className="composer-ref-card-remove"
+                      <IconButton
+                        size="xs"
+                        title="移除此标注"
+                        icon={<IconX size={11} />}
                         onClick={(e) => {
                           e.stopPropagation();
                           removeComposerBrowserRef(ref.id);
                         }}
-                        aria-label="移除此标注"
-                        type="button"
-                      >
-                        <IconX size={11} />
-                      </button>
-                    </Tooltip>
+                      />
                   </div>
                 </Tooltip>
               ))}
@@ -1796,6 +1874,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   : r.kind === "mcp" ? "移除连接器引用"
                   : r.kind === "plugin" ? "移除插件引用"
                   : r.kind === "microapp" ? "移除微应用引用"
+                  : r.kind === "ui-selection" ? "移除交互方案引用"
                   : "移除技能引用";
                 return (
                   <Tooltip key={`${r.kind}-${r.value}-${i}`} content={r.kind === "session" ? `${r.label} · ${r.project_label || "会话"} · #${r.value}` : r.value}>
@@ -1811,6 +1890,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                           : r.kind === "mcp" ? <IconPlug size={12} />
                           : r.kind === "plugin" ? <IconPuzzle size={12} />
                           : r.kind === "microapp" ? <IconBox size={12} />
+                          : r.kind === "ui-selection" ? <IconLayoutGrid size={12} />
                           : <IconSparkles size={12} />}
                       </span>
                       <span className="composer-ref-name">{r.label}</span>
@@ -1899,7 +1979,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   kbScrollRef.current = "slash";
                   return;
                 }
-                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && !e.altKey) {
                   e.preventDefault();
                   if (slashItems.length > 0) pickSlashItem(slashItems[selectedSlashIndex]);
                   return;
@@ -1925,7 +2005,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   kbScrollRef.current = "skill";
                   return;
                 }
-                if (e.key === "Enter" && !e.shiftKey && n > 0) {
+                if (e.key === "Enter" && !e.shiftKey && !e.altKey && n > 0) {
                   e.preventDefault();
                   insertSkill(filteredSkills[Math.min(skillIndex, n - 1)].name, false);
                   return;
@@ -1944,16 +2024,26 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
                   kbScrollRef.current = "at";
                   return;
                 }
-                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+                if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && !e.altKey) {
                   e.preventDefault();
                   if (n > 0) pickAtItem(atItems[selectedAtIndex]);
                   return;
                 }
                 if (e.key === "Escape") { e.preventDefault(); setShowAt(false); return; }
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              const enterDelivery = resolveEnterDelivery({
+                key: e.key,
+                altKey: e.altKey,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                metaKey: e.metaKey,
+                queueMode: queueMessageMode,
+                isTurnRunning: turnRunning,
+              });
+              if (enterDelivery != null) {
                 e.preventDefault();
-                void handleSend();
+                void handleSend(enterDelivery);
+                return;
               }
               if (e.key === "Escape") {
                 setShowSlash(false);
@@ -2051,19 +2141,35 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               {/* plan-547 → plan-20261009-ui U2：发送 / 停止 / 排队为同一个按钮的三种形态（图标弹性形变，位置不跳）——
                   空闲：发送；执行中（含后台工作流 / 子代理）且输入为空：停止；主代理轮次运行中有输入：加入排队；仅后台执行时有输入：直接发送。 */}
               {(() => {
-                // 执行中：输入为空 → 停止（中断主代理、子代理与工作流）；主代理轮次运行中有输入 → 排队；仅后台执行时有输入 → 直接发送
-                // plan-723-3029 R3：hint 存在（切回会话的复位窗口）时与真在跑同构：
-                // 无输入 → 停止；有输入 → 排队。渲染态仍只认 isRunning，不受 hint 影响。
-                const sendState: "send" | "stop" | "queue" = !isHome && busy ? (hasSendContent || uploading ? (isRunning || runtimeHintTurnId != null ? "queue" : "send") : "stop") : "send";
-                const tip = uploading ? "附件上传中，请稍候…" : sendState === "stop" ? "停止：中断主代理、子代理与工作流" : sendState === "queue" ? "加入排队（当前任务结束后发送）" : "发送 (Enter)";
+                // 执行中：输入为空 → 停止（中断主代理、子代理与工作流）；主代理轮次运行中有输入 → 跟随「队列消息」设置；仅后台执行时有输入 → 直接发送
+                // plan-723-3029 R3：hint 存在（切回会话的复位窗口）时与真在跑同构；渲染态仍只认 isRunning，不受 hint 影响。
+                const sendState = resolveSendButtonState({
+                  isHome,
+                  busy,
+                  isTurnRunning: turnRunning,
+                  hasContent: hasSendContent,
+                  uploading,
+                  queueMode: queueMessageMode,
+                });
+                const tip = sending && sendState !== "stop"
+                  ? "正在提交消息…"
+                  : uploading
+                  ? "附件上传中，请稍候…"
+                  : sendState === "stop"
+                  ? "停止：中断主代理、子代理与工作流"
+                  : turnRunning
+                  ? (queueMessageMode === "immediate"
+                      ? "直接发送（Enter）· 排队入列（Alt+Enter）"
+                      : "排队入列（Enter）· 直接发送（Alt+Enter）")
+                  : "发送（Enter）";
                 return (
                   <Tooltip content={tip} side="top">
                     <button
                       type="button"
                       className={"cc-send is-" + sendState}
-                      disabled={sendState !== "stop" && !canSend}
+                      disabled={sendState !== "stop" && (!canSend || sending)}
                       aria-label={tip}
-                      onClick={() => (sendState === "stop" ? handleCancel() : void handleSend())}
+                      onClick={() => (sendState === "stop" ? handleCancel() : void handleSend(queueMessageMode))}
                     >
                       <IconSendStop mode={sendState} size={16} />
                     </button>
@@ -2097,15 +2203,7 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
         onClose={() => setBrowserRefPreview(null)}
         title={
           browserRefPreview
-            ? `${
-                browserRefPreview.kind === "element"
-                  ? "元素标注"
-                  : browserRefPreview.kind === "screenshot"
-                  ? "网页截图"
-                  : browserRefPreview.kind === "dom"
-                  ? "DOM 快照"
-                  : "控制台求值"
-              } · ${browserRefPreview.pageTitle}`
+            ? `${BROWSER_REF_LABEL[browserRefPreview.kind]} · ${browserRefPreview.pageTitle}`
             : "标注预览"
         }
         width={720}
@@ -2133,36 +2231,18 @@ export function ComposerCore({ variant = "default", onStarted, followFocusReques
               </div>
             )}
             <div className="browser-ref-preview-details">
-              <div className="browser-ref-row">
-                <span className="label">目标页面：</span>
-                <span className="val">{browserRefPreview.pageTitle}</span>
-                <a
-                  className="url"
-                  href={browserRefPreview.pageUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {browserRefPreview.pageUrl}
-                </a>
+              <div className="browser-ref-preview-row">
+                <span className="browser-ref-preview-label">来源</span>
+                <span className="browser-ref-preview-value">{browserRefPreview.url}</span>
               </div>
               {browserRefPreview.selector && (
-                <div className="browser-ref-row">
-                  <span className="label">CSS 选择器：</span>
-                  <code>{browserRefPreview.selector}</code>
+                <div className="browser-ref-preview-row">
+                  <span className="browser-ref-preview-label">CSS 选择器</span>
+                  <code className="browser-ref-preview-code">{browserRefPreview.selector}</code>
                 </div>
               )}
-              {browserRefPreview.elementText && (
-                <div className="browser-ref-row">
-                  <span className="label">元素文本：</span>
-                  <span className="val">{browserRefPreview.elementText}</span>
-                </div>
-              )}
-              {browserRefPreview.note && (
-                <div className="browser-ref-row">
-                  <span className="label">用户补充批注：</span>
-                  <span className="val note">{browserRefPreview.note}</span>
-                </div>
-              )}
+              {browserRefPreview.text && <div className="browser-ref-preview-note">{browserRefPreview.text}</div>}
+              {browserRefPreview.note && <div className="browser-ref-preview-note">{browserRefPreview.note}</div>}
             </div>
           </div>
         )}

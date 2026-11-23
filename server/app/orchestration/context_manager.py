@@ -549,6 +549,24 @@ async def _load_refs_context(db: AsyncSession, turn, *, include_skills=True) -> 
         except Exception:  # noqa: BLE001
             logger.debug("[context] 插件引用渲染失败", exc_info=True)
 
+    ui_selections = [
+        r for r in refs
+        if str(r.get("kind") or "") == "ui-selection"
+        and (str(r.get("detail") or "").strip() or str(r.get("value") or "").strip())
+    ]
+    if ui_selections:
+        sel_lines: list[str] = []
+        for r in ui_selections[:4]:
+            label = str(r.get("label") or r.get("value") or "已选方案").strip()
+            detail = str(r.get("detail") or r.get("value") or "").strip()
+            if len(detail) > 12000:
+                detail = detail[:12000] + "\n…（源码片段过长已截断）"
+            sel_lines.append(f"### 已选版式：{label}\n{detail}")
+        parts.append(
+            "用户在消息流交互卡片中勾选了以下方案（请严格基于用户选中的版式及其源码继续实现或调整）：\n\n"
+            + "\n\n".join(sel_lines)
+        )
+
     return "\n\n".join(parts)
 
 
@@ -1597,6 +1615,7 @@ async def build_main_context(
     attachments: list[dict] | None = None,
     multimodal: bool = False,
     enable_subagents: bool = True,
+    team_notice: str | None = None,
     # plan-19-82 步骤7: 语言判定专用文本。默认 None=用 user_message；
     # 目标续跑轮的系统提醒是写死中文，不能代表用户语言，此时传 "" 触发
     # 回退检索「最近一条真实用户消息」判定。
@@ -1741,9 +1760,11 @@ async def build_main_context(
         legacy_child_session_hint,
     )
     _is_legacy_child = bool(session is not None and getattr(session, "side_kind", None) == "sub")
+    if team_notice:
+        bundle.developer_parts.append(team_notice)
     _dispatch_hint = subagent_dispatch_hint(_execution_mode, is_legacy_child=_is_legacy_child)
     # plan-598-2482：官方 system 段没有派发子代理 / 操控子代理提示，ta3 下跳过
-    if _dispatch_hint and ta3_meta is None:
+    if team_notice is None and _dispatch_hint and ta3_meta is None:
         bundle.developer_parts.append(_dispatch_hint)
     # 1.16 GUI 操作交给操控子代理（原 plan-20261018-operator-boost）：电脑操控或内置浏览器可用、
     # 且当前模式下发子代理工具时才注入；子代理自身不注入（它不能再派发）。
@@ -1752,7 +1773,7 @@ async def build_main_context(
     _operator_hint = operator_subagent_hint(
         _execution_mode, gui_tools=_gui_tools, is_legacy_child=_is_legacy_child,
     )
-    if _operator_hint and ta3_meta is None:
+    if team_notice is None and _operator_hint and ta3_meta is None:
         bundle.developer_parts.append(_operator_hint)
     # plan-549-2281：历史子会话（side_kind=sub）仍可打开并继续对话，但它没有子会话工具、
     # 也没有派发工具——给一条轻量约束，避免模型去找已不存在的入口。
@@ -1764,7 +1785,7 @@ async def build_main_context(
     # plan-601-2495：ta3 下这三类可续跑/待确认清单是功能必需（用户说「继续」时要续跑而不是重派），
     # 但官方 system 没有对应段，改走当轮 user 消息里的 <system-reminder>，工具名换成可见名。
     _paused_parts: list[str] = []
-    if paused_subagents and enable_subagents:
+    if paused_subagents and (enable_subagents or team_notice is not None):
         _paused_parts.append(_build_paused_subagents_block(paused_subagents))
     if paused_workflows:
         _paused_parts.append(_build_paused_workflows_block(paused_workflows))
@@ -2473,18 +2494,46 @@ _TA3_SUBAGENT_TAIL = (
 # chatcoder 主代理解析子代理汇报依赖固定小节（subagent._parse_structured_report），功能必需；
 # 放在官方 `交接要求：` 槽位（child-agent.js:95）。
 _TA3_SUBAGENT_HANDOFF = (
-    "交接要求：最终回复按以下小节顺序组织（小节标题保持原样）："
-    "### Result（一段话结论）、### Files Touched（新建或修改的每个文件的相对路径，没有写 None）、"
-    "### Key Findings（主代理必须知道的事实，尽量附 file:line 证据）、"
-    "### Verification（实际运行或检查了什么、结果如何，没有写 None）、"
-    "### Acceptance（逐条对照验收标准写 met / not met 及证据）、"
-    "### Risks / Open Questions（阻塞、不确定点与后续事项，没有写 None）。不要编造未验证的结果。"
+    "交接要求：最终回复保持精炼可读，按以下小节组织（只保留本任务有实际内容的小节，无内容则直接省略，无需凑齐 'None'；小节标题保持原样）："
+    "### Result（1–2 句直给结论）、"
+    "### Key Findings（主代理必须知道的事实与 file:line 证据，每条 1–2 句，禁止分号串成长段文字墙）、"
+    "### Files Touched（仅当新建或修改了文件时列出相对路径清单）、"
+    "### Verification（实际运行的检查与结果）、"
+    "### Acceptance（有验收标准时逐条标明 met / not met 及证据）、"
+    "### Risks / Open Questions（有真实阻塞或待决项时列出）。不要编造未验证的结果。"
 )
+
+
+def _ta3_member_system(member=None) -> str:
+    from app.orchestration.prompts.subagent import default_member_prompt, member_runtime_rules
+
+    parts = [_TA3_SUBAGENT_ROLE_PROMPTS["GeneralPurpose"], _TA3_SUBAGENT_DEFAULT_ROLE,
+             _TA3_SUBAGENT_TOOL_SCOPE, _TA3_SUBAGENT_HANDOFF, *_TA3_SUBAGENT_TAIL]
+    if member is not None:
+        parts[0] = member.prompt if member.prompt is not None else default_member_prompt(member.mode)
+        parts.append(member_runtime_rules(member.mode))
+    return "\n\n".join(parts)
+
+
+def subagent_prompt_preview(member) -> dict:
+    from app.orchestration.prompts.subagent import default_member_prompt, member_runtime_rules
+
+    return {
+        "system_prompt": member.prompt,
+        "default_prompt": default_member_prompt(member.mode),
+        "runtime_rules": member_runtime_rules(member.mode),
+        "preview": {
+            "standard": build_subagent_system_prompt("【子任务标题】", "【验收标准】",
+                                                     language="zh", member=member)
+                        + "\n\n【原始请求】【项目规则】【任务交接】",
+            "ta3": _ta3_member_system(member) + "\n\n【工作区】【子任务标题】【验收标准】【任务交接】",
+        },
+    }
 
 
 async def _build_ta3_subagent_context(
     db: AsyncSession, *, agent, session, project, task, workspace: str,
-    handoff_summary: str, original_request: str, inherit_context: bool,
+    handoff_summary: str, original_request: str, inherit_context: bool, member=None,
 ) -> ContextBundle:
     """ta3 子代理上下文（plan-601-2495，对齐官方 child-agent.buildMessages）。
 
@@ -2501,13 +2550,7 @@ async def _build_ta3_subagent_context(
     _user_lang = await _resolve_session_language(db, getattr(session, "id", None), _lang_text)
     _reply_lang, _lang_source = await _resolve_rule_language(workspace, project, _user_lang)
 
-    system = "\n\n".join([
-        _TA3_SUBAGENT_ROLE_PROMPTS["GeneralPurpose"],
-        _TA3_SUBAGENT_DEFAULT_ROLE,
-        _TA3_SUBAGENT_TOOL_SCOPE,
-        _TA3_SUBAGENT_HANDOFF,
-        *_TA3_SUBAGENT_TAIL,
-    ])
+    system = _ta3_member_system(member)
 
     reminder_lines: list[str] = []
     if workspace:
@@ -2553,6 +2596,7 @@ async def build_subagent_context(
     handoff_summary: str,
     original_request: str = "",
     inherit_context: bool = False,
+    member=None,
 ) -> ContextBundle:
     """构建子代理上下文（plan-330-1648 M3：子代理 = 受限的新会话）。
 
@@ -2587,7 +2631,7 @@ async def build_subagent_context(
         return await _build_ta3_subagent_context(
             db, agent=agent, session=session, project=project, task=task,
             workspace=workspace, handoff_summary=handoff_summary,
-            original_request=original_request, inherit_context=inherit_context,
+            original_request=original_request, inherit_context=inherit_context, member=member,
         )
     # plan-19-82: 语言以用户原始请求为准（缺则回退任务标题/描述）
     _lang_text = original_request or f"{task.title or ''}\n{task.description or ''}"
@@ -2604,7 +2648,7 @@ async def build_subagent_context(
     )
     bundle = ContextBundle(
         system=build_subagent_system_prompt(task.title or "", task.acceptance_criteria or "",
-                                            language=_reply_lang, language_source=_lang_source),
+                                            language=_reply_lang, language_source=_lang_source, member=member),
         instruction=_instruction,
         reply_language=_reply_lang,
         reply_language_source=_lang_source,
@@ -2723,18 +2767,16 @@ async def build_subagent_context(
     # plan-248-1258 M6: 结构化汇报要求——主代理据此精准整合（此前 free-form 汇报信息量不足）。
     bundle.developer_parts.append(
         "## Report Back (required)\n"
-        "When you finish, reply with a STRUCTURED report so the main agent can integrate precisely. "
-        "Use exactly these section headings, in this order:\n"
-        "### Result\nOne-paragraph outcome of the subtask.\n"
-        "### Files Touched\nBullet list of every file you created or modified (full relative paths). "
-        "Write 'None' if you changed nothing.\n"
-        "### Key Findings\nBullet list of the concrete facts the main agent must know "
-        "(with file:line evidence where relevant).\n"
-        "### Verification\nWhat you actually ran or checked to validate the work "
-        "(commands, tests, diff review) and its outcome. Write 'None' if nothing was verifiable.\n"
-        "### Acceptance\nGo through the acceptance criteria one by one and state met / not met, with evidence.\n"
-        "### Risks / Open Questions\nBullet list of blockers, uncertainties, or follow-ups "
-        "(write 'None' if clean).\n"
-        "Be specific and concise — no filler. Never invent results you did not verify."
+        "When you finish, reply with a clean, scannable report for the main agent. "
+        "Use the section headings below in order, and **omit any optional section that has nothing to report** "
+        "(do not pad empty sections with 'None'):\n"
+        "### Result (required)\n1–2 crisp sentences stating the outcome directly.\n"
+        "### Key Findings (required when facts/evidence matter)\nConcise bullets of concrete facts and "
+        "`file:line` evidence (1–2 sentences per bullet; never chain 3+ points with semicolons).\n"
+        "### Files Touched (include only if files were created or modified)\nBullet list of full relative paths.\n"
+        "### Verification (include only if checks/tests were run)\nCommands/checks run and exact outcome.\n"
+        "### Acceptance (include only if acceptance criteria were given)\nOne bullet per criterion: `met` / `not met` + evidence.\n"
+        "### Risks / Open Questions (include only if blockers or open questions remain)\nConcise bullet list.\n"
+        "Keep every bullet brief and factual — no filler, no walls of text, and never invent unverified results."
     )
     return bundle

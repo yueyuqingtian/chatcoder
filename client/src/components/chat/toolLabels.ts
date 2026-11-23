@@ -36,6 +36,7 @@ const FROM_TA3: Record<string, string> = {
   PlanWorkflow: "plan_workflow", StartWorkflow: "start_workflow", WorkflowStatus: "workflow_status",
   ResumeWorkflow: "resume_workflow", CancelWorkflow: "cancel_workflow", AmendWorkflow: "amend_workflow",
   DecideWorkflow: "decide_workflow", RequestWriteScope: "request_write_scope", ReportToLeader: "report_to_leader",
+  PresentUi: "present_ui",
 };
 
 /** 把任意来源的工具名归一为真实执行名（未知名原样返回） */
@@ -123,6 +124,7 @@ export const TOOL_VERBS: Record<string, string> = {
   microapp_call: "已调用微应用",
   microapp_list: "已列出微应用",
   microapp_validate: "已校验微应用",
+  present_ui: "已生成交互界面",
   // plan-20261015-browser-agent：内置浏览器与电脑操控工具
   browser_navigate: "已打开网页",
   browser_tabs: "已管理标签",

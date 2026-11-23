@@ -29,8 +29,154 @@
 .ui-batch-slot[data-empty] .ui-batch-only { visibility: hidden; }
 
 /* ── ④ 页内分段标签：与下方内容拉开间距（执行策略 / 电脑操控） ── */
-.perm-tabs-bar,
-.dp-panel > .ui-toolbar { margin-bottom: var(--sp-4); }
+.perm-tabs-bar { margin-bottom: var(--sp-4); }
+
+/* ── 卡片与行标准对齐（Group B：统一 .settings-card/.settings-row 与 .ui-card/.ui-card-row/.ui-list） ── */
+.settings-card,
+.ui-card,
+.ui-list,
+.sc-list,
+.settings-resource-list {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-light, var(--border));
+  background: var(--bg-main);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+.ui-section .ui-list {
+  background: var(--bg-main);
+  border-color: var(--border-light, var(--border));
+}
+.settings-row,
+.ui-card-row,
+.ui-section .ui-card-row,
+.ui-list-row,
+.ui-section .ui-list-row,
+.sc-row,
+.settings-resource-item {
+  padding: 14px var(--sp-5);
+  border-bottom-color: var(--border-light, var(--border));
+}
+.settings-row-title,
+.ui-card-row-title,
+.ui-list-row-name,
+.sc-row-title,
+.settings-resource-name {
+  font-size: 13.5px;
+}
+.settings-card-stack,
+.sc-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+.ui-card-row-control {
+  gap: var(--sp-2);
+}
+
+/* ── 执行策略 · 审批解释（去掉外包 Card 后不再使用负边距贴边） ── */
+.explain-sec .ui-field-hint {
+  margin-bottom: var(--sp-3);
+}
+/* plan-20261121-file-tree-settings：工具条和行内容从同一内距开始，批量操作与复选分组。 */
+.pol-rules { container: policy-rules / inline-size; }
+.dp-recipes { container: desktop-recipes / inline-size; }
+.policy-batch-bar, .dp-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-5);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+.policy-selection, .dp-toolbar-group {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); min-width: 0;
+}
+.policy-batch-bar > .btn, .dp-toolbar-group:last-child { margin-inline-start: auto; }
+.dp-search-row {
+  display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border-light);
+}
+.dp-search-row > .ui-input-wrap { flex: 1; min-width: 0; max-width: 400px; }
+.dp-search-row > .btn { flex-shrink: 0; }
+.dp-toolbar-hint { white-space: nowrap; }
+.dp-toolbar-notice, .pol-rules-message {
+  padding: var(--sp-2) var(--sp-5); color: var(--text-2); font-size: 12px; line-height: 18px;
+}
+.dp-recipe-title { display: block; font-weight: 600; line-height: 20px; overflow-wrap: anywhere; }
+.dp-recipe-desc {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 18px;
+}
+.dp-recipe-row .ui-list-row-meta {
+  align-items: center; color: var(--text-3); font-size: 11px; line-height: 16px;
+}
+.dp-recipe-app { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+@container desktop-recipes (max-width: 400px) {
+  .dp-toolbar, .dp-search-row, .dp-toolbar-notice, .dp-recipes .dp-recipe-row { padding-inline: var(--sp-3); }
+  .dp-recipes .dp-recipe-row { gap: var(--sp-2); }
+}
+@container policy-rules (max-width: 400px) {
+  .policy-batch-bar, .pol-rules-message, .pol-rules .pol-rule { padding-inline: var(--sp-3); }
+  .pol-rules .pol-rule { gap: var(--sp-2); }
+  .pol-rule .ui-list-row-icon { display: none; }
+}
+.pol-mode-card-list {
+  padding: 0;
+}
+.pol-mode-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.pol-tool-grid-spacer {
+  margin-top: var(--sp-2);
+}
+
+/* ── 归档 / 诊断 / 索引库 / 自动化 / 钩子 ── */
+.archive-toolbar {
+  padding: 12px var(--sp-5);
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+.archive-toolbar .archive-search-input {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.archive-result {
+  padding: 10px var(--sp-5);
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+.idx-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+}
+.idx-search-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.idx-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.idx-search-row > .ui-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.diag-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.sched-note {
+  margin-bottom: 0;
+}
 
 /* ── ③ 模型页 ─────────────────────────────────────────── */
 /* 填充式：卡片撑满 PageShell 剩余高度，左右两列各自在卡片内滚动 */
@@ -129,8 +275,89 @@
 .models-cred-toggle { margin-top: 6px; }
 
 /* 模型列表：单层卡片，行等高（无标签也不变矮），添加入口是最后一行 */
+.models-section-head-actions { display: inline-flex; align-items: center; gap: 6px; }
 .models-model-list { background: var(--color-card); border-color: var(--border-light, var(--border)); }
+/* plan-20261123-ux-fixes：模型批量管理工具条与勾选态 */
+.models-batch-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 10px 16px;
+  background: var(--color-card);
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+.models-batch-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.models-batch-picked-count {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.models-batch-bar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .models-model-item { min-height: 56px; padding: 10px 14px 10px 16px; align-items: center; }
+.models-model-item.is-batch { cursor: pointer; gap: 10px; }
+.models-model-item.is-picked { background: color-mix(in oklab, var(--text-1) 4.5%, transparent); }
+:root[data-theme="dark"] .models-model-item.is-picked { background: color-mix(in oklab, var(--color-white) 7%, transparent); }
+.models-model-check { display: inline-flex; align-items: center; flex-shrink: 0; }
+.models-batch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.models-batch-picked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light, var(--border));
+}
+.models-batch-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.models-batch-efforts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+}
+.models-batch-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.models-batch-footer-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.models-batch-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .models-model-main { justify-content: center; gap: 5px; }
 .models-model-actions { gap: 8px; }
 .models-model-item .ui-row-hover { display: inline-flex; gap: 2px; opacity: 0; transition: opacity var(--dur-2) var(--ease-standard); }
@@ -238,3 +465,379 @@
 .archive-toolbar { flex-wrap: nowrap; }
 .archive-picked { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .archive-toolbar > .btn { flex-shrink: 0; }
+
+/* ---------------------------------------------------------------------------
+   antigravity 配额面板（环形仪表盘 + 状态总览带 + 多账号切换器）
+   ---------------------------------------------------------------------------
+   - 圆角严格复用令牌：--r-md(8px) / --r-lg(12px) / 999px(胶囊)；
+   - 面板内全部文字显式声明 line-height，不依赖继承（AGENTS.md §2.1.3）；
+   - 不使用左侧装饰竖线，层级依靠浅面卡片、留白与健康/警示语义色表达。 */
+
+.ag-quota-title,
+.ag-quota-title-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  line-height: 20px;
+}
+.ag-quota-subacct {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: var(--text-3);
+}
+.ag-quota-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.ag-quota-info-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: var(--text-3);
+  cursor: help;
+  transition: color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
+}
+.ag-quota-info-ic:hover,
+.ag-quota-info-ic:focus-visible {
+  color: var(--text-1);
+  background: var(--bg-hover);
+  outline: none;
+}
+
+/* 多账号切换条（仅 2+ OAuth 账号时渲染） */
+.ag-quota-acctbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ag-quota-acctbar-label {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.ag-quota-acct-select {
+  flex: 1 1 200px;
+  max-width: 300px;
+  min-width: 0;
+}
+
+/* 顶部状态总览带 */
+.ag-quota-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light, var(--border));
+  font-size: 12px;
+  line-height: 18px;
+}
+.ag-quota-strip.tone-warn {
+  background: var(--warning-soft);
+  border-color: color-mix(in oklab, var(--warning) 28%, transparent);
+}
+.ag-quota-strip.tone-danger {
+  background: var(--error-soft);
+  border-color: color-mix(in oklab, var(--error) 30%, transparent);
+}
+.ag-quota-strip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-1);
+  font-weight: 500;
+  line-height: 18px;
+}
+.ag-quota-strip-text {
+  min-width: 0;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.ag-quota-strip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--success);
+  flex-shrink: 0;
+}
+.ag-quota-strip.tone-warn .ag-quota-strip-dot { background: var(--warning); }
+.ag-quota-strip.tone-danger .ag-quota-strip-dot { background: var(--error); }
+.ag-quota-strip.tone-unknown .ag-quota-strip-dot { background: var(--text-3); }
+.ag-quota-strip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+/* 环形仪表盘池卡片网格：三池单排铺开，窄屏自动折行 */
+.ag-quota-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.ag-quota-pool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 10px;
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light, var(--border));
+  transition: border-color var(--dur-2) var(--ease-standard),
+    background var(--dur-2) var(--ease-standard),
+    box-shadow var(--dur-2) var(--ease-standard);
+}
+.ag-quota-pool-card.is-clickable {
+  cursor: pointer;
+}
+.ag-quota-pool-card.is-clickable:hover {
+  border-color: var(--border-hover);
+}
+.ag-quota-pool-card.is-clickable:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+.ag-quota-pool-card.tone-warn {
+  background: color-mix(in oklab, var(--warning) 6%, var(--bg-panel));
+  border-color: color-mix(in oklab, var(--warning) 26%, transparent);
+}
+.ag-quota-pool-card.tone-danger {
+  background: color-mix(in oklab, var(--error) 6%, var(--bg-panel));
+  border-color: color-mix(in oklab, var(--error) 28%, transparent);
+}
+.ag-quota-pool-card.is-selected {
+  background: var(--color-card);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-xs);
+}
+.ag-quota-pool-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.ag-quota-pool-card-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--text-1);
+}
+.ag-quota-pool-card-foot {
+  border-top: 1px solid var(--border-light, var(--border));
+  padding-top: 7px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 池内环形仪表组 */
+.ag-quota-rings {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-around;
+  gap: 8px;
+  padding: 2px 0;
+}
+.ag-quota-ring-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+.ag-quota-ring-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ag-quota-ring-arc {
+  transition: stroke-dashoffset var(--dur-3) var(--ease-standard), stroke var(--dur-2) var(--ease-standard);
+}
+.ag-quota-ring-num {
+  position: absolute;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+.ag-quota-ring-item.tone-warn .ag-quota-ring-num { color: var(--warning); }
+.ag-quota-ring-item.tone-danger .ag-quota-ring-num { color: var(--error); }
+.ag-quota-ring-item.tone-unknown .ag-quota-ring-num { color: var(--text-3); }
+.ag-quota-ring-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.ag-quota-ring-reset {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* 展开的模型明细面板 */
+.ag-quota-models-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light, var(--border));
+}
+.ag-quota-models-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+/* plan-20261123-ux-fixes：额度池筛选标签自然换行、超长池名省略，避免在 Collapse 容器内横向裁切 */
+.ag-quota-pool-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ag-quota-pool-btn.btn {
+  max-width: 220px;
+  gap: 5px;
+}
+.ag-quota-pool-btn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ag-quota-pool-btn-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+.ag-quota-models-caption {
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+.ag-quota-models-search {
+  width: 100%;
+  max-width: 260px;
+  min-width: 0;
+}
+.ag-quota-models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 6px;
+}
+.ag-quota-model-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: var(--r-md);
+  background: var(--color-card);
+  border: 1px solid var(--border-light, var(--border));
+  transition: border-color var(--dur-2) var(--ease-standard);
+}
+.ag-quota-model-chip:hover {
+  border-color: var(--border-hover);
+}
+.ag-quota-model-chip-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.ag-quota-model-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text-1);
+}
+.ag-quota-model-chip-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--text-3);
+}
+.ag-quota-model-chip-pct {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--info);
+}
+.ag-quota-model-chip.tone-warn .ag-quota-model-chip-pct { color: var(--warning); }
+.ag-quota-model-chip.tone-danger .ag-quota-model-chip-pct { color: var(--error); }
+.ag-quota-model-chip.tone-unknown .ag-quota-model-chip-pct { color: var(--text-3); }
+.ag-quota-models-empty {
+  padding: 12px 4px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+/* 加载骨架：总览条 + 3 卡片网格定高，避免下方凭据区跳动 */
+.ag-quota-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 202px;
+}
+.ag-quota-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 10px;
+}

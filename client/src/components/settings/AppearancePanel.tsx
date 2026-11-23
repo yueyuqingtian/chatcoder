@@ -14,9 +14,8 @@ import {
 } from "../../store/toolCard";
 import { useUiStore, UI_FONT_OPTIONS } from "../../store/ui";
 import { isFontInstalled, revalidateFonts } from "../../utils/fontProbe";
-import { Select, Slider, type SelectOption } from "../ui";
+import { CardRow, Section, Segmented, Select, Slider, Switch, type SelectOption } from "../ui";
 import { Dada } from "../mascot/Dada";
-import { Row, Sw } from "./shared";
 
 const THEMES: Record<Theme, string> = { light: "浅色", dark: "深色" };
 
@@ -102,22 +101,18 @@ export function AppearancePanel() {
     && (uiFontOptions.find((o) => o.value === ui.uiFontFamily)?.disabled ?? false);
 
   return (
-    <div className="settings-card-stack">
-      <div className="settings-card">
-        <Row title="主题模式" desc="切换界面的浅色或深色配色，立即生效">
-          <div style={{ display: "flex", gap: 6 }}>
-            {(Object.keys(THEMES) as Theme[]).map((t) => (
-              <button
-                key={t}
-                className={"settings-pill" + (theme === t ? " active" : "")}
-                onClick={() => setTheme(t)}
-              >
-                {THEMES[t]}
-              </button>
-            ))}
-          </div>
-        </Row>
-        <Row title="主题世界" desc="决定强调色、背景场景与嗒嗒的装扮；深色模式下底色保持中性" />
+    <>
+      <Section title="主题与毛玻璃">
+        <CardRow title="主题模式" desc="切换界面的浅色或深色配色，立即生效">
+          <Segmented<Theme>
+            size="sm"
+            value={theme}
+            onChange={setTheme}
+            aria-label="主题模式"
+            options={(Object.keys(THEMES) as Theme[]).map((t) => ({ value: t, label: THEMES[t] }))}
+          />
+        </CardRow>
+        <CardRow title="主题世界" desc="决定强调色、背景场景与嗒嗒的装扮；深色模式下底色保持中性" />
         <div className="world-grid" role="radiogroup" aria-label="主题世界">
           {WORLDS.map((w) => (
             <button
@@ -148,35 +143,33 @@ export function AppearancePanel() {
             </button>
           ))}
         </div>
-        <Row
+        <CardRow
           title="毛玻璃效果"
           desc={
             (ui.glassmorphism ? "左侧面板半透明磨砂，透出桌面壁纸" : "左侧面板使用实色底")
             + (ui.glassNeedRestart ? "（设置已保存，重启应用后生效）" : "")
           }
         >
-          <Sw checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
-        </Row>
+          <Switch checked={ui.glassmorphism} onChange={(v) => ui.setPrefs({ glassmorphism: v })} />
+        </CardRow>
         {ui.glassmorphism && (
-          <Row title="玻璃强度" desc="调节左侧面板透出桌面壁纸的程度；深色壁纸下若看不出透出，请选「深邃」">
-            <div style={{ display: "flex", gap: 6 }}>
-              {GLASS_STRENGTHS.map((s) => (
-                <button
-                  key={s.value}
-                  className={"settings-pill" + ((ui.glassStrength ?? 1) === s.value ? " active" : "")}
-                  title={s.desc}
-                  onClick={() => ui.setPrefs({ glassStrength: s.value })}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </Row>
+          <CardRow
+            title="玻璃强度"
+            desc={`调节左侧面板透出桌面壁纸的程度（${GLASS_STRENGTHS.find((s) => s.value === (ui.glassStrength ?? 1))?.desc ?? ""}）`}
+          >
+            <Segmented<string>
+              size="sm"
+              value={String(ui.glassStrength ?? 1)}
+              onChange={(v) => ui.setPrefs({ glassStrength: Number(v) })}
+              aria-label="玻璃强度"
+              options={GLASS_STRENGTHS.map((s) => ({ value: String(s.value), label: s.label }))}
+            />
+          </CardRow>
         )}
-      </div>
+      </Section>
 
-      <div className="settings-card">
-        <Row
+      <Section title="排版与字体">
+        <CardRow
           title="界面字体"
           desc={
             selectedUiFont.desc
@@ -189,62 +182,58 @@ export function AppearancePanel() {
             options={uiFontOptions}
             aria-label="界面字体"
           />
-        </Row>
-        <Row title="对话字号" desc="对话消息的文字大小（立即生效）">
+        </CardRow>
+        <CardRow title="对话字号" desc="对话消息的文字大小（立即生效）">
           <Slider min={11} max={18} step={1} value={ui.chatFontSize}
             onChange={(v) => ui.setPrefs({ chatFontSize: v })} format={(v) => `${v}px`} aria-label="对话字号" />
-        </Row>
-        <Row title="消息行距" desc="对话消息的行高倍数，数值越大行间越宽松（立即生效）">
+        </CardRow>
+        <CardRow title="消息行距" desc="对话消息的行高倍数，数值越大行间越宽松（立即生效）">
           <Slider min={1.2} max={2.2} step={0.05} value={ui.chatLineHeight}
             onChange={(v) => ui.setPrefs({ chatLineHeight: v })} format={(v) => v.toFixed(2)} aria-label="消息行距" />
-        </Row>
-        <Row title="内容展示宽度" desc="消息与输入框的最大宽度；拖到最左（不限）时铺满整个内容区">
+        </CardRow>
+        <CardRow title="内容展示宽度" desc="消息与输入框的最大宽度；拖到最左（不限）时铺满整个内容区">
           <Slider min={0} max={1600} step={50} value={ui.contentMaxWidth}
             onChange={(v) => ui.setPrefs({ contentMaxWidth: v })}
             format={(v) => (v === 0 ? "不限" : `${v}px`)} aria-label="内容展示宽度" />
-        </Row>
-        <Row
+        </CardRow>
+        <CardRow
           title="代码块自动换行"
           desc="开启后消息流与文档预览中的代码块、文件预览长行自动折行；也可直接在卡片右上角点击图标切换"
         >
-          <Sw checked={ui.codeWordWrap} onChange={(v) => ui.setPrefs({ codeWordWrap: v })} />
-        </Row>
-      </div>
+          <Switch checked={ui.codeWordWrap} onChange={(v) => ui.setPrefs({ codeWordWrap: v })} />
+        </CardRow>
+      </Section>
 
-      <div className="settings-card">
-        <div className="settings-card-title">会话工具卡</div>
-        <Row title="默认形态" desc="新打开的会话中，右上角工具卡先显示为胶囊还是直接展开（会话内手动切换仍会记住）">
-          <div style={{ display: "flex", gap: 6 }}>
-            {(Object.keys(TOOL_CARD_FORMS) as ToolCardDefaultForm[]).map((f) => (
-              <button
-                key={f}
-                type="button"
-                className={"settings-pill" + (toolCardForm === f ? " active" : "")}
-                onClick={() => saveToolCardForm(f)}
-              >
-                {TOOL_CARD_FORMS[f]}
-              </button>
-            ))}
-          </div>
-        </Row>
+      <Section title="会话工具卡">
+        <CardRow title="默认形态" desc="新打开的会话中，右上角工具卡先显示为胶囊还是直接展开（会话内手动切换仍会记住）">
+          <Segmented<ToolCardDefaultForm>
+            size="sm"
+            value={toolCardForm}
+            onChange={(v) => saveToolCardForm(v)}
+            aria-label="默认形态"
+            options={(Object.keys(TOOL_CARD_FORMS) as ToolCardDefaultForm[]).map((f) => ({
+              value: f,
+              label: TOOL_CARD_FORMS[f],
+            }))}
+          />
+        </CardRow>
         {TOOL_CARD_SECTIONS.map((key) => (
-          <Row key={key} title={`${SECTION_LABEL[key]}栏默认展开`} desc={TOOL_CARD_SECTION_DESC[key]}>
-            <Sw checked={toolCardSections[key]} onChange={(v) => saveToolCardSection(key, v)} />
-          </Row>
+          <CardRow key={key} title={`${SECTION_LABEL[key]}栏默认展开`} desc={TOOL_CARD_SECTION_DESC[key]}>
+            <Switch checked={toolCardSections[key]} onChange={(v) => saveToolCardSection(key, v)} />
+          </CardRow>
         ))}
-      </div>
+      </Section>
 
-      <div className="settings-card">
-        <div className="settings-card-title">左侧面板外观</div>
-        <Row title="文字大小" desc="左侧面板会话与导航文字大小">
+      <Section title="左侧面板外观">
+        <CardRow title="文字大小" desc="左侧面板会话与导航文字大小">
           <Slider min={11} max={18} step={1} value={ui.sidebarFontSize}
             onChange={(v) => ui.setPrefs({ sidebarFontSize: v })} format={(v) => `${v}px`} aria-label="侧栏文字大小" />
-        </Row>
-        <Row title="图标大小" desc="左侧面板图标尺寸">
+        </CardRow>
+        <CardRow title="图标大小" desc="左侧面板图标尺寸">
           <Slider min={12} max={22} step={1} value={ui.sidebarIconSize}
             onChange={(v) => ui.setPrefs({ sidebarIconSize: v })} format={(v) => `${v}px`} aria-label="侧栏图标大小" />
-        </Row>
-      </div>
-    </div>
+        </CardRow>
+      </Section>
+    </>
   );
 }

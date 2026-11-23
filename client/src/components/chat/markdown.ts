@@ -76,6 +76,11 @@ export function turnToMarkdown(entry: TimelineEntry): string {
       case "error":
         parts.push(`**错误**：${msgText(item.msg.content)}`);
         break;
+      case "interactive-ui": {
+        const title = String(((item.msg.content?.args as Record<string, unknown> | undefined)?.title) ?? "交互界面");
+        parts.push(`[交互界面] ${title}`);
+        break;
+      }
       default:
         break;
     }
@@ -129,6 +134,11 @@ export function turnToPlainText(entry: TimelineEntry): string {
       case "error":
         parts.push(`错误: ${msgText(item.msg.content)}`);
         break;
+      case "interactive-ui": {
+        const title = String(((item.msg.content?.args as Record<string, unknown> | undefined)?.title) ?? "交互界面");
+        parts.push(`[交互界面] ${title}`);
+        break;
+      }
       default:
         break;
     }
@@ -179,6 +189,11 @@ export function turnPartToPlainText(entry: TimelineEntry, part: "user" | "ai"): 
       case "error":
         parts.push(`错误: ${msgText(item.msg.content)}`);
         break;
+      case "interactive-ui": {
+        const title = String(((item.msg.content?.args as Record<string, unknown> | undefined)?.title) ?? "交互界面");
+        parts.push(`[交互界面] ${title}`);
+        break;
+      }
       default:
         break;
     }

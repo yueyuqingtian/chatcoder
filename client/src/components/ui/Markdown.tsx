@@ -11,7 +11,7 @@
  *  - 代码块头部「语言 + 复制」——复制为图标按钮（去文字噪音，保留 aria-label）；
  *  - 文件链接先校验存在性再允许点击，避免点空。
  */
-import { memo, useState, useCallback, useRef, useEffect, isValidElement, Children, type ReactNode } from "react";
+import { memo, useState, useCallback, useRef, useEffect, useContext, createContext, isValidElement, Children, type ReactNode } from "react";
 import { FileIcon } from "../iconkit/FileIcon";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -19,18 +19,27 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { IconCopy, IconCheck, IconWrapText, IconNoWrap } from "../icons";
+import { IconCopy, IconCheck, IconWrapText, IconNoWrap, IconEye, IconCode, IconMaximize } from "../icons";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { useUiStore } from "../../store/ui";
 import { api, resolveFileUrl } from "../../api/client";
 import { openGallery } from "../../store/gallery";
 import { TableBlock } from "./TableBlock";
+import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { nodeText } from "./markdownData";
 import { LongCode } from "./LongCode";
 import { ViewportBlock } from "./ViewportBlock";
+import { MermaidBlock } from "./MermaidBlock";
+import { InteractiveSandbox } from "../chat/InteractiveSandbox";
 import { isSampling, recordMarkdown } from "../../perf/metrics";
+
+/** 流式尾块上下文：未闭合围栏期间为 true，防止 Mermaid / HTML 预览在半截输出时反复重绘报错。 */
+export const MarkdownLiveContext = createContext(false);
+
+const AUTO_PREVIEW_LANGS = new Set(["html-preview", "interactive-html", "chatcoder-ui"]);
+const PREVIEWABLE_LANGS = new Set(["html", "htm", "svg", ...AUTO_PREVIEW_LANGS]);
 
 /** 相对链接存在性校验缓存（path → 存在且为文件）；长会话中路径不断增加，设上限防止无界增长 */
 const STAT_CACHE_LIMIT = 1000;
@@ -44,20 +53,25 @@ function statCacheSet(key: string, value: boolean): void {
 
 export function CodeBlockWrapper({ children, live = false }: { children: ReactNode; live?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const [userView, setUserView] = useState<"preview" | "code" | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const isLive = live || useContext(MarkdownLiveContext);
   const codeWordWrap = useUiStore((s) => s.codeWordWrap);
   const setPrefs = useUiStore((s) => s.setPrefs);
   const preRef = useRef<HTMLPreElement>(null);
   const source = nodeText(children);
 
-  // 从子节点中提取 language-xxx 标记
+  // 从子节点中提取 language-xxx 标记与可选围栏元信息（如 ```html preview）
   let detectedLang = "";
+  let codeMeta = "";
   if (children && typeof children === "object" && "props" in children) {
-    const childProps = (children as { props?: { className?: string } }).props;
+    const childProps = (children as { props?: { className?: string; "data-meta"?: string } }).props;
     const className = childProps?.className || "";
     const m = className.match(/language-([a-zA-Z0-9_-]+)/);
     if (m && m[1]) {
       detectedLang = m[1].toLowerCase();
     }
+    codeMeta = (childProps?.["data-meta"] || "").toLowerCase();
   }
 
   const handleCopy = useCallback(() => {
@@ -72,22 +86,64 @@ export function CodeBlockWrapper({ children, live = false }: { children: ReactNo
     });
   }, [source]);
 
+  if (detectedLang === "mermaid") {
+    return <MermaidBlock source={source} live={isLive} />;
+  }
+
+  const isPreviewable = PREVIEWABLE_LANGS.has(detectedLang);
+  const isAutoPreview = AUTO_PREVIEW_LANGS.has(detectedLang)
+    || ((detectedLang === "html" || detectedLang === "htm") && /\bpreview\b/.test(codeMeta));
+  const showPreview = isPreviewable && !isLive && (userView ? userView === "preview" : isAutoPreview);
+  const sandboxHtml = detectedLang === "svg"
+    ? `<div style="display:flex;justify-content:center;align-items:center">${source}</div>`
+    : source;
+  const cacheKey = isPreviewable ? `md:${detectedLang}:${source.length}:${source.slice(0, 64)}` : "";
+
   return (
-    <div className="md-code-block" role="region" aria-label="代码块">
+    <div className="md-code-block" role="region" aria-label={showPreview ? "交互预览" : "代码块"}>
       <div className="md-code-head">
         <span className="md-code-lang">{detectedLang || "code"}</span>
         <div className="md-code-actions">
-          <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
-            <button
-              className="md-code-action-btn"
-              onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
-              aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
-              aria-pressed={codeWordWrap}
-              type="button"
-            >
-              {codeWordWrap ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
-            </button>
-          </Tooltip>
+          {isPreviewable && !isLive && (
+            <>
+              <Tooltip content={showPreview ? "查看源码" : "在安全沙箱中预览交互效果"} side="top">
+                <button
+                  className={`md-code-action-btn${showPreview ? " is-active" : ""}`}
+                  onClick={() => setUserView(showPreview ? "code" : "preview")}
+                  aria-label={showPreview ? "查看源码" : "预览效果"}
+                  aria-pressed={showPreview}
+                  type="button"
+                >
+                  {showPreview ? <IconCode size={14} /> : <IconEye size={14} />}
+                </button>
+              </Tooltip>
+              {showPreview && (
+                <Tooltip content="大窗查看" side="top">
+                  <button
+                    className="md-code-action-btn"
+                    onClick={() => setModalOpen(true)}
+                    aria-label="大窗查看"
+                    type="button"
+                  >
+                    <IconMaximize size={13} />
+                  </button>
+                </Tooltip>
+              )}
+            </>
+          )}
+          {!showPreview && (
+            <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+              <button
+                className="md-code-action-btn"
+                onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
+                aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
+                aria-pressed={codeWordWrap}
+                type="button"
+              >
+                {codeWordWrap ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
+              </button>
+            </Tooltip>
+          )}
           {/* plan-282-1416：复制按钮图标化（原「复制」文字改为纯图标 + aria-label），
               头部更安静，同时保留已复制反馈（图标换勾 + copied 态着色） */}
           {/* plan-20261016-ux（问题 8）：悬停提示改用统一 Tooltip（不再用原生 title） */}
@@ -103,8 +159,43 @@ export function CodeBlockWrapper({ children, live = false }: { children: ReactNo
           </Tooltip>
         </div>
       </div>
-      <pre className={`md-code-pre${codeWordWrap ? " is-wrapped" : ""}`} ref={preRef}>{source.length > 12000
-        ? <LongCode source={source} language={detectedLang} live={live} /> : children}</pre>
+      {showPreview ? (
+        <div className="iui-code-preview">
+          <InteractiveSandbox html={sandboxHtml} cacheKey={cacheKey} title={`${detectedLang} 交互预览`} />
+          <Dialog
+            open={modalOpen}
+            onClose={() => setModalOpen(false)}
+            className="iui-modal-dialog"
+            bodyClassName="iui-modal-body"
+            title="交互预览"
+            subtitle="在安全沙箱大窗中查看与体验界面"
+            width={1400}
+            actions={
+              <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="bottom">
+                <button
+                  className={`md-code-copy-btn${copied ? " copied" : ""}`}
+                  onClick={handleCopy}
+                  aria-label={copied ? "已复制" : "复制源码"}
+                  type="button"
+                >
+                  {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                </button>
+              </Tooltip>
+            }
+          >
+            <div className="iui-modal-stage">
+              <InteractiveSandbox
+                html={sandboxHtml}
+                fillHeight
+                title={`${detectedLang} 大窗交互预览`}
+              />
+            </div>
+          </Dialog>
+        </div>
+      ) : (
+        <pre className={`md-code-pre${codeWordWrap ? " is-wrapped" : ""}`} ref={preRef}>{source.length > 12000
+          ? <LongCode source={source} language={detectedLang} live={isLive} /> : children}</pre>
+      )}
     </div>
   );
 }
@@ -174,9 +265,11 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
 
 /** 共享 markdown 组件映射——MarkdownContent 与 StreamingMarkdown（流式增量）共用，保证渲染一致 */
 export const markdownComponents: Components = {
-  code({ className, children }) {
+  code({ node, className, children }) {
     const lang = className?.replace("language-", "") || "";
-    return <code className={`md-inline-code language-${lang}`}>{children}</code>;
+    const meta = typeof (node?.data as { meta?: unknown } | undefined)?.meta === "string"
+      ? (node?.data as { meta: string }).meta : undefined;
+    return <code className={`md-inline-code language-${lang}`} data-meta={meta}>{children}</code>;
   },
   pre({ children }) { return <CodeBlockWrapper>{children}</CodeBlockWrapper>; },
   h1({ children }) { return <h1 className="md-h1">{children}</h1>; },

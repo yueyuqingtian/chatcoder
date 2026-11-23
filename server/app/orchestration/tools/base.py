@@ -34,6 +34,7 @@ class ToolContext:
     # plan-75-332: 审批卡「解释」专用思考深度默认取本 turn 的档位
     # （未指定时回落全局 agent_reasoning_effort，见 approval_explain_service）。
     reasoning_effort: str | None = None
+    workspace_read_only: bool = False
     # v7(B): 运行时输出回调——长命令（terminal_exec 同步模式）执行期间逐帧上报增量输出，
     # 由 agent_loop 注入闭包并广播 tool.output WS 事件（前端运行中实时展示）。
     on_tool_output: Callable[[str], Awaitable[None]] | None = None

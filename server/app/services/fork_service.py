@@ -238,6 +238,8 @@ def copy_snapshot(s, session_id, title=None, request_id=None):
         agents.append({"agent_id": target, "name": source.name if source else old.get("name", "历史子代理"),
             "turn_id": tmap.get(tid), "turn_status": "completed", "status": status if status in ("done", "failed", "terminated") else "terminated",
             "task_id": None, "task_title": None, "workflow": None, "token_usage": 0,
+            "subagent_mode": getattr(source, "subagent_mode", None) if source else old.get("subagent_mode"),
+            "subagent_role": getattr(source, "subagent_role", None) if source else old.get("subagent_role"),
             "message_count": sum(m.thread_id == aid for m in rows), "files_count": 0,
             "created_at": source.created_at if source else old.get("created_at"), "updated_at": None,
             "inherited": True})

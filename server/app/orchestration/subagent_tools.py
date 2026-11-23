@@ -38,6 +38,62 @@ EXPLORE_TOOLS = [
 ]
 
 
+CODE_READ_TOOLS = frozenset({
+    "fs_read", "fs_list", "fs_grep", "git_diff", "codebase_search",
+    "symbol_search", "outline", "feature_lookup",
+})
+
+
+def restrict_member_tools(schemas: list[dict], *, readonly: bool,
+                          parent_tools: frozenset[str] | None = None) -> list[dict]:
+    own = {schema["function"]["name"] for schema in SUBAGENT_OWN_TOOLS}
+    return [schema for schema in schemas if (name := schema["function"]["name"]) in own
+            or ((not readonly or name in CODE_READ_TOOLS)
+                and (parent_tools is None or name in parent_tools))]
+
+
+def apply_team_tools(schemas: list[dict], team, *, manage_existing: bool = False,
+                     allowed: set[str] | None = None) -> list[dict]:
+    from copy import deepcopy
+
+    out = [schema for schema in schemas if schema["function"]["name"] not in SUBAGENT_TOOL_NAMES]
+    available = team.available()
+    if available or manage_existing:
+        out = append_subagent_tools(out, allowed=allowed)
+        if not available:
+            return [schema for schema in out if schema["function"]["name"] != "spawn_subagent"]
+        spawn = next((schema for schema in out if schema["function"]["name"] == "spawn_subagent"), None)
+        if spawn is None:
+            return out
+        out.remove(spawn)
+        spawn = deepcopy(spawn)
+        function = spawn["function"]
+        function["description"] = team.notice() + "\n可选成员：\n" + "\n".join(
+            f"{m.id}: {m.name} ({m.mode}) — {m.description[:160]}"
+            for m in available if m.id is not None
+        )
+        properties = function["parameters"]["properties"]
+        modes = sorted({member.mode for member in available})
+        properties["mode"]["enum"] = modes
+        properties.pop("explore", None)
+        ids = [member.id for member in available if member.id is not None]
+        if ids:
+            properties["profile_id"] = {"type": "integer", "enum": ids,
+                                        "description": "选择成员，省略时使用该模式的内置成员。"}
+        if "agent" in modes:
+            properties["write_scope"] = {
+                "type": "array", "items": {"type": "string"}, "maxItems": 40,
+                "description": "预计会写入的工作区相对路径。可写任务要并发时应明确填写。",
+            }
+            properties["validation_resources"] = {
+                "type": "array", "items": {"type": "string"}, "maxItems": 20,
+                "description": "会独占的验证资源，例如浏览器标签、测试库或本地服务端口。",
+            }
+        properties.pop("purpose", None)
+        out.append(spawn)
+    return out
+
+
 async def available_subagent_tools(db, *, readonly: bool = False) -> list[dict]:
     """plan-20261105-subagent-tools：每次从启用配置装配拓展，避免依赖注册顺序或残留工具。"""
     from app.orchestration.tools.registry import tool_registry
@@ -156,7 +212,7 @@ SPAWN_SUBAGENT_SCHEMA = {
                     ),
                 },
             },
-            "required": ["task_title", "task_description"],
+            "required": ["task_title", "task_description", "mode"],
         },
     },
 }
@@ -437,6 +493,9 @@ def _spawn_schema(explore_only: bool) -> dict:
     props.pop("explore", None)
     props.pop("mode", None)
     props.pop("purpose", None)
+    fn["parameters"]["required"] = [
+        k for k in (fn["parameters"].get("required") or []) if k in props
+    ]
     return schema
 
 

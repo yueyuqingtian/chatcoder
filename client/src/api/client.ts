@@ -320,7 +320,8 @@ export interface TreeNode {
   name: string;
   type: "dir" | "file";
   path: string;
-  children?: TreeNode[];
+  /** 空数组表示空目录，null 或缺省表示子项尚未加载。 */
+  children?: TreeNode[] | null;
 }
 
 export interface ProjectTreeOut {
@@ -336,12 +337,14 @@ export interface ComposerRefOut {
   /** plan-633-2604（R3）：新增 "dir"——拖入的文件夹引用（值为目录路径，AI 侧用 fs_list 查看）
    *  plan-693-2868（P1）：新增 "microapp"——微应用引用（值为 appId，发送后仍保留在输入框里，可继续追问）。
    *  与 ComposerCore.ComposerRef、drafts.ComposerRefDraft 三处必须同步，漏一处 tsc 就报错。 */
-  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp";
+  kind: "file" | "dir" | "skill" | "mcp" | "plugin" | "session" | "microapp" | "ui-selection";
   value: string;
   label: string;
   project_label?: string;
   /** plan-693-2868（P1）：微应用引用记下版本——「查看界面」要按这个版本打开标签 */
   version?: string;
+  /** plan-interactive-ui：交互方案引用携带的选中详情与源码摘要，注入模型上下文用 */
+  detail?: string;
 }
 
 export interface SessionMentionCandidate {
@@ -952,6 +955,53 @@ export interface GitRepoOut {
 /** plan-20261019-git-multirepo：Git 接口的作用对象——哪个仓库（相对项目根）、哪个会话（会话工作树优先） */
 export interface GitScope { repo?: string; sessionId?: number | null }
 
+export interface GitStashEntry {
+  ref: string;
+  index: number;
+  message: string;
+  date: string;
+  sha: string;
+  branch: string | null;
+}
+
+export interface GitStashShowFile {
+  path: string;
+  code: string;
+  additions: number | null;
+  deletions: number | null;
+}
+
+export interface GitStashShowOut {
+  ref: string;
+  index: number;
+  stat: string;
+  patch?: string;
+  truncated?: boolean;
+  files: GitStashShowFile[];
+  additions: number;
+  deletions: number;
+}
+
+export interface BrowserBookmarkOut {
+  id: number;
+  title: string;
+  url: string;
+  folder: string;
+  favicon_url: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrowserHistoryOut {
+  id: number;
+  url: string;
+  title: string;
+  favicon_url: string | null;
+  visit_count: number;
+  last_visited_at: string;
+}
+
 function gitQs(projectId: number, scope: GitScope = {}): string {
   const q = new URLSearchParams({ project_id: String(projectId) });
   if (scope.repo) q.set("repo", scope.repo);
@@ -985,6 +1035,36 @@ export interface MessageSearch {
   items: Array<{ id: number; turn_id: number | null; snippet: string }>;
   has_more: boolean;
   before_id: number | null;
+}
+
+export interface OutlineAttachment {
+  file_id: string;
+  filename: string;
+  url: string;
+  size: number;
+  mime_type: string;
+  type: string;
+}
+
+export interface OutlineRef {
+  kind: ComposerRefOut["kind"];
+  value: string;
+  label: string;
+  project_label?: string;
+}
+
+export interface SessionOutlineItem {
+  message_id: number;
+  turn_id: number | null;
+  created_at: string | null;
+  text: string;
+  attachments: OutlineAttachment[];
+  refs: OutlineRef[];
+}
+
+export interface SessionOutline {
+  items: SessionOutlineItem[];
+  revision: number;
 }
 
 export const api = {
@@ -1176,13 +1256,29 @@ export const api = {
   setArthasConfig: (patch: Record<string, unknown>) =>
     put<{ ok: boolean; error?: string }>("/debug/arthas/config", patch),
   scanProjectRules: (id: number) => get<string[]>(`/projects/${id}/scan-rules`),
-  getProjectTree: (id: number, depth = 8) => get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}`),
+  getProjectTree: (id: number, depth = 8, showHidden = false) =>
+    get<ProjectTreeOut>(`/projects/${id}/tree?depth=${depth}&show_hidden=${showHidden ? "true" : "false"}`),
   /** 问题2: 轻量文件存在性校验（不读内容），供消息内文件链接判断是否可点击 */
   projectStat: (id: number, path: string) =>
     get<{ exists: boolean; is_dir: boolean }>(`/projects/${id}/stat?path=${encodeURIComponent(path)}`),
   /** 问题13: 按路径子串搜索项目内全部文件（@ 引用文件补全） */
-  projectFileSearch: (id: number, q: string, limit = 100) =>
-    get<string[]>(`/projects/${id}/files/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  projectFileSearch: (id: number, q: string, limit = 100, showHidden = false, options: {
+    sessionId?: number | null; mode?: "path" | "content"; extension?: string; signal?: AbortSignal;
+  } = {}) => {
+    const params = new URLSearchParams({ q, limit: String(limit), show_hidden: String(showHidden) });
+    if (options.sessionId != null) params.set("session_id", String(options.sessionId));
+    if (options.mode) params.set("mode", options.mode);
+    if (options.extension) params.set("extension", options.extension);
+    return get<string[]>(`/projects/${id}/files/search?${params}`, options.signal);
+  },
+  projectFileCreate: (id: number, data: { path: string; type: "file" | "dir"; content?: string; session_id?: number | null }) =>
+    post<{ ok: boolean; path: string; relative_path: string; type: "file" | "dir" }>(`/projects/${id}/files/create`, data),
+  projectFileRename: (id: number, data: { src: string; dst: string; session_id?: number | null }) =>
+    post<{ ok: boolean; path: string; relative_path: string; type: "file" | "dir" }>(`/projects/${id}/files/rename`, data),
+  projectFileDelete: (id: number, data: { path: string; recursive?: boolean; permanent?: boolean; session_id?: number | null }) =>
+    post<{ ok: boolean; path: string; trashed: boolean }>(`/projects/${id}/files/delete`, data),
+  projectFileDuplicate: (id: number, data: { path: string; dst?: string; session_id?: number | null }) =>
+    post<{ ok: boolean; path: string; relative_path: string; type: "file" | "dir" }>(`/projects/${id}/files/duplicate`, data),
   readProjectFile: (id: number, path: string) =>
     get<{ path: string; content: string; size: number; truncated: boolean; language: string | null }>(
       `/projects/${id}/read-file?path=${encodeURIComponent(path)}`,
@@ -1257,7 +1353,7 @@ export const api = {
   // ── 轮次（turn）──
   createTurn: (body: TurnCreateBody) => post<TurnOut>("/turns", body),
   /** plan-547: 向运行中的 turn 注入用户消息（下次 LLM 调用前传达，不新开 turn） */
-  injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[]; refs?: ComposerRefOut[] }) =>
+  injectTurnInput: (turnId: number, body: { request_id?: string; content: string; attachments?: Record<string, unknown>[]; model_id?: number; refs?: ComposerRefOut[] }) =>
     post<{ ok: boolean; queued: boolean; error?: string }>(`/turns/${turnId}/inputs`, body),
   listTurns: (sessionId: number) => get<TurnOut[]>(`/turns/sessions/${sessionId}`),
   cancelTurn: (turnId: number) => postCancel<{ ok: boolean }>(`/turns/${turnId}/cancel?source=main`),
@@ -1295,14 +1391,38 @@ export const api = {
     post<{ ok: boolean }>("/git/stage", { ...gitBody(projectId, scope), paths }),
   gitUnstage: (projectId: number, paths: string[], scope: GitScope = {}) =>
     post<{ ok: boolean }>("/git/unstage", { ...gitBody(projectId, scope), paths }),
-  gitDiscard: (projectId: number, paths: string[], untracked: string[], scope: GitScope = {}) =>
-    post<{ ok: boolean }>("/git/discard", { ...gitBody(projectId, scope), paths, untracked }),
+  gitDiscard: (projectId: number, paths: string[], untracked: string[], scope: GitScope = {}, preserveIndex = false) =>
+    post<{ ok: boolean }>("/git/discard", { ...gitBody(projectId, scope), paths, untracked, preserve_index: preserveIndex }),
   gitCommit: (projectId: number, message: string, amend = false, scope: GitScope = {}) =>
     post<{ ok: boolean; sha: string }>("/git/commit", { ...gitBody(projectId, scope), message, amend }),
   // 拉取冲突不抛错：conflict/conflicts/state 交给面板直接进入冲突处理
-  gitSync: (projectId: number, action: "fetch" | "pull" | "push", scope: GitScope = {}) =>
+  gitSync: (projectId: number, action: "fetch" | "pull" | "push", scope: GitScope = {}, opId?: string) =>
+    post<{ ok: boolean; output: string; conflict?: boolean; conflicts?: string[]; state?: string; cancelled?: boolean }>(
+      "/git/sync", { ...gitBody(projectId, scope), action, op_id: opId || undefined }),
+  gitSyncProgress: (opId: string, signal?: AbortSignal) =>
+    get<{ phase: string | null; percent: number | null }>(`/git/sync/progress?op_id=${encodeURIComponent(opId)}`, signal),
+  gitSyncCancel: (opId: string) =>
+    post<{ ok: boolean; cancelled: boolean }>("/git/sync/cancel", { op_id: opId }),
+  gitResetSoft: (projectId: number, scope: GitScope = {}) =>
+    post<{ ok: boolean; previous_sha: string; message: string }>("/git/reset-soft", gitBody(projectId, scope)),
+  gitStageHunk: (projectId: number, patch: string, scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/stage-hunk", { ...gitBody(projectId, scope), patch }),
+  gitUnstageHunk: (projectId: number, patch: string, scope: GitScope = {}) =>
+    post<{ ok: boolean }>("/git/unstage-hunk", { ...gitBody(projectId, scope), patch }),
+  gitStashes: (projectId: number, scope: GitScope = {}) =>
+    get<GitStashEntry[]>(`/git/stashes?${gitQs(projectId, scope)}`),
+  gitStashShow: (projectId: number, index = 0, scope: GitScope = {}) =>
+    get<GitStashShowOut>(`/git/stash/show?${gitQs(projectId, scope)}&index=${index}`),
+  gitStashPush: (projectId: number, opts: { message?: string; include_untracked?: boolean; paths?: string[] } = {}, scope: GitScope = {}) =>
+    post<{ ok: boolean; output: string }>("/git/stash/push", { ...gitBody(projectId, scope), ...opts }),
+  gitStashApply: (projectId: number, index = 0, scope: GitScope = {}) =>
     post<{ ok: boolean; output: string; conflict?: boolean; conflicts?: string[]; state?: string }>(
-      "/git/sync", { ...gitBody(projectId, scope), action }),
+      "/git/stash/apply", { ...gitBody(projectId, scope), index }),
+  gitStashPop: (projectId: number, index = 0, scope: GitScope = {}) =>
+    post<{ ok: boolean; output: string; conflict?: boolean; conflicts?: string[]; state?: string }>(
+      "/git/stash/pop", { ...gitBody(projectId, scope), index }),
+  gitStashDrop: (projectId: number, index = 0, scope: GitScope = {}) =>
+    post<{ ok: boolean; output: string }>("/git/stash/drop", { ...gitBody(projectId, scope), index }),
   // 切换分支时可能返回 switched=false + reason=dirty：界面据此让用户选择暂存或放弃改动
   gitBranch: (projectId: number, action: "checkout" | "create" | "delete", name: string,
     opts: { base?: string; force?: boolean; onDirty?: "stash" | "discard" } = {}, scope: GitScope = {}) =>
@@ -1362,6 +1482,8 @@ export const api = {
   searchMessages: (sessionId: number, q: string, threadId?: number, signal?: AbortSignal, beforeId?: number) =>
     get<MessageSearch>(`/turns/sessions/${sessionId}/messages/search?${new URLSearchParams({ q,
       ...(threadId != null ? { thread_id: String(threadId) } : {}), ...(beforeId != null ? { before_id: String(beforeId) } : {}) })}`, signal),
+  sessionOutline: (sessionId: number, threadId?: number, signal?: AbortSignal) =>
+    get<SessionOutline>(`/turns/sessions/${sessionId}/outline${threadId != null ? `?thread_id=${threadId}` : ""}`, signal),
   // v30.1: 压缩块索引 / 原文还原（AI 与前端按索引查看压缩前会话）
   listCompactions: (sessionId: number) =>
     get<CompactionIndexOut[]>(`/sessions/${sessionId}/compactions`),
@@ -1374,6 +1496,8 @@ export const api = {
     get<Array<{
       agent_id: number; name: string; turn_id: number | null; task_id: number | null;
       task_title: string | null; status: string;
+      subagent_mode?: string | null; subagent_role?: string | null;
+      subagent_profile_name?: string | null;
       /** v36 (plan-321-1600 M2): 面板头部“用时 / 文件数 / 用量”展示字段 */
       created_at?: string | null; updated_at?: string | null;
       token_usage?: number; files_count?: number;
@@ -1539,6 +1663,16 @@ export const api = {
   bulkSaveProviderModels: (id: number, models: Array<{
     name: string; is_active?: boolean; context_window?: number; is_multimodal?: boolean; reasoning_efforts?: string[];
   }>) => post<ModelOut[]>(`/providers/${id}/models`, { models }),
+  /** plan-20261123-ux-fixes：批量修改/删除供应商下多个模型 */
+  batchUpdateProviderModels: (id: number, data: {
+    model_ids: number[];
+    is_active?: boolean;
+    is_multimodal?: boolean;
+    context_window?: number;
+    reasoning_efforts?: string[];
+  }) => patch<ModelOut[]>(`/providers/${id}/models/batch`, data),
+  batchDeleteProviderModels: (id: number, modelIds: number[]) =>
+    post<{ ok: boolean; deleted: number }>(`/providers/${id}/models/batch-delete`, { model_ids: modelIds }),
 
   // ── plan-248-1258 M2.2/M2.3: 供应商凭据（多 Key/多账号）与代理 ──
   listProviderCredentials: (id: number, signal?: AbortSignal) => getSettings<ProviderCredentialOut[]>(`/providers/${id}/credentials`, signal),
@@ -1609,6 +1743,34 @@ export const api = {
   /** 剩余积分（GetUsageLimits）；force=true 跳过 10s 缓存 */
   kiroQuota: (id: number, opts?: { force?: boolean }) =>
     get<KiroQuotaOut>(`/providers/${id}/kiro/quota${opts?.force ? "?force=true" : ""}`),
+
+  // ── antigravity（Google Antigravity）供应商：账号登录型，两条登录路径 ──
+  /** 主路径：导入本机 Antigravity 客户端登录态。注意后端在本机无登录态时返回 200 + ok=false + error，
+   *  只有服务端异常才是 HTTPException，所以两条失败通道都要处理。 */
+  antigravityLoginImport: (id: number) => post<{
+    ok: boolean; account?: string; project?: string; tier?: string; error?: string | null;
+  }>(`/providers/${id}/antigravity/login/import`, {}),
+  /** 兜底路径：应用内独立 Google OAuth，返回 auth_url 由前端 window.open 打开 */
+  antigravityLoginStart: (id: number) => post<{
+    ok: boolean; auth_url?: string | null; state?: string | null; error?: string | null;
+  }>(`/providers/${id}/antigravity/login/start`, {}),
+  antigravityLoginStatus: (id: number) => get<{
+    status: "pending" | "success" | "failed" | "cancelled" | "idle";
+    message?: string; account?: string;
+  }>(`/providers/${id}/antigravity/login/status`),
+  antigravityLoginCancel: (id: number) => post<{ ok: boolean }>(`/providers/${id}/antigravity/login/cancel`, {}),
+  antigravityLogout: (id: number) => post<{ ok: boolean }>(`/providers/${id}/antigravity/logout`, {}),
+  antigravitySync: (id: number) =>
+    post<{ ok: boolean; added: number; total: number; error?: string | null }>(`/providers/${id}/antigravity/sync`, {}),
+  /** 账号配额（周限额 + 5 小时限额，与 Antigravity 客户端同源）；force=true 跳过后端 30s 缓存，
+   *  credentialId 指定多账号场景下的目标凭据。注意查询失败也是 200 + ok=false + error，与上面一样有两条失败通道。 */
+  antigravityQuota: (id: number, force = false, credentialId?: number | null) => {
+    const qs = new URLSearchParams();
+    if (force) qs.set("force", "true");
+    if (credentialId != null) qs.set("credential_id", String(credentialId));
+    const q = qs.toString();
+    return get<AntigravityQuotaOut>(`/providers/${id}/antigravity/quota${q ? `?${q}` : ""}`);
+  },
 
   // ── workbuddy（腾讯 CodeBuddy/WorkBuddy）供应商（v24）──
   // plan-271-1364: 每次 loginStart 视为「登录一个新账号」，成功后新建凭据行
@@ -2002,18 +2164,42 @@ export const api = {
 
   // ── 子代理类型（v2.2: 对齐 zcode 3.13）──
   listSubagents: () => get<SubagentProfileOut[]>("/subagents"),
-  createSubagent: (data: {
-    name: string; description?: string | null;
-    model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
-    /** plan-330-1648 M2: 思考深度档位（null = 跟随会话本轮档位） */
-    reasoning_effort?: string | null;
-  }) => post<SubagentProfileOut>("/subagents", data),
-  updateSubagent: (id: number, data: {
-    name?: string; description?: string | null;
-    model_id?: number | null; system_prompt?: string | null; is_active?: boolean;
-    reasoning_effort?: string | null;
-  }) => patch<SubagentProfileOut>(`/subagents/${id}`, data),
+  getSubagent: (id: number) => get<SubagentProfileDetail>(`/subagents/${id}`),
+  createSubagent: (data: SubagentProfileInput & { name: string }) =>
+    post<SubagentProfileDetail>("/subagents", data),
+  updateSubagent: (id: number, data: SubagentProfileInput) =>
+    patch<SubagentProfileOut>(`/subagents/${id}`, data),
   deleteSubagent: (id: number) => del<{ ok: boolean }>(`/subagents/${id}`),
+
+  // ── 内置浏览器持久化（跨会话共享书签与历史，plan-771-3177）──
+  listBrowserBookmarks: (q?: string, folder?: string) => {
+    const p = new URLSearchParams();
+    if (q) p.set("q", q);
+    if (folder !== undefined) p.set("folder", folder);
+    const qs = p.toString();
+    return get<{ items: BrowserBookmarkOut[]; total: number; folders: string[] }>(`/browser/bookmarks${qs ? `?${qs}` : ""}`);
+  },
+  saveBrowserBookmark: (body: { url: string; title?: string; folder?: string; favicon_url?: string | null; sort_order?: number }) =>
+    post<{ created: boolean; item: BrowserBookmarkOut }>("/browser/bookmarks", body),
+  updateBrowserBookmark: (id: number, body: { title?: string; url?: string; folder?: string; favicon_url?: string | null; sort_order?: number }) =>
+    patch<{ item: BrowserBookmarkOut }>(`/browser/bookmarks/${id}`, body),
+  deleteBrowserBookmark: (id: number) =>
+    del<{ ok: boolean }>(`/browser/bookmarks/${id}`),
+  exportBrowserBookmarks: () =>
+    get<{ version: number; items: BrowserBookmarkOut[] }>("/browser/bookmarks/export"),
+  importBrowserBookmarks: (items: unknown[]) =>
+    post<{ imported: number }>("/browser/bookmarks/import", { items }),
+  listBrowserHistory: (q?: string, limit = 50) => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (q) p.set("q", q);
+    return get<{ items: BrowserHistoryOut[]; total: number }>(`/browser/history?${p.toString()}`);
+  },
+  recordBrowserHistory: (body: { url: string; title?: string; favicon_url?: string | null }) =>
+    post<{ ok: boolean; ignored: boolean; item: BrowserHistoryOut | null }>("/browser/history", body),
+  deleteBrowserHistoryItem: (id: number) =>
+    del<{ ok: boolean }>(`/browser/history/${id}`),
+  clearBrowserHistory: (days?: number) =>
+    del<{ ok: boolean; deleted: number }>(`/browser/history${days ? `?days=${days}` : ""}`),
 };
 
 export type {
@@ -2157,6 +2343,8 @@ export interface GlobalSettingsOut {
   community_repo?: string;
   /** 任务完成系统通知：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭 */
   task_notify_mode?: "always" | "unfocused" | "off";
+  /** plan-20261120-queue-message-mode：任务执行中新消息处理方式（queue 排队入列 / immediate 直接发送） */
+  queue_message_mode?: "queue" | "immediate";
   /** plan-334-1661: 电脑操控总开关（开启后 desktop_* 工具集可用） */
   desktop_enabled?: boolean;
   /** plan-334-1661: 普通电脑操作子开关 */
@@ -2175,6 +2363,8 @@ export interface GlobalSettingsOut {
   max_concurrent_subagents?: number;
   /** plan-156-619 S4e: 子代理开关 */
   subagent_enabled?: boolean;
+  subagent_explore_enabled?: boolean;
+  subagent_execute_enabled?: boolean;
   /** plan-156-619 S4e: 子代理默认模型 id；0 = 跟随主代理 */
   subagent_model_id?: number;
   /** plan-156-619 S4e: 子代理思考深度档位；空 = 跟随会话档位 */
@@ -2301,15 +2491,38 @@ export interface DesktopStatus {
 }
 
 /** v2.2 (对齐 zcode 3.13): 子代理类型 */
+export type SubagentExecutionMode = "readonly" | "agent";
+
 export interface SubagentProfileOut {
   id: number;
   name: string;
+  display_name: string;
   description: string | null;
   model_id: number | null;
-  system_prompt: string | null;
-  /** plan-330-1648 M2: 思考深度档位覆盖（null = 跟随会话） */
   reasoning_effort: string | null;
+  execution_mode: SubagentExecutionMode;
   is_active: boolean;
+  builtin: boolean;
+  revision: number;
+}
+
+export interface SubagentProfileDetail extends SubagentProfileOut {
+  system_prompt: string | null;
+  default_prompt: string;
+  runtime_rules: string;
+  preview: { standard: string; ta3: string };
+}
+
+export interface SubagentProfileInput {
+  name?: string;
+  description?: string | null;
+  model_id?: number | null;
+  reasoning_effort?: string | null;
+  execution_mode?: SubagentExecutionMode;
+  is_active?: boolean;
+  system_prompt?: string | null;
+  revision?: number;
+  reset?: "prompt" | "all";
 }
 
 /** plan-270-1358: ta3 额度与用量（字段对齐 Ta+3 quotaService / quotaView 投影）。 */
@@ -2405,6 +2618,100 @@ export interface KiroQuotaOut {
   raw?: Record<string, unknown>;
 }
 
+/** antigravity 配额：单个额度桶（一组模型共享一条周限额 + 一条 5 小时限额）。 */
+export interface AntigravityQuotaBucketOut {
+  bucket_id?: string;
+  display_name?: string;
+  /** weekly | 5h */
+  window?: string;
+  /** 下一次重置时刻（ISO 字符串） */
+  reset_time?: string | null;
+  /** 网关给的补充说明（可能为空） */
+  description?: string | null;
+  /** 剩余百分比 0-100；null = 网关没给（不是 0） */
+  remaining_percent?: number | null;
+}
+
+/** antigravity 配额：一组共享额度窗口的模型。 */
+export interface AntigravityQuotaGroupOut {
+  display_name?: string;
+  description?: string | null;
+  buckets?: AntigravityQuotaBucketOut[];
+}
+
+/** antigravity 配额：分组总览 + 口径说明。 */
+export interface AntigravityQuotaSummaryOut {
+  groups?: AntigravityQuotaGroupOut[];
+  description?: string | null;
+}
+
+/** antigravity 配额：按模型粒度的剩余额度。 */
+export interface AntigravityQuotaModelOut {
+  model_id?: string;
+  /** 计费 token 类型（网关原样透传，如 WTUS） */
+  token_type?: string;
+  reset_time?: string | null;
+  remaining_percent?: number | null;
+}
+
+/**
+ * antigravity 配额池窗口：服务端只给「组」声明，池由后端本地重建
+ * （读数与组对不上的模型是独立池，例如 Gemini 4 Argon），因此池数量不固定。
+ */
+export interface AntigravityQuotaPoolOut {
+  /** 窗口名：5 小时 / 7 天 / 其它用网关 display_name */
+  name?: string;
+  /** 池名："Gemini" / "Claude & GPT" / 独立池用模型名 */
+  pool?: string;
+  /** 已用百分比 0-100（注意是「已用」，不是剩余） */
+  used_percent?: number | null;
+  remaining_percent?: number | null;
+  reset_time?: string | null;
+  /** true 表示池维度窗口（与具体模型无关） */
+  aside?: boolean;
+  /** 窗口跨度秒数（5 小时 / 7 天），供排序或展示 */
+  span_seconds?: number;
+}
+
+/** antigravity 配额：模型维度窗口（含后端回填的池归属）。 */
+export interface AntigravityQuotaModelWindowOut {
+  name?: string;
+  model_id?: string;
+  vendor?: string;
+  used_percent?: number | null;
+  remaining_percent?: number | null;
+  reset_time?: string | null;
+  /** 该模型归属的池名；后端算不出时为空 */
+  pool?: string;
+  span_seconds?: number;
+}
+
+/** antigravity 账号配额（周限额 + 5 小时限额）。ok=false 时 error 有值，其余字段可能为空。 */
+export interface AntigravityQuotaOut {
+  ok?: boolean;
+  summary?: AntigravityQuotaSummaryOut | null;
+  models?: AntigravityQuotaModelOut[];
+  /** 池视图（任意数量），优先于 summary.groups 渲染 */
+  pools?: AntigravityQuotaPoolOut[];
+  /** 模型维度窗口（含 pool 归属） */
+  model_windows?: AntigravityQuotaModelWindowOut[];
+  project?: string | null;
+  tier?: string | null;
+  account?: string | null;
+  error?: string | null;
+}
+
+/** ProviderOut 上 antigravity 专属的三个只读展示字段（其它供应商恒为 null）。
+ *  后端已随 ProviderOut 下发，共享包的 ProviderOut 尚未收录，这里以交叉类型补齐。 */
+export interface ProviderAntigravityFields {
+  /** 档位，如 free-tier */
+  antigravity_tier?: string | null;
+  /** 配额所属 project，如 aicode-consumers */
+  antigravity_project?: string | null;
+  /** oauth | api_key */
+  antigravity_auth_kind?: string | null;
+}
+
 /** v14: 上传文件返回结构（附件统一为文件地址）。 */
 export interface UploadOut {
   file_id: string;
@@ -2462,7 +2769,8 @@ export function previewQuery(source: PreviewSource): string {
 export const previewApi = {
   text: (source: PreviewSource, signal?: AbortSignal) => get<PreviewResource>(`/preview/text?${previewQuery(source)}`, signal),
   resolve: (source: PreviewSource, signal?: AbortSignal) => get<PreviewResource>(`/preview/resource?${previewQuery(source)}`, signal),
-  children: (source: PreviewSource, signal?: AbortSignal, depth = 1) => get<{path:string;children:TreeNode[]}>(`/preview/children?${previewQuery(source)}&depth=${depth}`, signal),
+  children: (source: PreviewSource, signal?: AbortSignal, depth = 1, showHidden = false) =>
+    get<{path:string;children:TreeNode[]}>(`/preview/children?${previewQuery(source)}&depth=${depth}&show_hidden=${showHidden ? "true" : "false"}`, signal),
   workbook: (source: PreviewSource, signal?: AbortSignal) => get<{sheets:SheetMeta[];notice:string}>(`/preview/workbook?${previewQuery(source)}`, signal),
   region: (source: PreviewSource, sheet:string, row:number, col:number, signal?: AbortSignal) => get<SheetRegion>(`/preview/region?${previewQuery(source)}&${new URLSearchParams({sheet,row:String(row),col:String(col)})}`, signal),
   contentUrl: (source: PreviewSource, download = false) => resolveFileUrl(`/api/preview/content?${previewQuery(source)}&download=${download}`),

@@ -17,7 +17,7 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import { markdownComponents } from "../MarkdownContent";
 import { advanceSplit, prepareSplitTail, type SplitState } from "./streamMarkdown";
-import { CodeBlockWrapper, skipLongHighlight } from "../ui/Markdown";
+import { CodeBlockWrapper, MarkdownLiveContext, skipLongHighlight } from "../ui/Markdown";
 import { ViewportBlock } from "../ui/ViewportBlock";
 
 /** 插件数组提到模块级：引用稳定，memo 的 props 比较与 react-markdown 内部都不必重建处理器 */
@@ -42,13 +42,15 @@ const StreamBlock = memo(function StreamBlock({ source, mode }: { source: string
     </code></CodeBlockWrapper>;
   }
   return (
-    <ReactMarkdown
-      remarkPlugins={mode === "full" ? FULL_REMARK : PLAIN_REMARK}
-      rehypePlugins={mode === "full" ? FULL_REHYPE : mode === "code" ? CODE_REHYPE : NO_REHYPE}
-      components={markdownComponents}
-    >
-      {source}
-    </ReactMarkdown>
+    <MarkdownLiveContext.Provider value={mode !== "full"}>
+      <ReactMarkdown
+        remarkPlugins={mode === "full" ? FULL_REMARK : PLAIN_REMARK}
+        rehypePlugins={mode === "full" ? FULL_REHYPE : mode === "code" ? CODE_REHYPE : NO_REHYPE}
+        components={markdownComponents}
+      >
+        {source}
+      </ReactMarkdown>
+    </MarkdownLiveContext.Provider>
   );
 });
 

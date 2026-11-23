@@ -1,6 +1,9 @@
 """ORM 模型聚合（v2），供应用统一导入。"""
 from app.persistence.models.agent import Agent
+from app.persistence.models.antigravity_auth import AntigravityAuth
 from app.persistence.models.audit import AuditLog
+# plan-771-3177：内置浏览器书签与浏览历史（新表，靠 create_all 建立）
+from app.persistence.models.browser import BrowserBookmark, BrowserHistory
 from app.persistence.models.config import ConfigProfile
 from app.persistence.models.db_connection import DbConnection, DbPolicy
 from app.persistence.models.debug_setting import DebugSetting
@@ -77,6 +80,7 @@ __all__ = [
     "Ta3Auth",
     "KiroAuth",
     "WorkBuddyAuth",
+    "AntigravityAuth",
     "ToolCall",
     "TraeAuth",
     "UsageRecord",
@@ -86,4 +90,6 @@ __all__ = [
     "WorkflowMessage",
     "WorkflowEvent",
     "WorkflowPlanRevision",
+    "BrowserBookmark",
+    "BrowserHistory",
 ]

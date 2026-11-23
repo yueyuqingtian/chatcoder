@@ -86,6 +86,20 @@ def test_parse_structured_report_empty_safe():
     assert h.files_touched == [] and h.risks == []
 
 
+def test_parse_structured_report_omitted_empty_sections():
+    """plan-20261121-flow-typography：按需省略空节（不再写 None 占位）时解析仍保持干净准确。"""
+    h = SubagentHandle(agent_id=31)
+    text = (
+        "### Result\n确认问题位于样式层行高默认值。\n\n"
+        "### Key Findings\n- 默认行高定义在 `client/src/styles/tokens.css`。\n"
+    )
+    _parse_structured_report(h, text)
+    assert h.risks == []
+    assert h.verification == []
+    assert h.acceptance == []
+    assert "client/src/styles/tokens.css" in h.files_touched
+
+
 def test_parse_structured_report_preserves_ext_and_drive():
     """v36 修复：扩展名不得被截断（.json→.js / .tsx→.ts），Windows 盘符需保留。
 

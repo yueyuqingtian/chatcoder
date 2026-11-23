@@ -40,6 +40,11 @@ class GitError(Exception):
 
 ProgressCb = Callable[[str], Awaitable[None]]
 
+# 模块级活跃同步进程表：支持前端点击「取消」时主动 kill 挂起的 git 网络子进程，避免残留锁住 index.lock
+_ACTIVE_SYNC_PROCS: dict[str, asyncio.subprocess.Process] = {}
+_ACTIVE_SYNC_OPS: set[str] = set()
+_CANCELLED_SYNC_OPS: set[str] = set()
+
 # plan-522-2209：网络类 git 命令的 SSL 后端。
 #
 # 根因：Windows 上 git 默认用 schannel，经本机 HTTP 代理（127.0.0.1:7897）访问 GitHub 会在
@@ -158,13 +163,17 @@ async def _pump(proc: asyncio.subprocess.Process, stdin: bytes | None, on_progre
 async def _run(
     cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None,
     network: bool = False, on_progress: ProgressCb | None = None,
+    proc_key: str | None = None,
 ) -> tuple[int, str, str]:
     """执行 git 命令。
 
     plan-522-2209：network=True 时（fetch / pull / push / ls-remote / clone）按配置在 `git` 与
     子命令之间插入 `-c http.sslBackend=<backend>`；传 on_progress 时改为流式读取，
     逐行回调 stderr，调用方能拿到「Receiving objects: 45%」这类进度。
+    proc_key 非空时登记到 _ACTIVE_SYNC_PROCS，便于 cancel_sync 主动终止。
     """
+    if proc_key and proc_key in _CANCELLED_SYNC_OPS:
+        raise GitError("已取消同步操作")
     env = dict(os.environ)
     env.update({
         "GIT_TERMINAL_PROMPT": "0",
@@ -178,6 +187,8 @@ async def _run(
         backend = await _ssl_backend()
         if backend:
             cmd += ["-c", f"http.sslBackend={backend}"]
+    if proc_key and proc_key in _CANCELLED_SYNC_OPS:
+        raise GitError("已取消同步操作")
     cmd += list(args)
     proc = None
     try:
@@ -186,26 +197,44 @@ async def _run(
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+        if proc_key:
+            _ACTIVE_SYNC_PROCS[proc_key] = proc
+            if proc_key in _CANCELLED_SYNC_OPS:
+                await _kill(proc)
+                raise GitError("已取消同步操作")
         if on_progress is None:
             out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
         else:
             out, err = await asyncio.wait_for(_pump(proc, stdin, on_progress), timeout=timeout)
+    except asyncio.CancelledError:
+        await _kill(proc)
+        raise
     except asyncio.TimeoutError:
         await _kill(proc)
+        if proc_key and proc_key in _CANCELLED_SYNC_OPS:
+            raise GitError("已取消同步操作") from None
         raise GitError(f"git 命令超时（>{timeout}s），可能是网络或凭据问题") from None
     except FileNotFoundError:
         raise GitError("系统未安装 git，请先安装后再使用 Git 功能") from None
     except OSError as e:
         raise GitError(f"git 执行失败：{e}") from None
+    finally:
+        if proc_key:
+            _ACTIVE_SYNC_PROCS.pop(proc_key, None)
+            if proc_key not in _ACTIVE_SYNC_OPS:
+                _CANCELLED_SYNC_OPS.discard(proc_key)
+    if proc_key and proc_key in _CANCELLED_SYNC_OPS and (proc.returncode or 0) != 0:
+        raise GitError("已取消同步操作")
     return proc.returncode or 0, out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
 
 
 async def _must(
     cwd: str, *args: str, timeout: int = LOCAL_TIMEOUT, stdin: bytes | None = None,
     network: bool = False, on_progress: ProgressCb | None = None,
+    proc_key: str | None = None,
 ) -> str:
     rc, out, err = await _run(cwd, *args, timeout=timeout, stdin=stdin, network=network,
-                              on_progress=on_progress)
+                              on_progress=on_progress, proc_key=proc_key)
     if rc != 0:
         raise GitError((err or out).strip() or f"git {args[0]} 失败（退出码 {rc}）")
     return out
@@ -560,11 +589,29 @@ async def diff(path: str, file: str, staged: bool = False) -> dict:
         args.append("--cached")
     args += ["--", rel]
     out = await _must(root, *args)
-    if "Binary files" in out[:200]:
+    if any(line.startswith("Binary files ") for line in out.splitlines()[:10]):
         return {"path": rel, "text": "", "truncated": False, "binary": True, "new": False}
     truncated = len(out.encode("utf-8")) > MAX_DIFF_BYTES
     text = out.encode("utf-8")[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore") if truncated else out
     return {"path": rel, "text": text, "truncated": truncated, "binary": False, "new": False}
+
+
+MAX_PATCH_BYTES = 200 * 1024
+
+
+async def apply_patch_to_index(path: str, patch: str, reverse: bool = False) -> None:
+    """将 unified diff 补丁片段应用到暂存区（支持 hunk 块级暂存与取消暂存）。"""
+    root = await repo_root(path)
+    if not patch or not patch.strip():
+        raise GitError("补丁内容不能为空")
+    text = patch if patch.endswith("\n") else patch + "\n"
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_PATCH_BYTES:
+        raise GitError("补丁内容过大，请改用整文件暂存")
+    args = ["apply", "--cached", "--unidiff-zero"]
+    if reverse:
+        args.append("--reverse")
+    await _must(root, *args, stdin=raw)
 
 
 # ── 暂存 / 提交 ──────────────────────────────────────────────────────────────
@@ -580,16 +627,20 @@ async def unstage(path: str, paths: list[str]) -> None:
     if await _has_head(root):
         await _must(root, "reset", "-q", "HEAD", "--", *rels)
     else:
-        await _must(root, "rm", "-r", "--cached", "-q", "--", *rels)
+        # 无 HEAD 且文件处于 AM（已暂存又在工作区修改）时，不加 -f 会被 git rm --cached 拒绝
+        await _must(root, "rm", "-r", "--cached", "-f", "-q", "--", *rels)
 
 
-async def discard(path: str, paths: list[str], untracked: list[str]) -> None:
+async def discard(path: str, paths: list[str], untracked: list[str], *, preserve_index: bool = False) -> None:
     """丢弃工作区改动：已跟踪文件恢复到 HEAD（同时取消暂存），未跟踪文件直接删除。调用方须先确认。"""
     root = await repo_root(path)
     rels = _safe_paths(paths)
     untracked_set = set(_safe_paths(untracked)) if untracked else set()
     tracked = [p for p in rels if p not in untracked_set]
-    if tracked:
+    if tracked and preserve_index:
+        # plan-771-3177：工作区一栏只撤销 Index → Worktree，不覆盖同一文件已暂存的修改。
+        await _must(root, "restore", "--worktree", "--", *tracked)
+    elif tracked:
         if await _has_head(root):
             # HEAD 中不存在的文件（新加入暂存区的文件）没有可检出的版本，checkout 会整批失败：
             # 这类文件取消暂存后直接删除，其余的检出 HEAD 版本
@@ -611,11 +662,20 @@ async def discard(path: str, paths: list[str], untracked: list[str]) -> None:
                 if target.is_file():
                     target.unlink()
     rootp = Path(root).resolve()
+    # 嵌套仓库在本仓库里以未跟踪目录（`sub/`）的形式出现在 porcelain 输出中。git clean -fd 会跳过
+    # 内嵌仓库，而下面的 rmtree 不会——先整体预检并拒绝，避免一次「丢弃未跟踪」删掉整棵含 .git
+    # 的目录（分支、stash 一并不可恢复），也避免删到一半才报错留下半删除状态。
     for rel in untracked_set:
-        target = (rootp / rel).resolve()
-        if rootp not in target.parents and target != rootp:
+        target = rootp / rel
+        if target.is_dir() and (target / ".git").exists():
+            raise GitError(f"拒绝删除包含 .git 的未跟踪目录：{rel}")
+    for rel in untracked_set:
+        target = rootp / rel
+        if rootp != target.parent.resolve() and rootp not in target.parent.resolve().parents:
             raise GitError(f"拒绝删除仓库外的路径：{rel}")
-        if target.is_dir():
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
             import shutil
             shutil.rmtree(target, ignore_errors=True)
         elif target.exists():
@@ -639,6 +699,20 @@ async def commit(path: str, message: str, amend: bool = False) -> str:
     return sha
 
 
+async def reset_soft_last(path: str) -> dict:
+    """撤销最近一次提交（git reset --soft HEAD~1），保留改动在暂存区并返回旧提交说明。"""
+    root = await repo_root(path)
+    if not await _has_head(root):
+        raise GitError("当前仓库尚无任何提交，无法撤销")
+    rc, _, _ = await _run(root, "rev-parse", "--verify", "-q", "HEAD~1")
+    if rc != 0:
+        raise GitError("当前为首次提交，无法撤销")
+    prev_sha = (await _must(root, "rev-parse", "--short", "HEAD")).strip()
+    prev_msg = (await _must(root, "log", "-1", "--pretty=%B")).strip("\n")
+    await _must(root, "reset", "--soft", "HEAD~1")
+    return {"ok": True, "previous_sha": prev_sha, "message": prev_msg}
+
+
 # ── 远端同步 ─────────────────────────────────────────────────────────────────
 
 # plan-522-2209：连接类错误的特征词。只有命中这些才判定「连不上远端」；
@@ -653,7 +727,7 @@ _CONNECT_ERROR_HINTS = (
 _CONNECT_FAIL_TEXT = "无法连接远端仓库，请检查网络或代理设置后重试"
 
 
-async def _ensure_reachable(root: str, upstream: str | None) -> None:
+async def _ensure_reachable(root: str, upstream: str | None, proc_key: str | None = None) -> None:
     """联网操作前先探一次连通性，连不上就立刻失败。
 
     plan-522-2209：此前只有 NETWORK_TIMEOUT=180 兜底，连接阶段就挂死也要等满 180 秒，
@@ -665,11 +739,12 @@ async def _ensure_reachable(root: str, upstream: str | None) -> None:
     remote = upstream.split("/", 1)[0] or "origin"
     try:
         code, _out, err = await _run(root, "ls-remote", "--exit-code", "--heads", remote,
-                                     timeout=CONNECT_TIMEOUT, network=True)
+                                     timeout=CONNECT_TIMEOUT, network=True, proc_key=proc_key)
     except GitError as e:
-        # plan-522-2209：只有探测超时才归为连接问题；「未安装 git」「git 执行失败」等
-        # 属于环境故障，原样抛出，不要包装成「请检查网络或代理」把用户带偏。
-        if "未安装 git" in str(e) or "执行失败" in str(e):
+        # plan-522-2209：只有探测超时才归为连接问题；「未安装 git」「git 执行失败」与用户取消
+        # 等属于明确状态，原样抛出，不要包装成「请检查网络或代理」把用户带偏。
+        msg = str(e)
+        if "未安装 git" in msg or "执行失败" in msg or "已取消同步操作" in msg:
             raise
         raise GitError(_CONNECT_FAIL_TEXT) from None
     if code == 0:
@@ -678,8 +753,25 @@ async def _ensure_reachable(root: str, upstream: str | None) -> None:
         raise GitError(_CONNECT_FAIL_TEXT)
 
 
+async def cancel_sync(op_id: str) -> bool:
+    """根据 op_id 主动终止正在执行的同步 git 子进程，避免进程卡死并持有 index.lock。"""
+    key = (op_id or "").strip()
+    if not key:
+        return False
+    proc = _ACTIVE_SYNC_PROCS.get(key)
+    if proc is not None:
+        _CANCELLED_SYNC_OPS.add(key)
+        await _kill(proc)
+        return True
+    if key in _ACTIVE_SYNC_OPS:
+        _CANCELLED_SYNC_OPS.add(key)
+        return True
+    return False
+
+
 async def sync(path: str, action: Literal["fetch", "pull", "push"],
-               on_progress: ProgressCb | None = None) -> dict:
+               on_progress: ProgressCb | None = None,
+               op_id: str | None = None) -> dict:
     """抓取 / 拉取 / 推送。
 
     plan-20261017-git-conflict：拉取产生冲突时不再以错误返回——git 已经把冲突写进工作区，
@@ -688,45 +780,55 @@ async def sync(path: str, action: Literal["fetch", "pull", "push"],
     plan-522-2209：联网命令一律 network=True（按配置走 openssl 后端）、带 --progress，
     并支持 on_progress 回调逐行接收进度；本地前置检查仍先做，避免为一个必然失败的拉取白等探测。
     """
-    root = await repo_root(path)
-    st = await status(path)
-    if action == "fetch":
-        await _ensure_reachable(root, st["upstream"])
-        out = await _must(root, "fetch", "--progress", "--prune", timeout=NETWORK_TIMEOUT,
-                          network=True, on_progress=on_progress)
-    elif action == "pull":
-        if st["detached"]:
-            raise GitError("当前是游离 HEAD，无法拉取，请先切换到分支")
-        if not st["upstream"]:
-            raise GitError("当前分支没有设置上游分支，请在终端执行 git push -u 后再拉取")
-        if st["conflicts"]:
-            raise GitError("存在未解决的冲突，请先处理冲突")
-        await _ensure_reachable(root, st["upstream"])
-        code, out, err = await _run(root, "pull", "--progress", "--no-rebase", "--no-edit",
-                                    timeout=NETWORK_TIMEOUT, network=True, on_progress=on_progress)
-        if code != 0:
-            # 冲突不是错误：git 已把冲突写进工作区，界面据此直接进入冲突处理
-            after = await status(path)
-            if after["conflicts"] or after["state"] in ("merging", "rebasing"):
-                return {
-                    "output": (out + "\n" + err).strip(),
-                    "conflict": True,
-                    "conflicts": [c["path"] for c in after["conflicts"]],
-                    "state": after["state"],
-                }
-            raise GitError((err or out or "拉取失败").strip())
-        return {"output": (out or "完成").strip(), "conflict": False, "conflicts": [], "state": "normal"}
-    else:
-        if st["detached"] or not st["branch"]:
-            raise GitError("当前是游离 HEAD，无法推送")
-        await _ensure_reachable(root, st["upstream"])
-        if st["upstream"]:
-            out = await _must(root, "push", "--progress", timeout=NETWORK_TIMEOUT,
-                              network=True, on_progress=on_progress)
+    key = (op_id or "").strip() or None
+    if key:
+        _ACTIVE_SYNC_OPS.add(key)
+    try:
+        root = await repo_root(path)
+        st = await status(path)
+        if action == "fetch":
+            await _ensure_reachable(root, st["upstream"], proc_key=key)
+            out = await _must(root, "fetch", "--progress", "--prune", timeout=NETWORK_TIMEOUT,
+                              network=True, on_progress=on_progress, proc_key=key)
+        elif action == "pull":
+            if st["detached"]:
+                raise GitError("当前是游离 HEAD，无法拉取，请先切换到分支")
+            if not st["upstream"]:
+                raise GitError("当前分支没有设置上游分支，请在终端执行 git push -u 后再拉取")
+            if st["conflicts"]:
+                raise GitError("存在未解决的冲突，请先处理冲突")
+            await _ensure_reachable(root, st["upstream"], proc_key=key)
+            code, out, err = await _run(root, "pull", "--progress", "--no-rebase", "--no-edit",
+                                        timeout=NETWORK_TIMEOUT, network=True,
+                                        on_progress=on_progress, proc_key=key)
+            if code != 0:
+                # 冲突不是错误：git 已把冲突写进工作区，界面据此直接进入冲突处理
+                after = await status(path)
+                if after["conflicts"] or after["state"] in ("merging", "rebasing"):
+                    return {
+                        "output": (out + "\n" + err).strip(),
+                        "conflict": True,
+                        "conflicts": [c["path"] for c in after["conflicts"]],
+                        "state": after["state"],
+                    }
+                raise GitError((err or out or "拉取失败").strip())
+            return {"output": (out or "完成").strip(), "conflict": False, "conflicts": [], "state": "normal"}
         else:
-            out = await _must(root, "push", "--progress", "-u", "origin", st["branch"],
-                              timeout=NETWORK_TIMEOUT, network=True, on_progress=on_progress)
-    return {"output": (out or "完成").strip(), "conflict": False, "conflicts": [], "state": st["state"]}
+            if st["detached"] or not st["branch"]:
+                raise GitError("当前是游离 HEAD，无法推送")
+            await _ensure_reachable(root, st["upstream"], proc_key=key)
+            if st["upstream"]:
+                out = await _must(root, "push", "--progress", timeout=NETWORK_TIMEOUT,
+                                  network=True, on_progress=on_progress, proc_key=key)
+            else:
+                out = await _must(root, "push", "--progress", "-u", "origin", st["branch"],
+                                  timeout=NETWORK_TIMEOUT, network=True,
+                                  on_progress=on_progress, proc_key=key)
+        return {"output": (out or "完成").strip(), "conflict": False, "conflicts": [], "state": st["state"]}
+    finally:
+        if key:
+            _ACTIVE_SYNC_OPS.discard(key)
+            _CANCELLED_SYNC_OPS.discard(key)
 
 
 # ── 历史 ─────────────────────────────────────────────────────────────────────
@@ -954,3 +1056,158 @@ async def abort_merge(path: str) -> None:
     if not (Path(root) / ".git" / "MERGE_HEAD").exists():
         raise GitError("当前没有进行中的合并")
     await _must(root, "merge", "--abort")
+
+
+# ── 贮藏（Stash）─────────────────────────────────────────────────────────────
+
+_STASH_REF_RE = re.compile(r"stash@\{(\d+)\}")
+_STASH_BRANCH_RE = re.compile(r"^(?:WIP on|On)\s+([^:]+):\s*(.*)$")
+
+
+def _stash_ref(index: int) -> str:
+    if index < 0:
+        raise GitError("贮藏索引无效")
+    return f"stash@{{{index}}}"
+
+
+async def stash_list(path: str) -> list[dict]:
+    """列出当前仓库的全部贮藏记录。无提交或无贮藏时返回空列表。"""
+    root = await repo_root(path)
+    if not await _has_head(root):
+        return []
+    # 使用 %aI 输出严格 ISO 日期而避免传 --date=iso-strict，否则 git 会把 %gd 里的 stash@{0} 改写成日期串
+    out = await _must(root, "stash", "list", "--format=%gd%x1f%gs%x1f%aI%x1f%H")
+    rows: list[dict] = []
+    for i, line in enumerate(out.splitlines()):
+        if not line.strip():
+            continue
+        parts = line.split("\x1f", 3)
+        if len(parts) < 4:
+            continue
+        ref, raw_msg, date, sha = parts
+        m_idx = _STASH_REF_RE.search(ref)
+        idx = int(m_idx.group(1)) if m_idx else i
+        m_br = _STASH_BRANCH_RE.match(raw_msg)
+        if m_br:
+            branch: str | None = m_br.group(1).strip() or None
+            message = m_br.group(2).strip() or raw_msg
+        else:
+            branch = None
+            message = raw_msg
+        rows.append({
+            "ref": ref,
+            "index": idx,
+            "message": message,
+            "date": date,
+            "sha": sha,
+            "branch": branch,
+        })
+    return rows
+
+
+async def stash_push(
+    path: str,
+    message: str = "",
+    include_untracked: bool = True,
+    paths: list[str] | None = None,
+) -> dict:
+    """将工作区改动存入新贮藏；工作区干净时拒绝。"""
+    root = await repo_root(path)
+    st = await status(path)
+    if st["clean"]:
+        raise GitError("当前没有可贮藏的改动")
+    if not include_untracked and not (st["staged"] or st["unstaged"] or st["conflicts"]):
+        raise GitError("当前没有可贮藏的已跟踪改动")
+    if not await _has_head(root):
+        raise GitError("当前仓库尚无任何提交，无法创建贮藏")
+    args = ["stash", "push"]
+    if include_untracked:
+        args.append("-u")
+    msg = (message or "").strip()
+    if msg:
+        args += ["-m", msg]
+    if paths:
+        rels = _safe_paths(paths)
+        args += ["--", *rels]
+    out = await _must(root, *args)
+    if "No local changes to save" in out:
+        raise GitError("当前没有可贮藏的改动")
+    return {"ok": True, "output": out.strip() or "已创建贮藏"}
+
+
+async def _stash_restore(path: str, op: Literal["apply", "pop"], index: int = 0) -> dict:
+    ref = _stash_ref(index)
+    root = await repo_root(path)
+    code, out, err = await _run(root, "stash", op, ref)
+    after = await status(path)
+    if code != 0:
+        if after["conflicts"]:
+            return {
+                "ok": True,
+                "conflict": True,
+                "conflicts": [c["path"] for c in after["conflicts"]],
+                "state": after["state"],
+                "output": (out + "\n" + err).strip(),
+            }
+        raise GitError((err or out or "恢复贮藏失败").strip())
+    return {
+        "ok": True,
+        "conflict": False,
+        "conflicts": [],
+        "state": after["state"],
+        "output": (out or "已恢复贮藏").strip(),
+    }
+
+
+async def stash_apply(path: str, index: int = 0) -> dict:
+    return await _stash_restore(path, "apply", index)
+
+
+async def stash_pop(path: str, index: int = 0) -> dict:
+    return await _stash_restore(path, "pop", index)
+
+
+async def stash_drop(path: str, index: int = 0) -> dict:
+    ref = _stash_ref(index)
+    root = await repo_root(path)
+    out = await _must(root, "stash", "drop", ref)
+    return {"ok": True, "output": out.strip() or f"已删除 {ref}"}
+
+
+async def stash_show(path: str, index: int = 0) -> dict:
+    """读取某条贮藏的文件列表与改动统计。"""
+    ref = _stash_ref(index)
+    root = await repo_root(path)
+    stat_out = await _must(root, "stash", "show", "--stat", "--include-untracked", ref)
+    names_out = await _must(root, "stash", "show", "--name-status", "--no-renames", "--include-untracked", ref)
+    numstat_out = await _must(root, "stash", "show", "--numstat", "--no-renames", "--include-untracked", ref)
+    patch = await _must(root, "stash", "show", "--patch", "--no-color", "--include-untracked", ref)
+    counts: dict[str, tuple[int | None, int | None]] = {}
+    for line in numstat_out.splitlines():
+        cols = line.split("\t", 2)
+        if len(cols) == 3:
+            a, d, p = cols
+            counts[p] = (None if a == "-" else int(a), None if d == "-" else int(d))
+    files: list[dict] = []
+    for line in names_out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 2:
+            continue
+        p = cols[-1]
+        add, dele = counts.get(p, (None, None))
+        files.append({
+            "path": p,
+            "code": cols[0][:1],
+            "additions": add,
+            "deletions": dele,
+        })
+    return {
+        "ref": ref,
+        "index": index,
+        "stat": stat_out.strip(),
+        "patch": patch[:250_000],
+        "truncated": len(patch) > 250_000,
+        "files": files,
+        "additions": sum(f["additions"] or 0 for f in files),
+        "deletions": sum(f["deletions"] or 0 for f in files),
+    }

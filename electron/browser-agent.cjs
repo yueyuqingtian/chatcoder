@@ -32,7 +32,7 @@
 //   三跳。本模块负责中间那一跳：记录 uid → guest 映射（§6 的实例寻址）、把上行请求转给渲染层、
 //   把下行事件（含 stream.log 的 100 ms / 200 行聚批，§5）按 uid 投递给正确的 guest。
 //   渲染层只需要认识三个 IPC 频道（见下方 MICROAPP_REQ/REPLY/PUSH），别的都是主进程内部的事。
-const { app, ipcMain, webContents, session, clipboard, nativeImage, shell } = require("electron");
+const { app, ipcMain, webContents, session, clipboard, nativeImage, shell, Menu } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -159,7 +159,7 @@ function uniquePath(dir, name) {
   return p;
 }
 
-module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
+module.exports = function setupBrowserAgent({ getMainWindow, browserVault, log, logErr }) {
   /** wcId → { wc, attached, net: [], netById: Map, seq, aiUntil, accept, promptText, events: [], pendingDialog } */
   const guests = new Map();
   // 最近一次「宿主隐藏导致截图失败」的时刻与窗口：最小化期间不重复空等
@@ -217,20 +217,26 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
         id: ++downloadSeq, wcId: guest.id, filename: path.basename(savePath), path: savePath,
         url: String(item.getURL() || "").slice(0, 300), mime: String(item.getMimeType() || ""),
         total: item.getTotalBytes() || 0, received: 0, state: "progressing", startedAt: Date.now(), endedAt: 0,
+        protected: browserVault?.isProtected(guest) === true,
       };
       downloads.push(rec);
       if (downloads.length > DOWNLOADS_MAX) downloads.shift();
       const st = guests.get(guest.id);
       if (st) st.events.push({ type: "download", state: "started", filename: rec.filename, path: rec.path, url: rec.url, id: rec.id });
-      emit({ type: "download", wcId: guest.id, state: "started", filename: rec.filename, path: rec.path });
-      item.on("updated", () => { rec.received = item.getReceivedBytes() || rec.received; rec.total = item.getTotalBytes() || rec.total; });
+      const notify = () => emit({ type: "download", ...rec });
+      notify();
+      let lastNotice = 0;
+      item.on("updated", () => {
+        rec.received = item.getReceivedBytes() || rec.received; rec.total = item.getTotalBytes() || rec.total;
+        if (Date.now() - lastNotice >= 250) { lastNotice = Date.now(); notify(); }
+      });
       item.once("done", (_e, state) => {
         rec.state = state; // completed / cancelled / interrupted
         rec.received = item.getReceivedBytes() || rec.received;
         rec.endedAt = Date.now();
         const st2 = guests.get(guest.id);
         if (st2) st2.events.push({ type: "download", state, filename: rec.filename, path: rec.path, bytes: rec.received, id: rec.id });
-        emit({ type: "download", wcId: guest.id, state, filename: rec.filename, path: rec.path, bytes: rec.received });
+        notify();
         for (const w of Array.from(downloadWaiters)) w();
       });
     });
@@ -241,7 +247,7 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     const since = Number(a.since_id) || 0;
     const waitMs = clampInt(a.wait_ms, 0, 120000, 0);
     const deadline = Date.now() + waitMs;
-    const pick = () => downloads.filter((d) => d.id > since);
+    const pick = () => downloads.filter((d) => d.id > since && (a.user_interface || !d.protected));
     while (waitMs && pick().some((d) => d.state === "progressing") && Date.now() < deadline) {
       await new Promise((resolve) => {
         const done = () => { clearTimeout(t); downloadWaiters.delete(done); resolve(); };
@@ -940,15 +946,229 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     }
   }
 
+  function attachContextMenu(wc) {
+    if (!wc || wc.isDestroyed() || typeof wc.on !== "function") return;
+    wc.on("context-menu", (_event, params) => {
+      if (wc.isDestroyed() || isMicroappSrc(wc.getURL())) return;
+      const p = params || {};
+      const x = Number(p.x) || 0;
+      const y = Number(p.y) || 0;
+      const selectionText = String(p.selectionText || "").trim();
+      const linkURL = String(p.linkURL || "").trim();
+      const srcURL = String(p.srcURL || "").trim();
+      const mediaType = String(p.mediaType || "");
+      const isEditable = !!p.isEditable;
+      const inputFieldType = String(p.inputFieldType || "").toLowerCase();
+      const pageURL = String(p.pageURL || wc.getURL() || "");
+      const editFlags = p.editFlags || {};
+      const protectedLogin = browserVault?.isProtected(wc) === true;
+
+      const navCanGoBack = () => {
+        try {
+          if (wc.navigationHistory && typeof wc.navigationHistory.canGoBack === "function") return wc.navigationHistory.canGoBack();
+          return typeof wc.canGoBack === "function" ? wc.canGoBack() : false;
+        } catch { return false; }
+      };
+      const navCanGoForward = () => {
+        try {
+          if (wc.navigationHistory && typeof wc.navigationHistory.canGoForward === "function") return wc.navigationHistory.canGoForward();
+          return typeof wc.canGoForward === "function" ? wc.canGoForward() : false;
+        } catch { return false; }
+      };
+      const navGoBack = () => {
+        try {
+          if (wc.navigationHistory && typeof wc.navigationHistory.goBack === "function") wc.navigationHistory.goBack();
+          else if (typeof wc.goBack === "function") wc.goBack();
+        } catch { /* ignore */ }
+      };
+      const navGoForward = () => {
+        try {
+          if (wc.navigationHistory && typeof wc.navigationHistory.goForward === "function") wc.navigationHistory.goForward();
+          else if (typeof wc.goForward === "function") wc.goForward();
+        } catch { /* ignore */ }
+      };
+
+      const template = [];
+
+      if (selectionText) {
+        template.push(
+          { label: "复制", enabled: editFlags.canCopy !== false, click: () => { try { wc.copy(); } catch {} } },
+          {
+            label: "问 AI（解释选中内容）",
+            click: () => emit({
+              type: "context-action",
+              action: "ask-ai-selection",
+              wcId: wc.id,
+              text: selectionText.slice(0, 4000),
+              pageUrl: pageURL,
+            }),
+            enabled: !protectedLogin && inputFieldType !== "password",
+          },
+          {
+            label: "在页面中查找",
+            click: () => emit({
+              type: "context-action",
+              action: "find-in-page",
+              wcId: wc.id,
+              text: selectionText.slice(0, 200),
+            }),
+          },
+          { type: "separator" },
+        );
+      }
+
+      if (isEditable) {
+        template.push(
+          { label: "剪切", enabled: !!editFlags.canCut, click: () => { try { wc.cut(); } catch {} } },
+          { label: "复制", enabled: !!editFlags.canCopy, click: () => { try { wc.copy(); } catch {} } },
+          { label: "粘贴", enabled: !!editFlags.canPaste, click: () => { try { wc.paste(); } catch {} } },
+          { label: "全选", enabled: editFlags.canSelectAll !== false, click: () => { try { wc.selectAll(); } catch {} } },
+        );
+        if (browserVault && typeof browserVault.list === "function" && /^https?:\/\//i.test(pageURL)) {
+          const vaultRes = browserVault.list(pageURL);
+          const creds = (vaultRes && vaultRes.ok && Array.isArray(vaultRes.items)) ? vaultRes.items : [];
+          if (creds.length > 0) {
+            template.push({
+              label: "自动填充保存的密码",
+              submenu: creds.map((item) => ({
+                label: item.label ? `${item.username}（${item.label}）` : item.username,
+                click: () => {
+                  Promise.resolve(browserVault.autofill(wc.id, item.id)).then((res) => {
+                    if (!res || !res.ok) {
+                      emit({
+                        type: "context-action",
+                        action: "autofill-failed",
+                        wcId: wc.id,
+                        error: (res && res.error) || "自动填充失败",
+                      });
+                    }
+                  }).catch(() => {});
+                },
+              })),
+            });
+          } else if (inputFieldType === "password") {
+            template.push({
+              label: "管理保存的密码…",
+              click: () => emit({ type: "context-action", action: "open-vault", wcId: wc.id, pageUrl: pageURL }),
+            });
+          }
+        }
+        template.push({ type: "separator" });
+      }
+
+      if (linkURL && /^https?:|^file:/i.test(linkURL)) {
+        template.push(
+          {
+            label: "在新标签页打开链接",
+            click: () => emit({ type: "context-action", action: "open-new-tab", wcId: wc.id, url: linkURL }),
+          },
+          {
+            label: "复制链接地址",
+            click: () => { try { clipboard.writeText(linkURL); } catch {} },
+          },
+          { type: "separator" },
+        );
+      }
+
+      if (mediaType === "image" && srcURL) {
+        template.push(
+          { label: "复制图片", click: () => { try { wc.copyImageAt(x, y); } catch {} } },
+          { label: "图片另存为…", click: () => { try { wc.downloadURL(srcURL); } catch {} } },
+          {
+            label: "将图片发送给 AI",
+            enabled: !protectedLogin,
+            click: () => emit({
+              type: "context-action",
+              action: "send-image-ai",
+              wcId: wc.id,
+              srcUrl: srcURL,
+              pageUrl: pageURL,
+              x,
+              y,
+            }),
+          },
+          { type: "separator" },
+        );
+      }
+
+      template.push(
+        { label: "后退", enabled: navCanGoBack(), click: navGoBack },
+        { label: "前进", enabled: navCanGoForward(), click: navGoForward },
+        { label: "刷新", click: () => { try { wc.reload(); } catch {} } },
+        { type: "separator" },
+        {
+          label: "保存为书签",
+          enabled: /^https?:\/\//i.test(pageURL),
+          click: () => emit({
+            type: "context-action",
+            action: "bookmark-page",
+            wcId: wc.id,
+            pageUrl: pageURL,
+            title: String(wc.getTitle() || ""),
+          }),
+        },
+        {
+          label: "截图标注",
+          click: () => emit({ type: "context-action", action: "screenshot-annotate", wcId: wc.id, pageUrl: pageURL }),
+        },
+        { type: "separator" },
+        {
+          label: "检查元素",
+          click: () => {
+            try {
+              if (!wc.isDevToolsOpened()) wc.openDevTools({ mode: "detach" });
+              wc.inspectElement(x, y);
+            } catch (err) {
+              logErr("[browser-agent] 检查元素失败:", err && err.message);
+            }
+          },
+        },
+      );
+
+      try {
+        const mw = getMainWindow();
+        const menu = Menu.buildFromTemplate(template);
+        menu.popup(mw && !mw.isDestroyed() ? { window: mw } : undefined);
+      } catch (err) {
+        logErr("[browser-agent] 弹出右键菜单失败:", err && err.message);
+      }
+    });
+  }
+
   function prepare(wcId) {
     const wc = panelGuest(wcId);
     if (!wc) return { ok: false, error: "不是面板内的网页" };
     const existing = guests.get(wc.id);
     if (existing) return { ok: true, debugger: existing.attached };
-    const st = { wc, attached: false, net: [], netById: new Map(), seq: 0, aiUntil: 0, accept: true, promptText: "", events: [], pendingDialog: null, wakers: new Set(), needFrame: true };
+    const st = { wc, attached: false, net: [], netById: new Map(), seq: 0, pageStartSeq: 0, aiUntil: 0, accept: true, promptText: "", events: [], pendingDialog: null, wakers: new Set(), needFrame: true };
     guests.set(wc.id, st);
     try { hookDownloads(wc.session); } catch (err) { logErr("[browser-agent] 挂载下载处理失败:", err && err.message); }
+    try { attachContextMenu(wc); } catch (err) { logErr("[browser-agent] 挂载右键菜单失败:", err && err.message); }
+    wc.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown" || input.isAutoRepeat || input.alt || isMicroappSrc(wc.getURL())) return;
+      const key = String(input.key || "").toLowerCase();
+      const chord = input.control || input.meta;
+      const paste = (chord && key === "v") || (input.shift && key === "insert");
+      if (paste && browserVault?.isAgentGuest(wc) && browserVault.isClipboardProtected(clipboard.readText())) {
+        event.preventDefault();
+        return;
+      }
+      const action = key === "f12" ? "devtools" : key === "f5" ? "reload"
+        : chord && key === "t" ? (input.shift ? "restore-tab" : "new-tab")
+        : chord && !input.shift ? ({
+          l: "address", w: "close-tab", r: "reload", f: "find", "=": "zoom-in", "+": "zoom-in",
+          "-": "zoom-out", "0": "zoom-reset", d: "bookmark",
+        })[key] : null;
+      if (!action) return;
+      event.preventDefault();
+      emit({ type: "browser-shortcut", wcId: wc.id, action });
+    });
     // 新文档提交后、出第一帧前，输入事件会被丢弃（见 pumpFrame）
+    wc.on("did-start-navigation", (details, _url, inPlace, mainFrame) => {
+      const isMainFrame = details.isMainFrame ?? mainFrame;
+      const isInPlace = details.isInPlace ?? inPlace;
+      if (isMainFrame && !isInPlace) st.pageStartSeq = st.seq;
+    });
     wc.on("did-navigate", () => { st.needFrame = true; });
     // plan-20261018-operator-boost：AI 操作期间、应用窗口在后台时，新文档一就绪就先补一帧——
     // 否则紧接着的第一次点击会落在「新页面尚未出帧」的窗口里被丢弃，要靠送达校验失败后重派（多花约 0.5 s）
@@ -1265,7 +1485,9 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
   async function exec(wcId, op, a) {
     if (op === "clipboard") {
       if (a.action === "write") { clipboard.writeText(String(a.text || "")); return { text: String(a.text || "") }; }
-      return { text: clipboard.readText() };
+      const text = clipboard.readText();
+      if (browserVault?.isClipboardProtected(text)) throw new Error("剪贴板当前包含密码库复制的内容");
+      return { text };
     }
     if (op === "sleep") {
       // 宿主页面被判为 hidden 时自身定时器被节流到秒级；主进程计时不受影响（plan-20261015-browser-perf）
@@ -1285,7 +1507,26 @@ module.exports = function setupBrowserAgent({ getMainWindow, log, logErr }) {
     const wc = panelGuest(wcId);
     if (!wc) throw new Error("目标网页已关闭或不属于浏览器面板");
     const st = guests.get(wc.id) || (prepare(wc.id).ok ? guests.get(wc.id) : null);
+    const passwordProtected = browserVault?.isProtected(wc) === true;
+    if (passwordProtected && !(op === "capture" && a.user_interface === true)
+        && !["zoom", "setZoom", "dialogReply", "loginProtected"].includes(op)) {
+      throw new Error("此标签页包含受保护的登录内容");
+    }
     switch (op) {
+      case "loginProtected":
+        return { protected: passwordProtected };
+      case "reserveForAgent":
+        if (browserVault && !browserVault.reserveForAgent(wc)) throw new Error("此标签页包含受保护的登录内容");
+        return {};
+      case "diagnosticNetwork":
+        return { available: !!st?.attached, entries: (st?.net || [])
+          .filter((entry) => entry.seq > st.pageStartSeq && (entry.status === "failed" || Number(entry.status) >= 400))
+          .slice(-12).map(({ method, url, status }) => {
+            try {
+              const parsed = new URL(url);
+              return { method, url: parsed.origin + parsed.pathname, status };
+            } catch { return { method, url: "", status }; }
+          }) };
       case "aiWindow": {
         // AI 动作窗口：期间网页弹窗按 AI 策略自动应答。若此刻还挂着一个等用户处理的弹窗，
         // AI 继续操作会被阻塞——按「取消」收掉（不替用户确认任何东西）并回报。

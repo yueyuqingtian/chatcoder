@@ -36,7 +36,6 @@ WORKFLOW_TOOL_RISK: dict[str, str] = {
 # 计划模式 / 只读模式下允许的工作流工具
 READONLY_ALLOWED: frozenset[str] = frozenset({"plan_workflow", "workflow_status"})
 
-BUILTIN_ROLES: frozenset[str] = frozenset({"explorer", "implementer", "reviewer", "general"})
 
 _FLOW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -72,7 +71,8 @@ _FLOW_SCHEMA: dict[str, Any] = {
                     "role": {
                         "type": "string",
                         "description": (
-                            "子代理类型；缺省按 kind 取 explorer / implementer / reviewer"
+                            "成员标识；缺省时探索和审阅用探索智能体，执行用执行智能体。"
+                            "只读成员仅可查代码，浏览器、桌面和拓展任务需使用获授权的执行成员。"
                         ),
                     },
                     "task": {"type": "string", "description": "自包含的任务说明"},
@@ -321,13 +321,22 @@ def append_workflow_tools(
     return [*tool_schemas, *extra]
 
 
-async def _role_names() -> set[str]:
+async def _role_modes() -> dict[str, str]:
     from app.persistence.database import async_session_factory
     from app.persistence.models.subagent_profile import SubagentProfile
 
-    async with async_session_factory() as s:
-        rows = (await s.execute(select(SubagentProfile.name, SubagentProfile.is_active))).all()
-    return set(BUILTIN_ROLES) | {name for name, active in rows if active}
+    async with async_session_factory() as db:
+        rows = (await db.execute(select(SubagentProfile.name, SubagentProfile.execution_mode,
+                                        SubagentProfile.is_active))).all()
+    modes = {"explorer": "readonly", "explore": "readonly", "reviewer": "readonly",
+             "implementer": "agent", "general": "agent"}
+    modes.update({row.name: row.execution_mode or "agent" for row in rows
+                  if row.is_active and row.name not in modes})
+    return modes
+
+
+def _role_matches(roles: dict[str, str], role: str, kind: str) -> bool:
+    return roles.get(role) == ("agent" if kind == "execute" else "readonly")
 
 
 def _hot_patterns() -> list[str]:
@@ -345,9 +354,10 @@ async def validate_plan_for_run(
     spec, diags = parse_plan(plan_data)
     if spec is None:
         return None, [_diag_dict(d) for d in diags]
-    roles = await _role_names()
+    roles = await _role_modes()
     result = validate_plan(
-        spec, role_exists=lambda name: name in roles, hot_patterns=_hot_patterns()
+        spec, role_exists=lambda name: name in roles,
+        role_matches=lambda role, kind: _role_matches(roles, role, kind), hot_patterns=_hot_patterns()
     )
     if not result.ok:
         return None, [_diag_dict(d) for d in result.errors]
@@ -427,12 +437,13 @@ async def _plan(
     spec, diags = parse_plan(plan_data)
     if spec is None:
         return "计划格式不正确，请修正后重新提交：\n" + _format_diags(diags)
-    roles = await _role_names()
+    roles = await _role_modes()
     from app.orchestration.workflow.commands import command_note_for_session
 
     result = validate_plan(
         spec,
         role_exists=lambda name: name in roles,
+        role_matches=lambda role, kind: _role_matches(roles, role, kind),
         readonly_only=readonly_only,
         hot_patterns=_hot_patterns(),
         # plan-20261014-fix4：命令提示按会话当前权限模式判定（完全访问下不再误报「需要审批」）

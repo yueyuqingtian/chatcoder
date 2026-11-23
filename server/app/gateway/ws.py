@@ -1,7 +1,7 @@
 """WebSocket 实时通道 + 连接管理（v2 协议）。
 
 服务端 → 客户端事件见 packages/shared（turn/agent/thinking/token/tool/usage/approval/error 等）。
-客户端 → 服务端：approval.response / terminal.input / browser.command / cancel / sync.request。
+客户端 → 服务端：approval.response / terminal.input / cancel / sync.request。
 全局通道（/ws/global）另承载内置浏览器宿主协议：browser.host.hello / browser.request / browser.response
 （plan-20261015-browser-agent，见 orchestration/browser/bridge.py）。
 
@@ -385,7 +385,7 @@ async def ws_endpoint(ws: WebSocket, session_id: int) -> None:
                                     or (manager._buffers[session_id] and last_seq < manager._buffers[session_id][0].get("seq", 0) - 1)))},
                 })
 
-            elif event in ("terminal.input", "browser.command"):
+            elif event == "terminal.input":
                 # 转发给同会话其他客户端（面板与 agent 协作预留）
                 await manager.broadcast(session_id, data)
 

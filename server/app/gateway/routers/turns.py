@@ -716,6 +716,15 @@ async def search_messages(session_id: int, q: str = Query(..., min_length=1, max
     from app.services.message_window import search
     return await search(db, session_id, q, thread_id, before_id, limit)
 
+
+@router.get("/sessions/{session_id}/outline")
+async def message_outline(session_id: int, thread_id: int | None = None, db: AsyncSession = Depends(get_db)):
+    from app.services.message_window import outline
+    try:
+        return await outline(db, session_id, thread_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageOut])
 async def list_messages(session_id: int, thread_id: int | None = None,
                         db: AsyncSession = Depends(get_db)):
@@ -832,8 +841,22 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
     out: list[dict] = []
     for agent, task in rows:
         _h = _mgr.get(agent.id) if _mgr is not None else None
+        _spec = (_h.run_spec if _h is not None and _h.run_spec else None) or (
+            (agent.checkpoint_json or {}).get("spec") if isinstance(agent.checkpoint_json, dict) else None
+        ) or {}
+        _wf = briefs.get(agent.workflow_node_id) if agent.workflow_node_id else None
+        _wf_kind = str((_wf or {}).get("kind") or "").strip().lower()
+        _sub_mode = getattr(agent, "subagent_mode", None) or _spec.get("subagent_mode") or (
+            "readonly" if _wf_kind in ("explore", "review") else None
+        )
+        _sub_role = getattr(agent, "subagent_role", None) or _spec.get("subagent_role")
+        if not _sub_role:
+            if _wf_kind in ("check", "review"):
+                _sub_role = "verifier"
+            elif _wf_kind == "explore" or _sub_mode == "readonly":
+                _sub_role = "explore"
         out.append({
-            "workflow": briefs.get(agent.workflow_node_id) if agent.workflow_node_id else None,
+            "workflow": _wf,
             "spawn_message_id": spawn_ids.get(agent.id),
             "agent_id": agent.id,
             "name": agent.name or f"子代理 #{agent.id}",
@@ -841,6 +864,9 @@ async def list_session_subagents(session_id: int, turn_id: int | None = None,
             "turn_status": turn_status_map.get(int(agent.turn_id)) if agent.turn_id else None,
             "task_id": task.id if task else None,
             "task_title": task.title if task else None,
+            "subagent_mode": _sub_mode,
+            "subagent_role": _sub_role,
+            "subagent_profile_name": agent.subagent_profile_name or _spec.get("subagent_profile_name"),
             # plan-20261030-subagent-resume-status：tasks 表没有 paused 态——暂停时任务行
             # 只能落 failed，续跑后也不保证立即回写。因此「任务行报失败、但 agents.status
             # 已是 running/paused」时以 agents.status 为准，否则界面会把正在续跑的子代理
@@ -1010,7 +1036,18 @@ async def retry_task_step(turn_id: int, task_id: int, db: AsyncSession = Depends
         from app.persistence.database import async_session_factory
         async with async_session_factory() as session_db:
             try:
-                await engine.retry_failed_step(session_db, turn_id=turn_id, task_id=task_id)
+                result = await engine.retry_failed_step(session_db, turn_id=turn_id, task_id=task_id)
+                if result.get("error"):
+                    from app.gateway.ws import manager as ws_manager
+
+                    row = await session_db.get(Task, task_id, populate_existing=True)
+                    if row is not None and row.status in ("failed", "cancelled"):
+                        row.note = str(result["error"])
+                        await session_db.commit()
+                        await ws_manager.broadcast(row.session_id, {
+                            "event": "task.updated",
+                            "payload": {"task_id": task_id, "status": row.status, "note": row.note},
+                        })
             except Exception:
                 await session_db.rollback()
                 logger.exception("步骤重试失败 turn=%s task=%s", turn_id, task_id)

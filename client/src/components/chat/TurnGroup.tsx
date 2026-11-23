@@ -11,9 +11,11 @@ import { useCallback, memo, useEffect, useRef, useState, useMemo, Fragment, type
 import { useRunningTicker } from "./useRunningTicker";
 import { MessageActions } from "./MessageActions";
 import type { SubagentMetaLite } from "./SubagentCard";
+import { extractSubagentRoleArgs } from "./subagentRole";
 import { normalizeToolName } from "./toolLabels";
 import { WorkflowCard } from "../workflow/WorkflowCard";
 import { ToolShotCard } from "./ToolShotCard";
+import { InteractiveUiCard } from "./InteractiveUiCard";
 import { WorkflowNotice } from "../workflow/WorkflowNotice";
 import { PluginSlot } from "../../plugins/registry";
 import { MarkdownContent } from "../MarkdownContent";
@@ -741,6 +743,16 @@ export const TurnGroup = memo(function TurnGroup({
             <ToolShotCard leaf={item.leaf} siblings={shotLeaves} />
           </div>
         );
+      case "interactive-ui":
+        return (
+          <InteractiveUiCard
+            key={i}
+            callKey={item.callKey}
+            msg={item.msg}
+            result={item.result}
+            live={roundActive}
+          />
+        );
       case "subagent": {
         const c = item.msg.content as Record<string, unknown>;
         const args = (c?.args && typeof c.args === "object" ? c.args : {}) as Record<string, unknown>;
@@ -751,12 +763,8 @@ export const TurnGroup = memo(function TurnGroup({
         const matched = matchedSubagents.get(i);
         const dispatchError = subagentDispatchError(item.result);
         const fallbackName = matched?.name ?? taskTitle;
-        const roleArgs = {
-          mode: typeof args.mode === "string" ? args.mode : undefined,
-          explore: typeof args.explore === "boolean" ? args.explore : undefined,
-          purpose: typeof args.purpose === "string" ? args.purpose : undefined,
-          agent_type: typeof args.agent_type === "string" ? args.agent_type : undefined,
-        };
+        const resultOutput = typeof item.result?.content?.output === "string" ? item.result.content.output : undefined;
+        const roleArgs = extractSubagentRoleArgs(args, resultOutput);
         const baseMeta: SubagentMetaLite = matched || (dispatchError
           ? { agentId: isResume ? dispatchId ?? 0 : 0, name: fallbackName, status: "failed", error: dispatchError, dispatchFailed: !isResume }
           : { agentId: dispatchId ?? 0, name: fallbackName, status: inherited ? "done" : "running" });

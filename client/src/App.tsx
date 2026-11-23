@@ -1,5 +1,5 @@
 ﻿/** 应用根（v5）：三栏骨架 + 右面板最大宽度限制 + 全屏模式。 */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { NavKey } from "./components/Sidebar";
 import { Workspace } from "./components/Workspace";
 import { RollbackConfirmModal } from "./components/chat/RollbackConfirmModal";
@@ -72,8 +72,6 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
   // v19: 设置页当前 tab（左侧 SettingsSidebar 与内容区共享）。
   const [settingsActiveTab, setSettingsActiveTab] = useState<SettingsTab>("general");
-  // 问题1: 进入设置前记录右面板展开状态，离开时恢复（设置页内折叠右面板）
-  const settingsPanelExpandedRef = useRef(false);
   const leftPanelWidth = useUiStore((s) => s.leftPanelWidth);
   const setLeftPanelWidth = useUiStore((s) => s.setLeftPanelWidth);
   const rightExpanded = usePanelStore((s) => s.expanded);
@@ -107,30 +105,33 @@ export default function App() {
    *  全屏时点「展开侧栏」= 退出全屏并展开左栏（全屏下左栏不可见，按钮不能点了没反应）。 */
   const toggleSidebar = useCallback(() => {
     if (rightFullRef.current) {
-      applyPaneUpdate(() => {
-        usePanelStore.setState({ fullscreen: false });
-        setSidebarCollapsed(false);
-      });
+      usePanelStore.getState().setFullscreen(false);
+      setSidebarCollapsed(false);
       return;
     }
     applyPaneUpdate(() => setSidebarCollapsed((v) => !v));
   }, []);
-  /** 进出设置页时暂存 / 恢复右面板：全屏态保持不动（页面态本就会隐藏面板，回来时原样恢复全屏） */
-  const toggleRightPanel = useCallback(() => {
-    if (usePanelStore.getState().fullscreen) return;
-    usePanelStore.getState().togglePanel();
-  }, []);
   /** 标题栏的右面板开关：全屏时此前直接 return（点了没反应），现在等同收起面板（同时退出全屏） */
   const toggleRightPanelFromTitlebar = useCallback(() => {
-    if (usePanelStore.getState().fullscreen) {
-      usePanelStore.getState().closePanel();
+    const panel = usePanelStore.getState();
+    if (panel.fullscreen) {
+      panel.closePanel();
       return;
     }
     if (!panelFitsRef.current) {
-      usePanelStore.setState({ expanded: true, fullscreen: true });
+      panel.setFullscreen(true);
       return;
     }
-    usePanelStore.getState().togglePanel();
+    panel.togglePanel();
+  }, []);
+
+  // plan-20261122-right-panel：同步切换面板布局与标签，避免先绘制旧会话的面板或将同一次操作写回旧会话。
+  useLayoutEffect(() => {
+    const { setActiveSession } = usePanelStore.getState();
+    setActiveSession(useChatStore.getState().currentSessionId);
+    return useChatStore.subscribe((next, prev) => {
+      if (next.currentSessionId !== prev.currentSessionId) setActiveSession(next.currentSessionId);
+    });
   }, []);
 
   useEffect(() => {
@@ -208,20 +209,17 @@ export default function App() {
   const openSettings = useCallback((tab?: string) => {
     // 已在设置页内再开（如工作流页的“前往子智能体设置”、命令中心）：只切 tab。
     // 此时 nav 已是 settings，若照常记录返回位置，离开时会“返回”到设置页本身（回不去）；
-    // 右面板的展开态也会被误记为已折叠而丢失。入场快照只在从工作区进入时记录一次。
+    // 入场快照只在从工作区进入时记录一次。
     if (nav !== "settings") {
       const { currentSessionId } = useChatStore.getState();
       setReturnLocation({ nav, sessionId: currentSessionId });
       // 设置页需要左栏（设置导航）：直接展开，不走 toggleSidebar（后者在全屏时会退出全屏）
       if (sidebarCollapsed) applyPaneUpdate(() => setSidebarCollapsed(false));
-      // 问题1: 进入设置页自动折叠右面板（记录展开态，离开时恢复）
-      settingsPanelExpandedRef.current = usePanelStore.getState().expanded;
-      if (settingsPanelExpandedRef.current) toggleRightPanel();
     }
     if (tab) setSettingsActiveTab(tab as SettingsTab);
     setSettingsTab(tab);
     setNav("settings");
-  }, [nav, sidebarCollapsed, toggleSidebar, toggleRightPanel]);
+  }, [nav, sidebarCollapsed]);
 
   // 设置页内的跳转（如工作流页“前往子智能体设置”）：页面之间不直接持有导航状态，经事件交给这里
   useEffect(() => {
@@ -235,8 +233,6 @@ export default function App() {
 
   const leaveSettings = useCallback(() => {
     const target = returnLocation;
-    // 问题1: 离开设置页恢复右面板展开态
-    if (settingsPanelExpandedRef.current) toggleRightPanel();
     // 返回位置不能是设置页本身（兜底：其它入口若写入了 settings，统一回到工作区首页）
     setNav(target.nav === "settings" ? null : target.nav);
     if (target.sessionId === null) {
@@ -252,7 +248,7 @@ export default function App() {
     window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent("chatcoder:focus-composer"));
     }, 50);
-  }, [returnLocation, toggleRightPanel]);
+  }, [returnLocation]);
 
   // 新建任务：Ctrl+N 与命令中心「新建任务」共用此事件，语义同侧栏点「新建任务」。
   // 设置页里侧栏已换成设置导航（不挂载 Sidebar），这里不依赖侧栏，先按正常路径离开设置，再进入会话页空态。
@@ -266,12 +262,6 @@ export default function App() {
     window.addEventListener("chatcoder:new-task", onNewTask);
     return () => window.removeEventListener("chatcoder:new-task", onNewTask);
   }, [nav, leaveSettings]);
-
-  // plan-41-233：会话切换时把右面板投影切到该会话的桶（旧会话的终端/浏览器实例继续保活，
-  // 切回时原样恢复；不再出现「A 会话的子代理标签残留在 B 会话面板」）。
-  useEffect(() => {
-    usePanelStore.getState().setActiveSession(currentSessionId);
-  }, [currentSessionId]);
 
   // v16: 模型选择器「管理模型」入口 —— 打开设置页并定位到模型 tab
   useEffect(() => {
@@ -291,7 +281,6 @@ export default function App() {
       // plan-41-198：detail.nav 指定离开设置后的落点——设置页「扩展管理 → 前往市场」
       // 需要直接落到左面板「拓展」（nav=skills），而不是回入场快照的会话。
       const targetNav = (e as CustomEvent<{ nav?: string }>).detail?.nav;
-      if (settingsPanelExpandedRef.current) toggleRightPanel();
       setNav((targetNav as NavKey | undefined) ?? null);
       void useChatStore.getState().loadModels();
       window.setTimeout(() => {
@@ -300,7 +289,7 @@ export default function App() {
     };
     window.addEventListener("chatcoder:leave-settings", handler);
     return () => window.removeEventListener("chatcoder:leave-settings", handler);
-  }, [toggleRightPanel]);
+  }, []);
 
   // plan-20261009-ui A：输入框「+」浮窗里的「探索更多插件 / 技能 / 连接器」需要直接落到左侧「拓展」页
   // （nav=skills），分类由 store/navIntent 的意图让目标页挂载时预选；与侧栏点「拓展」同一路径（setNav）。
@@ -427,7 +416,7 @@ export default function App() {
           </div>
         </div>
         {/* plan-20261016-ux（问题 10）：右面板全屏时右下角的主对话小窗（隐藏 / 打开 / 常驻） */}
-        {rightFull && <MiniChat />}
+        {rightFull && <MiniChat key={currentSessionId} />}
         {/* plan-565-2323 G15：两个全局固定浮层放在本容器**最后**——DOM 顺序在所有 drag 元素之后，
             它们的 `-webkit-app-region: no-drag` 才会被 Electron 的拖拽区仲裁采纳（详见上方说明）。
             位置由 CSS 的 fixed 定位决定，与文档顺序无关，移到末尾不改变任何视觉位置。 */}

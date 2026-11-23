@@ -190,6 +190,117 @@ async def _build_trae_provider(
     return p, "trae_session"
 
 
+async def _first_logged_in_antigravity_auth(db: AsyncSession, provider_id: int | None):
+    """取该供应商下「首个已登录账号」的 antigravity auth 行。
+
+    与 kiro 同因：多账号改造后 auth 行带 credential_id，仅按 provider 级查询
+    会取不到登录态；此处按 id 顺序扫描兜底。
+    """
+    if not provider_id:
+        return None, None
+    from sqlalchemy import select
+
+    from app.persistence.models.antigravity_auth import AntigravityAuth as _Auth
+
+    res = await db.execute(
+        select(_Auth).where(_Auth.provider_id == provider_id).order_by(_Auth.id.asc())
+    )
+    for row in res.scalars().all():
+        if row.access_token:
+            return row, getattr(row, "credential_id", None)
+    return None, None
+
+
+async def _build_antigravity_provider(
+    db: AsyncSession, model: "Model | None", provider=None, credential=None,
+) -> tuple["ModelProvider | None", str]:
+    """构造 AntigravityProvider：token 实时取自 antigravity_auth 表（防过期）。
+
+    方案 docs/plan-antigravity-provider-integration.md §5.2。
+    Model.api_key 只是占位符（"__antigravity_session__"），真实 access_token
+    每次构造时从 antigravity_auth 动态加载；project 从 auth 行取（登录时由
+    loadCodeAssist 写入），Base URL 可覆盖网关地址（指向 sandbox 排障用）。
+    """
+    from app.auth.antigravity import session as ag_session
+    from app.models.providers.antigravity import AntigravityProvider
+    from app.services.credential_service import provider_client_kwargs
+
+    if model is None:
+        return None, "antigravity_model_missing"
+    if provider is None:
+        if model.provider_id:
+            from app.persistence.models.model_reg import Provider as _Provider
+
+            provider = await db.get(_Provider, model.provider_id)
+    provider_id = provider.id if provider is not None else model.provider_id
+
+    # API Key 通道（方案 §5.3）：凭据自带 api_key 时走 Gemini 原生接口，
+    # 不依赖 antigravity_auth 登录态——这条通道只覆盖 Gemini 系模型。
+    if credential is not None and (credential.api_key or "").strip():
+        meta = dict(getattr(model, "antigravity_meta", None) or {})
+        meta["auth_kind"] = "api_key"
+        meta.pop("project", None)  # 原生接口不需要 project
+        p = AntigravityProvider(
+            api_key=credential.api_key.strip(),
+            base_url=(provider.base_url if provider is not None else None) or "",
+            model=model.name,
+            meta=meta,
+            client_kwargs=provider_client_kwargs(provider),
+            auth_kind="api_key",
+        )
+        _attach_credential_meta(p, provider_id, credential.id)
+        return p, "antigravity_api_key"
+
+    resolved_cred_id: int | None = None
+    if credential is not None:
+        auth = await _load_auth_for_credential(db, "antigravity", provider_id, credential.id)
+        resolved_cred_id = getattr(auth, "credential_id", None) if auth is not None else credential.id
+    else:
+        auth = await ag_session.load_auth(db, provider_id)
+        if auth is None or not auth.access_token:
+            auth, resolved_cred_id = await _first_logged_in_antigravity_auth(db, provider_id)
+        else:
+            resolved_cred_id = getattr(auth, "credential_id", None)
+    if auth is None or not auth.access_token:
+        return None, "antigravity_login_required"
+
+    # 构造前确保令牌新鲜（access_token 约 1 小时）；刷新类失败 fail-open 沿用旧令牌，
+    # 请求侧 401/403 兜底仍会再试一次，仅登录态缺失才判不可用。
+    try:
+        access_token = await ag_session.ensure_token(
+            db, provider_id, provider, credential_id=resolved_cred_id,
+        )
+    except ag_session.AntigravityAuthError as e:
+        if e.kind == "login_required":
+            return None, "antigravity_login_required"
+        access_token = auth.access_token
+
+    meta = dict(getattr(model, "antigravity_meta", None) or {})
+    meta["project"] = auth.project or ""
+    meta["tier"] = auth.tier or ""
+    meta["auth_kind"] = auth.auth_kind or "oauth"
+
+    async def _refresh() -> str | None:
+        try:
+            return await ag_session.force_refresh(
+                db, provider_id, provider, credential_id=resolved_cred_id,
+            )
+        except ag_session.AntigravityAuthError:
+            return None
+
+    p = AntigravityProvider(
+        api_key=access_token,
+        base_url=(provider.base_url if provider is not None else None) or "",
+        model=model.name,
+        meta=meta,
+        refresh_token=_refresh,
+        client_kwargs=provider_client_kwargs(provider),
+    )
+    if resolved_cred_id is not None:
+        _attach_credential_meta(p, provider_id, resolved_cred_id)
+    return p, "antigravity_session"
+
+
 async def _first_logged_in_kiro_auth(db: AsyncSession, provider_id: int | None):
     """取该供应商下「首个已登录账号」的 kiro auth 行（含带 credential_id 的新式行）。
 
@@ -434,6 +545,8 @@ async def _load_auth_for_credential(db: AsyncSession, api_format: str, provider_
         from app.persistence.models.trae_auth import TraeAuth as _Auth
     elif api_format == "kiro":
         from app.persistence.models.kiro_auth import KiroAuth as _Auth
+    elif api_format == "antigravity":
+        from app.persistence.models.antigravity_auth import AntigravityAuth as _Auth
     else:
         return None
     stmt = select(_Auth).where(_Auth.provider_id == provider_id)
@@ -500,7 +613,7 @@ async def _pick_credential(db: AsyncSession, provider, exclude: set[int] | None 
     for c in avail:
         if c.api_key:
             return c, c.api_key
-        if fmt in ("workbuddy", "ta3", "trae", "kiro"):
+        if fmt in ("workbuddy", "ta3", "trae", "kiro", "antigravity"):
             auth = await _load_auth_for_credential(db, fmt, provider.id, c.id)
             if auth is not None and getattr(auth, "access_token", None):
                 return c, auth.access_token
@@ -571,11 +684,13 @@ class ModelRegistry:
                         if not any(getattr(c, "is_active", True) for c in creds):
                             return None, "provider_credentials_all_disabled"
                         return None, "provider_credential_unavailable"
-                    if api_format in ("workbuddy", "trae", "kiro"):
+                    if api_format in ("workbuddy", "trae", "kiro", "antigravity"):
                         if api_format == "workbuddy":
                             p, reason = await _build_workbuddy_provider(db, model, provider, chosen)
                         elif api_format == "kiro":
                             p, reason = await _build_kiro_provider(db, model, provider, chosen)
+                        elif api_format == "antigravity":
+                            p, reason = await _build_antigravity_provider(db, model, provider, chosen)
                         else:
                             p, reason = await _build_trae_provider(db, model, provider, chosen)
                         if p is not None:
@@ -619,6 +734,9 @@ class ModelRegistry:
                 # v26: kiro 模型 —— token 实时取自 kiro_auth 表（Model.api_key 为占位符）
                 if api_format == "kiro":
                     return await _build_kiro_provider(db, model)
+                # antigravity 模型 —— token 实时取自 antigravity_auth 表（Model.api_key 为占位符）
+                if api_format == "antigravity":
+                    return await _build_antigravity_provider(db, model)
                 # v23: ta3 模型携带远端元数据（系统提示词/协议/目录配置）
                 ta3_meta = getattr(model, "ta3_meta", None) or {}
                 return (
@@ -673,6 +791,8 @@ class ModelRegistry:
             p, reason = await _build_trae_provider(db, model, provider, chosen)
         elif api_format == "kiro":
             p, reason = await _build_kiro_provider(db, model, provider, chosen)
+        elif api_format == "antigravity":
+            p, reason = await _build_antigravity_provider(db, model, provider, chosen)
         elif api_format == "ta3":
             ta3_meta = getattr(model, "ta3_meta", None) or {}
             if not (provider.base_url and api_key):

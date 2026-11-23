@@ -571,16 +571,18 @@ async def delete_credential(db: AsyncSession, credential_id: int) -> bool:
 
 
 def _purge_auth_rows(session, credential_id: int) -> int:
-    """删除 workbuddy_auth / ta3_auth / trae_auth 中归属该凭据的行（同事务内）。
+    """删除 workbuddy_auth / ta3_auth / trae_auth / kiro_auth / antigravity_auth 中归属该凭据的行。
 
     用 select 逐个删除而非裸 SQL，保持 ORM 会话状态一致；表名固定，不走用户输入。
     """
+    from app.persistence.models.antigravity_auth import AntigravityAuth
+    from app.persistence.models.kiro_auth import KiroAuth
     from app.persistence.models.ta3_auth import Ta3Auth
     from app.persistence.models.trae_auth import TraeAuth
     from app.persistence.models.workbuddy_auth import WorkBuddyAuth
 
     removed = 0
-    for model in (WorkBuddyAuth, Ta3Auth, TraeAuth):
+    for model in (WorkBuddyAuth, Ta3Auth, TraeAuth, KiroAuth, AntigravityAuth):
         rows = session.execute(
             select(model).where(model.credential_id == credential_id)
         ).scalars().all()

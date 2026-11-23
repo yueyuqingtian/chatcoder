@@ -161,6 +161,36 @@ async def _get_git_head(workspace: str) -> str | None:
 
 # ── 文件级 checkpoint（非 git 兜底）──
 
+def _checkpoint_dest_path(workspace_root: str, file_path: str,
+                          session_id: int | None = None, turn_id: int | None = None) -> Path:
+    """生成 .chatcoder/checkpoints/ 下的备份目标路径并确保父目录存在。"""
+    src = Path(file_path)
+    if not src.is_absolute():
+        src = Path(workspace_root) / file_path
+    root = Path(workspace_root).resolve()
+    ckpt_dir = root / _CHECKPOINT_DIR
+    if session_id is not None:
+        ckpt_dir = ckpt_dir / f"session-{session_id}"
+    if turn_id is not None:
+        ckpt_dir = ckpt_dir / str(turn_id)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    # 毫秒级时间戳，避免同秒多次写盘重名（Windows strftime 无 %f）
+    ts = f"{_time.strftime('%Y%m%d_%H%M%S')}_{int(_time.time() * 1000) % 1000:03d}"
+    try:
+        resolved = src.resolve()
+        rel = resolved.relative_to(root) if resolved.is_relative_to(root) else None
+    except OSError:
+        rel = None
+    if rel is not None:
+        safe = _re.sub(r"[^\w.\-]", "_", rel.as_posix())
+        if len(safe) > 80:
+            safe = safe[:80] + "_" + hashlib.md5(rel.as_posix().encode("utf-8")).hexdigest()[:8]
+        name = f"{ts}_{safe}"
+    else:
+        name = f"{ts}_{src.name}"
+    return ckpt_dir / name
+
+
 def checkpoint_file(workspace_root: str, file_path: str,
                     session_id: int | None = None, turn_id: int | None = None) -> str | None:
     """写盘 / 命令**执行前**复制文件到 .chatcoder/checkpoints/。返回快照路径。
@@ -182,28 +212,25 @@ def checkpoint_file(workspace_root: str, file_path: str,
             return None  # 新文件无需快照
         if not src.is_file() or src.stat().st_size > _CKPT_MAX_BYTES:
             return None  # 目录不备份；过大的文件不复制（plan-20261019-toolcard-v2：以免拖慢每次命令）
-        root = Path(workspace_root).resolve()
-        ckpt_dir = root / _CHECKPOINT_DIR
-        if session_id is not None:
-            ckpt_dir = ckpt_dir / f"session-{session_id}"
-        if turn_id is not None:
-            ckpt_dir = ckpt_dir / str(turn_id)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        # 毫秒级时间戳，避免同秒多次写盘重名（Windows strftime 无 %f）
-        ts = f"{_time.strftime('%Y%m%d_%H%M%S')}_{int(_time.time() * 1000) % 1000:03d}"
-        rel = src.resolve().relative_to(root) if src.resolve().is_relative_to(root) else None
-        if rel is not None:
-            safe = _re.sub(r"[^\w.\-]", "_", rel.as_posix())
-            if len(safe) > 80:
-                safe = safe[:80] + "_" + hashlib.md5(rel.as_posix().encode("utf-8")).hexdigest()[:8]
-            name = f"{ts}_{safe}"
-        else:
-            name = f"{ts}_{src.name}"
-        ckpt_path = ckpt_dir / name
+        ckpt_path = _checkpoint_dest_path(workspace_root, file_path, session_id=session_id, turn_id=turn_id)
         shutil.copy2(str(src), str(ckpt_path))
         return str(ckpt_path)
     except OSError as e:
         logger.debug("[checkpoint] 快照失败: %s", e)
+        return None
+
+
+def write_checkpoint_bytes(workspace_root: str, rel_path: str, data: bytes,
+                           session_id: int | None = None, turn_id: int | None = None) -> str | None:
+    """把已知的写前字节直接落盘到 .chatcoder/checkpoints/，供内存预缓存或 Git 索引兜底使用。"""
+    try:
+        if len(data) > _CKPT_MAX_BYTES:
+            return None
+        ckpt_path = _checkpoint_dest_path(workspace_root, rel_path, session_id=session_id, turn_id=turn_id)
+        ckpt_path.write_bytes(data)
+        return str(ckpt_path)
+    except OSError as e:
+        logger.debug("[checkpoint] 写入字节快照失败 %s: %s", rel_path, e)
         return None
 
 
@@ -925,7 +952,55 @@ _INLINE_DELETE_RES = (
 )
 # 删除目录时最多展开多少个文件、哪些目录永不展开（巨型目录无法逐文件记录，也恢复不了）
 _DIR_EXPAND_MAX_FILES = 300
-_DIR_EXPAND_SKIP = frozenset({".git", "node_modules", ".chatcoder", "__pycache__", ".venv", "venv"})
+
+# ── 打包 / 编译产物判定（plan-20261121-build-artifact-filter）──
+# 背景：turn 3198 在 test1 执行 electron 打包后，1163 个 win-unpacked 下的文件进了变更清单，
+# 变更清单接口因此每次要跑 1171 次行级 diff（实测两次调用间隔 58 秒），把事件循环占满、
+# 连带 /api/providers 等请求排队超时。旧实现只有 _SCAN_SKIP_DIRS 一份「目录名精确匹配」名单，
+# 既不含 electron-builder 的输出目录名，也只在两条扫描分支生效；_DIR_EXPAND_SKIP 更是另一份更窄的名单。
+# 现在统一成一份判定：目录名 / 目录后缀 / 文件后缀三选一命中即视为产物，写入侧与读取侧共用。
+_ARTIFACT_DIR_NAMES = frozenset({
+    # 前端与 Node 构建
+    "dist", "dist-electron", "build", "out", "output", "coverage",
+    "release", "releases", "storybook-static",
+    ".next", ".nuxt", ".output", ".svelte-kit", ".turbo", ".parcel-cache", ".cache",
+    ".vite", ".rollup.cache",
+    # Electron 打包（electron-builder 默认输出目录）
+    "win-unpacked", "win-ia32-unpacked", "win-arm64-unpacked",
+    "linux-unpacked", "linux-arm64-unpacked", "linux-armv7l-unpacked",
+    "mac-arm64", "mac-universal", "mas-x64", "mas-arm64", "mas-universal",
+    "app.asar.unpacked",
+    # Java / .NET / Rust 编译产物
+    "target", "obj", ".gradle",
+    # Python 编译与缓存
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    # electron-builder 生成的图标缓存目录
+    ".icon-ico",
+})
+# 依赖目录：与 node_modules 同类，装的是第三方产物而不是用户源码，同样不计入用户改动。
+# （turn 3198 里 server/vendor/ms-playwright 的元数据文件就落在这里）
+_DEPENDENCY_DIR_NAMES = frozenset({
+    "node_modules", "vendor", "bower_components", ".pnpm-store", ".venv", "venv",
+})
+_NON_CHANGE_DIR_NAMES = _ARTIFACT_DIR_NAMES | _DEPENDENCY_DIR_NAMES
+# 目录名后缀：任意 `*-unpacked`（electron-builder 的 arch 变体）与 Python 的 *.egg-info
+_ARTIFACT_DIR_SUFFIXES = ("-unpacked", ".egg-info", ".dist-info")
+# 文件名后缀：打包 / 编译直接产出的单文件。
+# 含各平台二进制分发产物（安装包 / 包体），源码仓库里出现必然是构建产出或二进制依赖，
+# 按用户确认的口径「产物一律不进」统一挡掉（turn 3198 的 test1/chatcoder-Setup-0.10.6.exe 就落在这里）。
+_ARTIFACT_FILE_SUFFIXES = (
+    ".asar", ".blockmap", ".pyc", ".pyo", ".class", ".tsbuildinfo",
+    ".exe", ".msi", ".msix", ".dmg", ".appimage", ".deb", ".rpm", ".snap",
+    ".nupkg", ".whl", ".jar", ".war",
+)
+# 文件名精确匹配：electron-updater 生成的更新清单（与源码里的普通 yml 区分开，不按后缀一刀切）
+_ARTIFACT_FILE_NAMES = frozenset({"latest.yml", "latest-mac.yml", "latest-linux.yml"})
+
+# 依赖与工具元数据目录：不遍历、也不计入改动
+_SKIP_WALK_DIRS = frozenset({
+    ".git", ".chatcoder", "__pycache__", ".idea", ".codegraph",
+})
+_DIR_EXPAND_SKIP = _SKIP_WALK_DIRS | _NON_CHANGE_DIR_NAMES
 
 
 def _split_statements(command: str) -> list[str]:
@@ -1170,6 +1245,308 @@ def expand_directory_targets(workspace: str, rels: list[str], max_files: int = _
     return out
 
 
+# ── 非写盘工具工作区快照比对与脚本预分析（plan-20261120-non-tool-capture）──
+# 命令行 / Python / Node / 构建工具等生成或修改文件时，路径未必直接写在命令文本中
+# （如 `python gen.py` 内部调用 openpyxl 保存 `.xlsx`）。执行前后做轻量 stat 比对，
+# 结合脚本字面量预提取与小工作区写前缓存，捕获全部真实变更并支持撤销。
+
+# 工作区 stat 遍历要跳过的目录：依赖 / 元数据目录 + 全部打包编译产物（名单见 _ARTIFACT_DIR_NAMES）。
+# 遍历时跳过只是省时间；真正的「不计入变更」由 is_artifact_path 在写入与读取两侧兜底。
+_SCAN_SKIP_DIRS = _SKIP_WALK_DIRS | _NON_CHANGE_DIR_NAMES
+_SCAN_SKIP_SUFFIXES = (".pyc", ".pyo", ".tsbuildinfo")
+_SCAN_MAX_FILES = 50_000
+# 变更清单单轮最多返回多少条：产物已被 is_artifact_path 挡掉，这里只防「未预见的产物目录」再次打爆读侧
+_CHANGES_MAX_ITEMS = 2000
+# 常规打包 / 编译命令：命中即认为本次调用的产出全是产物，整批不登记（plan-20261121-build-artifact-filter）
+_BUILD_COMMAND_RE = _re.compile(
+    r"(?:^|[\s;&|(\"'`\\/])(?:"
+    r"npm\s+(?:run\s+)?(?:build|dist|package)(?::[\w.-]+)?"
+    r"|(?:pnpm|yarn|bun)(?:\s+run)?\s+(?:build|dist|package)(?::[\w.-]+)?"
+    r"|npx\s+electron-builder|electron-builder"
+    r"|vite\s+build|next\s+build|nuxt\s+(?:build|generate)"
+    r"|tsc\s+(?:-b|--build)|webpack|rollup\s+-c|turbo\s+(?:run\s+)?build"
+    r"|pyinstaller|python3?\s+-m\s+build|poetry\s+build|uv\s+build"
+    r"|mvnw?\s+(?:package|install|compile|verify|deploy)"
+    r"|gradlew?\s+(?:build|assemble|package)"
+    r"|dotnet\s+(?:build|publish|pack)"
+    r"|go\s+build|cargo\s+build|make(?:\s|$)|docker\s+build"
+    r"|build-release\.ps1|build\.ps1|build\.sh"
+    r")",
+    _re.IGNORECASE,
+)
+_SCRIPT_SUFFIXES = frozenset({".py", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".sh", ".bat", ".cmd"})
+_SCRIPT_READ_MAX_BYTES = 256 * 1024
+_SCRIPT_LITERAL_RE = _re.compile(r'["\']([^"\'\r\n]{1,240})["\']')
+_PRE_BYTES_MAX_FILES = 200
+_PRE_BYTES_MAX_TOTAL = 10 * 1024 * 1024
+_PRE_BYTES_MAX_SINGLE = 2 * 1024 * 1024
+
+
+def _is_skipped_scan_file(name: str) -> bool:
+    """跳过字节码与 Office 临时锁文件，避免把运行期副产物误当成用户产物。"""
+    low = name.lower()
+    return name.startswith("~$") or low.endswith(_SCAN_SKIP_SUFFIXES)
+
+
+def _is_artifact_dir(name: str) -> bool:
+    low = name.lower()
+    return low in _NON_CHANGE_DIR_NAMES or low.endswith(_ARTIFACT_DIR_SUFFIXES)
+
+
+def is_artifact_path(rel: str) -> bool:
+    """相对路径是否属于打包 / 编译产物（plan-20261121-build-artifact-filter）。
+
+    口径（用户确认）：产物一律不进变更卡。只看路径本身，不读磁盘、不依赖 git ignore：
+    任一层目录名命中产物名单，或目录名 / 文件名命中产物后缀，即视为产物。
+    """
+    key = write_path_key(rel)
+    if not key:
+        return False
+    parts = [p for p in key.split("/") if p]
+    if not parts:
+        return False
+    for d in parts[:-1]:
+        if _is_artifact_dir(d):
+            return True
+    name = parts[-1].lower()
+    return name in _ARTIFACT_FILE_NAMES or name.endswith(_ARTIFACT_FILE_SUFFIXES)
+
+
+def is_build_command(command: str) -> bool:
+    """命令文本是否属于常规打包 / 编译命令（命中后本次调用的产出整批不登记）。"""
+    if not command:
+        return False
+    return bool(_BUILD_COMMAND_RE.search(command))
+
+
+def scan_workspace_stat(
+    workspace: str,
+    *,
+    max_files: int = _SCAN_MAX_FILES,
+) -> tuple[dict[str, tuple[int, int]], int, bool]:
+    """轻量遍历工作区文件元数据，返回 (rel -> (mtime_ns, size), total_bytes, truncated)。"""
+    stats: dict[str, tuple[int, int]] = {}
+    total_bytes = 0
+    truncated = False
+    if not workspace:
+        return stats, 0, False
+    root = Path(workspace)
+    if not root.is_dir():
+        return stats, 0, False
+    stack: list[tuple[str, str]] = [(str(root), "")]
+    while stack:
+        cur_dir, rel_prefix = stack.pop()
+        try:
+            with os.scandir(cur_dir) as it:
+                for entry in it:
+                    name = entry.name
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if name in _SCAN_SKIP_DIRS:
+                                continue
+                            next_rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                            stack.append((entry.path, next_rel))
+                        elif entry.is_file(follow_symlinks=False):
+                            if _is_skipped_scan_file(name):
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            rel = write_path_key(f"{rel_prefix}/{name}" if rel_prefix else name)
+                            if rel:
+                                stats[rel] = (int(st.st_mtime_ns), int(st.st_size))
+                                total_bytes += int(st.st_size)
+                                if len(stats) >= max_files:
+                                    truncated = True
+                                    return stats, total_bytes, True
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return stats, total_bytes, truncated
+
+
+def diff_workspace_scans(
+    pre: dict[str, tuple[int, int]],
+    post: dict[str, tuple[int, int]],
+) -> list[str]:
+    """对比两次 scan_workspace_stat 结果，返回新增 / 元数据变化 / 被删的相对路径。"""
+    changed: list[str] = []
+    for rel, meta in post.items():
+        if pre.get(rel) != meta:
+            changed.append(rel)
+    for rel in pre:
+        if rel not in post:
+            changed.append(rel)
+    changed.sort()
+    return changed
+
+
+def extract_script_candidate_paths(
+    command: str,
+    workspace: str,
+    cwd: str = "",
+    *,
+    max_candidates: int = 100,
+) -> list[str]:
+    """从命令直接调用的本地脚本中提取工作区内已存在的文件路径，供执行前取写前备份。"""
+    if not command or not workspace:
+        return []
+    root = Path(workspace).resolve()
+    base = (root / cwd) if cwd else root
+    bases = [base]
+    for d in _cd_dirs(command):
+        try:
+            dp = Path(d)
+            bases.append(dp if dp.is_absolute() else (base / dp))
+        except (OSError, ValueError):
+            continue
+
+    scripts: list[Path] = []
+    seen_scripts: set[Path] = set()
+    for stmt in _split_statements(command):
+        for tok in _tokenize(stmt):
+            if tok.startswith("-"):
+                continue
+            low = tok.lower()
+            if not any(low.endswith(ext) for ext in _SCRIPT_SUFFIXES):
+                continue
+            for b in bases:
+                try:
+                    p = Path(tok)
+                    full = (p if p.is_absolute() else (b / p)).resolve()
+                    if full.is_relative_to(root) and full.is_file() and full not in seen_scripts:
+                        seen_scripts.add(full)
+                        scripts.append(full)
+                except (OSError, ValueError):
+                    continue
+
+    out: list[str] = []
+    seen_out: set[str] = set()
+    for sp in scripts:
+        try:
+            if sp.stat().st_size > _SCRIPT_READ_MAX_BYTES:
+                continue
+            text = sp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        search_bases = [sp.parent, base, root]
+        for m in _SCRIPT_LITERAL_RE.finditer(text):
+            lit = m.group(1).strip()
+            if not lit or "://" in lit or any(c in lit for c in "\0\r\n*?[]"):
+                continue
+            for sb in search_bases:
+                try:
+                    lp = Path(lit)
+                    cand = (lp if lp.is_absolute() else (sb / lp)).resolve()
+                    rel = cand.relative_to(root)
+                    if any(part in _SCAN_SKIP_DIRS for part in rel.parts):
+                        continue
+                    if cand.is_file():
+                        rel_s = write_path_key(rel.as_posix())
+                        if rel_s and rel_s not in seen_out:
+                            seen_out.add(rel_s)
+                            out.append(rel_s)
+                            if len(out) >= max_candidates:
+                                return out
+                        break
+                except (OSError, ValueError):
+                    continue
+    return out
+
+
+def bytes_digest(data: bytes) -> str:
+    """内存字节的 sha1 指纹，与 file_digest 口径完全一致。"""
+    return hashlib.sha1(data).hexdigest()
+
+
+def capture_pre_bytes(
+    workspace: str,
+    stats: dict[str, tuple[int, int]],
+    *,
+    max_files: int = _PRE_BYTES_MAX_FILES,
+    max_total_bytes: int = _PRE_BYTES_MAX_TOTAL,
+    max_single_bytes: int = _PRE_BYTES_MAX_SINGLE,
+    skip_paths: set[str] | None = None,
+) -> dict[str, bytes]:
+    """小工作区执行前轻量内存备份：仅在文件数与总大小均在阈值内时缓存既有文件字节。"""
+    if not workspace or not stats or len(stats) > max_files:
+        return {}
+    total = sum(sz for _, sz in stats.values())
+    if total > max_total_bytes:
+        return {}
+    out: dict[str, bytes] = {}
+    used = 0
+    skip = skip_paths or set()
+    for rel, (_, sz) in stats.items():
+        if sz > max_single_bytes or rel in skip:
+            continue
+        if used + sz > max_total_bytes:
+            break
+        try:
+            p = _fs_path(workspace, rel)
+            if p.is_file():
+                data = p.read_bytes()
+                out[rel] = data
+                used += len(data)
+        except OSError:
+            continue
+    return out
+
+
+async def capture_git_dirty_set(workspace: str) -> set[str] | None:
+    """获取命令执行前 Git 工作区未干净路径集合；非 Git 仓库或失败返回 None。"""
+    if not workspace or not (Path(workspace) / ".git").exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "status", "--porcelain", "-z", "-uall",
+            cwd=workspace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode != 0:
+            return None
+        dirty: set[str] = set()
+        tokens = stdout.split(b"\x00")
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if len(tok) >= 4:
+                status = tok[:2].decode("ascii", errors="ignore")
+                path_b = tok[3:]
+                path_s = write_path_key(path_b.decode("utf-8", errors="replace"))
+                if path_s:
+                    dirty.add(path_s)
+                if "R" in status or "C" in status:
+                    i += 1
+                    if i < len(tokens):
+                        orig_s = write_path_key(tokens[i].decode("utf-8", errors="replace"))
+                        if orig_s:
+                            dirty.add(orig_s)
+            i += 1
+        return dirty
+    except (asyncio.TimeoutError, OSError):
+        return None
+
+
+async def recover_git_index_bytes(workspace: str, rel_path: str) -> bytes | None:
+    """从 Git 暂存区（:0:<path>）取回干净文件在命令执行前的原始字节。"""
+    if not workspace or not rel_path:
+        return None
+    rel_posix = write_path_key(rel_path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "show", f":0:{rel_posix}",
+            cwd=workspace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        return stdout if proc.returncode == 0 else None
+    except (asyncio.TimeoutError, OSError):
+        return None
+
+
 # ── 写盘操作类型与内容指纹（plan-20261019-toolcard-v2）──
 #
 # 变更清单与撤销都要回答两个问题：「这个文件在本轮开始前存在吗」「本轮结束时还在吗」。
@@ -1293,6 +1670,7 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
                             diff_before: str | None = None,
                             diff_after: str | None = None,
                             op: str | None = None,
+                            before_hash: str | None = None,
                             after_hash: str | None = None) -> None:
     """记录一次写盘操作的前后内容（精确回滚依据）。失败不阻塞（非关键路径）。
 
@@ -1304,7 +1682,11 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
     plan-20261019-toolcard-v2: op 记录这次写盘是新建 / 修改 / 删除，after_hash 为写后字节指纹，
     撤销与回滚据此严格校验「本轮之后文件有没有被改过」。
     v975：经 WriteEngine 单写线程（写事务不阻塞事件循环、无锁单写者）。
+    plan-20261121-build-artifact-filter: 打包 / 编译产物一律不登记——显式写盘工具、命令副作用扫描、
+    后台进程退出回填共用这一道拦截，避免再出现「只有某条分支排除」的漏口。
     """
+    if is_artifact_path(path):
+        return
     try:
         from app.persistence.database import run_write_locked
 
@@ -1315,7 +1697,7 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
                                 path=write_path_key(path), old_content=before, new_content=after,
                                 binary=binary, call_key=call_key,
                                 diff_before=diff_before, diff_after=diff_after,
-                                op=op, after_hash=after_hash))
+                                op=op, before_hash=before_hash, after_hash=after_hash))
             s.commit()
 
         await run_write_locked(_persist, label=f"rollback.write.{turn_id}")
@@ -1325,6 +1707,237 @@ async def record_turn_write(db: AsyncSession, *, session_id: int, turn_id: int,
         # 不再用 debug 静默吞掉。
         logger.warning("[rollback] 写盘记录失败（变更面板将无该文件 diff）: %s %s",
                        tool, path, exc_info=True)
+
+
+def _inspect_bytes_kind(data: bytes, rel: str, max_bytes: int = 0) -> str:
+    """对内存字节执行与 inspect_write_target 一致的类型判定（text / oversize / binary）。"""
+    if not _sample_is_text(data[:_BINARY_SNIFF_BYTES], rel):
+        return FILE_KIND_BINARY
+    if max_bytes > 0 and len(data) > max_bytes:
+        return FILE_KIND_OVERSIZE
+    return FILE_KIND_TEXT
+
+
+async def latest_turn_write_states(
+    db: AsyncSession, session_id: int, turn_id: int, workspace: str,
+) -> dict[str, tuple[bool | None, str | None]]:
+    """查询本轮各路径最新一条写盘记录的写后状态 (exists_after, after_hash)。"""
+    res = await db.execute(
+        select(
+            RollbackWrite.path, RollbackWrite.op, RollbackWrite.binary,
+            RollbackWrite.old_content.is_not(None).label("has_old"),
+            RollbackWrite.new_content.is_not(None).label("has_new"),
+            RollbackWrite.diff_before.is_not(None).label("has_dbefore"),
+            RollbackWrite.diff_after.is_not(None).label("has_dafter"),
+            RollbackWrite.after_hash,
+        ).where(
+            RollbackWrite.session_id == session_id,
+            RollbackWrite.turn_id == turn_id,
+        ).order_by(RollbackWrite.id.asc())
+    )
+    out: dict[str, tuple[bool | None, str | None]] = {}
+    for row in res.all():
+        key = _workspace_path_key(workspace, row.path) if workspace else write_path_key(row.path)
+        light = SimpleNamespace(
+            op=row.op, binary=bool(row.binary),
+            old_content="x" if row.has_old else None, new_content="x" if row.has_new else None,
+            diff_before="x" if row.has_dbefore else None, diff_after="x" if row.has_dafter else None,
+        )
+        out[key] = (rec_exists_after(light), row.after_hash)
+    return out
+
+
+async def record_detected_file_changes(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    turn_id: int,
+    workspace: str,
+    tool_name: str,
+    call_key: str | None = None,
+    candidates: list[str],
+    explicit_candidates: set[str] | None = None,
+    pre_scan: dict[str, tuple[int, int]] | None = None,
+    pre_bytes: dict[str, bytes] | None = None,
+    pre_ckpts: dict[str, str | None] | None = None,
+    pre_texts: dict[str, str | None] | None = None,
+    pre_kinds: dict[str, str] | None = None,
+    pre_digests: dict[str, str | None] | None = None,
+    pre_existed: dict[str, bool] | None = None,
+    pre_born: dict[str, bool] | None = None,
+    git_dirty: set[str] | None = None,
+    ckpt_registered: set[str] | None = None,
+    ckpt_consumed: set[str] | None = None,
+    turn_started_at: float | None = None,
+) -> tuple[list[str], int, int]:
+    """统一核对非写盘工具的候选变更路径并落库写盘记录与快照（plan-20261120-non-tool-capture）。
+
+    供 agent_loop 与后台进程退出回调共用：
+      1. 对比写前/写后存在性与字节指纹，过滤未改动及「本轮未登记新建又删除」的零净变更；
+      2. 扫描发现的路径会对比本轮最新 RollbackWrite，跳过已被并发子代理登记过的状态；
+      3. 必要时从内存预缓存（pre_bytes）或 Git 暂存区补写写前 checkpoint，确保可撤销；
+      4. 返回 (实际登记的相对路径列表, total_add, total_del)。
+    """
+    if not workspace or not candidates:
+        return [], 0, 0
+    # plan-20261121-build-artifact-filter：产物在候选阶段就剔除，省掉无谓的磁盘读取、备份与落库。
+    candidates = [c for c in candidates if not is_artifact_path(c)]
+    if not candidates:
+        return [], 0, 0
+    explicit_set = explicit_candidates or set()
+    scan_map = pre_scan or {}
+    bytes_map = pre_bytes or {}
+    ckpts_map = pre_ckpts or {}
+    texts_map = pre_texts or {}
+    kinds_map = pre_kinds or {}
+    digests_map = pre_digests or {}
+    existed_map = pre_existed or {}
+    born_map = pre_born or {}
+    reg_set = ckpt_registered if ckpt_registered is not None else set()
+    cons_set = ckpt_consumed if ckpt_consumed is not None else set()
+    max_bytes = settings.rollback_record_max_bytes
+
+    latest_states: dict[str, tuple[bool | None, str | None]] = {}
+    need_latest = any(write_path_key(p) not in explicit_set for p in candidates)
+    if need_latest:
+        latest_states = await latest_turn_write_states(db, session_id, turn_id, workspace)
+
+    detected: list[str] = []
+    total_add = 0
+    total_del = 0
+    seen: set[str] = set()
+    for raw in candidates:
+        rel = normalize_workspace_path(workspace, raw)
+        if rel is None or not _is_safe_rel_path(rel):
+            continue
+        key = write_path_key(rel)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+
+        from_explicit = key in explicit_set or raw in explicit_set
+        existed_before = bool(existed_map.get(raw, existed_map.get(key, key in scan_map)))
+        before_digest = digests_map.get(raw, digests_map.get(key))
+        before_text = texts_map.get(raw, texts_map.get(key))
+        kind_pre = kinds_map.get(raw, kinds_map.get(key, FILE_KIND_UNKNOWN))
+        ckpt = ckpts_map.get(raw, ckpts_map.get(key))
+
+        if existed_before and not from_explicit:
+            raw_pre = bytes_map.get(key)
+            if raw_pre is None and git_dirty is not None and key not in git_dirty:
+                raw_pre = await recover_git_index_bytes(workspace, key)
+            if raw_pre is not None:
+                if before_digest is None:
+                    before_digest = bytes_digest(raw_pre)
+                kind_pre = _inspect_bytes_kind(raw_pre, key, max_bytes)
+                if before_text is None and kind_pre == FILE_KIND_TEXT:
+                    before_text = raw_pre.decode("utf-8", errors="replace")
+                if not ckpt and key not in reg_set:
+                    ckpt = write_checkpoint_bytes(
+                        workspace, key, raw_pre, session_id=session_id, turn_id=turn_id,
+                    )
+
+        exists_after = path_exists(workspace, key)
+        after_digest = file_digest(workspace, key) if exists_after else None
+
+        if existed_before and not exists_after:
+            born = born_map.get(raw, born_map.get(key))
+            if born is None and turn_started_at is not None and ckpt:
+                born = file_mtime_after(Path(ckpt), turn_started_at)
+            if born and not await has_turn_write(db, turn_id, key):
+                if ckpt:
+                    discard_checkpoint(ckpt)
+                continue
+
+        if existed_before == exists_after:
+            if not existed_before:
+                continue
+            if before_digest is not None and after_digest is not None:
+                if before_digest == after_digest:
+                    if ckpt:
+                        discard_checkpoint(ckpt)
+                    continue
+            elif before_text is not None:
+                cur_text = _read_file_text(workspace, key)
+                if cur_text is not None and cur_text == before_text:
+                    if ckpt:
+                        discard_checkpoint(ckpt)
+                    continue
+
+        # 并发子代理去重：扫描新增的路径若与本轮最新写盘状态完全一致，说明已被并发工具登记过
+        if not from_explicit:
+            norm_key = _workspace_path_key(workspace, key)
+            prev_state = latest_states.get(norm_key)
+            if prev_state is not None:
+                prev_exists, prev_hash = prev_state
+                if exists_after and prev_exists is True and after_digest is not None and prev_hash == after_digest:
+                    if ckpt:
+                        discard_checkpoint(ckpt)
+                    continue
+                if not exists_after and prev_exists is False:
+                    if ckpt:
+                        discard_checkpoint(ckpt)
+                    continue
+
+        if existed_before:
+            if key in reg_set:
+                if ckpt:
+                    discard_checkpoint(ckpt)
+            elif ckpt:
+                reg = await record_checkpoint_for_turn(db, turn_id, ckpt, key)
+                if reg:
+                    reg_set.add(key)
+                else:
+                    discard_checkpoint(ckpt)
+                cons_set.add(key)
+        else:
+            await record_checkpoint_for_turn(db, turn_id, "", key, new_file=key)
+
+        kind_post, _ = inspect_write_target(workspace, key, max_bytes)
+        after_text = _read_file_text(workspace, key) if exists_after else None
+        is_bin = (
+            kind_pre in (FILE_KIND_BINARY, FILE_KIND_OVERSIZE)
+            or kind_post in (FILE_KIND_BINARY, FILE_KIND_OVERSIZE)
+            or (exists_after and kind_post == FILE_KIND_UNKNOWN and after_text is None)
+            or (existed_before and not exists_after and kind_pre == FILE_KIND_UNKNOWN and before_text is None)
+        )
+        diff_before: str | None = None
+        diff_after: str | None = None
+        textual = (
+            kind_pre in (FILE_KIND_TEXT, FILE_KIND_OVERSIZE)
+            or kind_post in (FILE_KIND_TEXT, FILE_KIND_OVERSIZE)
+        )
+        if is_bin and textual:
+            diff_after_text = read_diff_text(workspace, key) if exists_after else ""
+            if diff_after_text is not None:
+                diff_src_before = before_text
+                if diff_src_before is None and ckpt:
+                    diff_src_before = read_diff_text(workspace, ckpt)
+                diff_before, diff_after = build_diff_window(diff_src_before, diff_after_text or None)
+
+        await record_turn_write(
+            db, session_id=session_id, turn_id=turn_id, tool=tool_name,
+            path=key,
+            before=None if is_bin else before_text,
+            after=None if is_bin else after_text,
+            binary=is_bin,
+            call_key=call_key,
+            diff_before=diff_before,
+            diff_after=diff_after,
+            op=write_op(existed_before, exists_after),
+            before_hash=before_digest,
+            after_hash=after_digest,
+        )
+        if not is_bin:
+            add, dele = diff_stats(before_text, after_text)
+        elif diff_before is not None or diff_after is not None:
+            add, dele = diff_stats(diff_before, diff_after)
+        else:
+            add = dele = 0
+        total_add += add
+        total_del += dele
+        detected.append(key)
+    return detected, total_add, total_del
 
 
 async def reconcile_turn_writes(db: AsyncSession, *, session_id: int, turn_id: int, workspace: str) -> int:
@@ -1394,6 +2007,7 @@ async def reconcile_turn_writes(db: AsyncSession, *, session_id: int, turn_id: i
                 before=None if as_binary else last.new_content,
                 after=None if as_binary else after_text,
                 binary=as_binary, op=op,
+                before_hash=getattr(last, "after_hash", None),
                 after_hash=file_digest(workspace, path) if exists_now else None,
             )
             added += 1
@@ -1688,7 +2302,15 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
             RollbackWrite.turn_id.in_(turn_ids),
         ).order_by(RollbackWrite.id.asc())
     )
-    writes = _workspace_writes(workspace, list(res.scalars().all()))
+    # plan-20261122-message-send：打开历史会话会并发请求多轮变更。先排除已知产物，
+    # 剩余记录的路径解析可能访问文件系统，不能占用处理消息发送的事件循环。
+    records = []
+    for rec in res.scalars().all():
+        path = write_path_key(rec.path)
+        if _is_safe_rel_path(path) and is_artifact_path(path):
+            continue
+        records.append(rec)
+    writes = await asyncio.to_thread(_workspace_writes, workspace, records)
     if not writes:
         return []
 
@@ -1696,38 +2318,65 @@ async def list_turn_changes(db: AsyncSession, *, session_id: int, turn_id: int,
     for w in writes:
         # plan-20261020-path-dedupe：按归一后的路径分组，同一文件的正 / 反斜杠记录
         # 合并成一条（此前会展示成「2 个文件已更改」却没说是同一个文件）
-        by_path.setdefault(write_path_key(w.path), []).append(w)
+        key = write_path_key(w.path)
+        # plan-20261121-build-artifact-filter：历史已登记的产物记录在读取侧一并挡掉
+        if is_artifact_path(key):
+            continue
+        by_path.setdefault(key, []).append(w)
 
     # 审核状态按整轮合并：任一轮标记已审即视为已审（与 reviewed_paths 的路径合并口径一致）
-    reviewed: dict[str, bool] = {}
+    reviews: list[tuple[str, bool]] = []
     for tid in turn_ids:
-        for p, done in (await reviewed_paths(db, tid)).items():
-            key = _workspace_path_key(workspace, p)
-            reviewed[key] = reviewed.get(key, False) or done
-    changes: list[dict] = []
+        reviews.extend((await reviewed_paths(db, tid)).items())
     # 旧记录兜底按整轮开始时机判定：文件在某轮新建后又删除时，只有该轮快照能识别
     by_turn: dict[int, dict[str, list[RollbackWrite]]] = {}
     for w in writes:
-        if w.turn_id is not None:
-            by_turn.setdefault(int(w.turn_id), {}).setdefault(write_path_key(w.path), []).append(w)
+        if w.turn_id is None:
+            continue
+        key = write_path_key(w.path)
+        if is_artifact_path(key):
+            continue
+        by_turn.setdefault(int(w.turn_id), {}).setdefault(key, []).append(w)
     bogus: set[str] = set()
     for tid, grouped in by_turn.items():
         bogus |= await unrecorded_birth_paths(db, tid, grouped, workspace)
-    for path, recs in by_path.items():
-        if path in bogus:
-            continue  # 本轮新建（未登记）又被删除：零净变更
-        net = _net_state(workspace, path, recs)
-        if net is None:
-            continue  # 净效果为零（本轮新建又被删除、改了又改回）：不展示
-        additions, deletions = diff_stats(net.before, net.after)
-        changes.append({
-            "path": path,
-            "action": net.action,
-            "additions": additions,
-            "deletions": deletions,
-            "reviewed": reviewed.get(path, False),
-        })
-    changes.sort(key=lambda c: c["path"])
+
+    def _build_changes() -> list[dict]:
+        """逐文件算净变更与增删行数。
+
+        plan-20261121-build-artifact-filter：SequenceMatcher 与磁盘回读都是同步重活，
+        打包产物登记上千条时会把事件循环占满（实测该接口两次调用间隔 58 秒），
+        所以整体丢到线程池执行。
+        """
+        reviewed: dict[str, bool] = {}
+        for p, done in reviews:
+            key = _workspace_path_key(workspace, p)
+            reviewed[key] = reviewed.get(key, False) or done
+        out: list[dict] = []
+        for path, recs in by_path.items():
+            if path in bogus:
+                continue  # 本轮新建（未登记）又被删除：零净变更
+            net = _net_state(workspace, path, recs)
+            if net is None:
+                continue  # 净效果为零（本轮新建又被删除、改了又改回）：不展示
+            additions, deletions = (
+                (0, 0) if net.binary and not net.has_window else diff_stats(net.before, net.after)
+            )
+            out.append({
+                "path": path,
+                "action": net.action,
+                "additions": additions,
+                "deletions": deletions,
+                "reviewed": reviewed.get(path, False),
+            })
+        out.sort(key=lambda c: c["path"])
+        return out
+
+    changes = await asyncio.to_thread(_build_changes)
+    if len(changes) > _CHANGES_MAX_ITEMS:
+        logger.warning("[review] 变更清单超上限截断: turn=%s 总数=%s 上限=%s",
+                       turn_id, len(changes), _CHANGES_MAX_ITEMS)
+        changes = changes[:_CHANGES_MAX_ITEMS]
     return changes
 
 
@@ -1776,6 +2425,10 @@ def _net_state(workspace: str, path: str, recs: list[RollbackWrite]) -> _NetStat
         elif exists_after is False:
             # 本轮最后一次写盘把文件删掉了。不能回退磁盘（后续轮次可能重建了同名文件），
             # 否则会被误判成 modified，且与 get_file_diff 的删除口径不一致。
+            after = None
+        elif binary:
+            # plan-20261122-message-send：二进制记录已能判定文件存在，读整包并按文本
+            # 拆行会耗尽内存和请求处理时间，且得不到有意义的行数。
             after = None
         else:
             # 旧记录没存写后内容，只能回退磁盘现状（唯一无法规避的兼容分支）
@@ -1954,12 +2607,13 @@ async def get_file_diff(db: AsyncSession, *, session_id: int, turn_id: int,
         # 用其 old_content 作 before、当前磁盘作 after 返回文本 diff，避免瞬时
         # 读取失败误判导致整轮展示丢失；真二进制文件仍走原 reason 分支。
         _fb = next((w for w in writes if not w.binary and w.old_content is not None), None)
-        _after_now = _read_file_text(workspace, path)
-        if _fb is not None and _after_now is not None:
-            return _build_diff_payload(
-                path, _fb.old_content, _after_now, single_edit=False, action=net.action,
-                reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff", full_file=full_file,
-            )
+        if _fb is not None:
+            _after_now = await asyncio.to_thread(read_diff_text, workspace, path)
+            if _after_now is not None:
+                return _build_diff_payload(
+                    path, _fb.old_content, _after_now, single_edit=False, action=net.action,
+                    reason="该轮部分编辑文件读取失败，已降级展示最近可用版本 diff", full_file=full_file,
+                )
         # 二进制/大文件：不展示文本 diff，提示按写盘前备份恢复
         return _binary_diff_payload(path, single_edit=False, action=net.action)
 
@@ -2462,6 +3116,11 @@ def _chain_gap_reason(workspace: str, prev_last: RollbackWrite, next_first: Roll
         ck_digest = file_digest(workspace, next_ckpt)
         if ck_digest is not None:
             return _REASON_CHAIN if ck_digest != digest else None
+    # plan-20261120-non-tool-capture：同轮连续多次写同一文件（next_ckpt 为 None）时，
+    # 通过后一次写入前的 before_hash 与前一次的 after_hash 比对验证修改链衔接。
+    before_digest = getattr(next_first, "before_hash", None)
+    if digest and before_digest:
+        return _REASON_CHAIN if before_digest != digest else None
     # plan-20261107-rollback-audit：旧文本记录未登记 checkpoint 时也必须校验衔接，不能跨过用户手改。
     if not prev_last.binary and not next_first.binary:
         if prev_last.new_content is not None and next_first.old_content is not None:

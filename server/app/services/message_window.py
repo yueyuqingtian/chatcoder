@@ -1,9 +1,13 @@
 """plan-20261101-performance：按游标读取展示窗口，查询不随历史正文体量扩张。"""
+import re
 import time
 from sqlalchemy import select, func, cast, Text, LargeBinary
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.message import Message, Session
 from app.services.message_service import _to_out
+
+_REF_LINE_RE = re.compile(r"^(引用文件|引用文件夹|引用会话|使用技能|使用连接器|使用插件|使用微应用)：")
+_OUTLINE_TEXT_MAX = 200
 
 stats = {"queries": 0, "last_query_ms": 0.0, "last_rows": 0}
 WINDOW_BYTES = 1024 * 1024
@@ -95,3 +99,88 @@ async def search(db: AsyncSession, session_id: int, query: str, thread_id: int |
                         "snippet": row.text[max(0, row.text.lower().find(query.lower()) - 50):][:240]}
                        for row in rows[:limit]], "has_more": len(rows) > limit,
             "before_id": rows[min(limit, len(rows)) - 1].id if rows else None}
+
+
+def _strip_ref_lines(text: str, has_refs: bool) -> str:
+    """剥离发送时追加的引用文本行，避免长文本截断后前缀污染定位浮窗摘要（plan-20261121-jumpdots-v2）。"""
+    if not has_refs or not text:
+        return text.strip()
+    lines = [ln for ln in text.split("\n") if not _REF_LINE_RE.match(ln.strip())]
+    return "\n".join(lines).strip()
+
+
+def _compact_attachments(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        filename = str(item.get("filename") or "")
+        if not url and not filename:
+            continue
+        out.append({
+            "file_id": str(item.get("file_id") or ""),
+            "filename": filename,
+            "url": url,
+            "size": int(item.get("size") or 0),
+            "mime_type": str(item.get("mime_type") or ""),
+            "type": str(item.get("type") or ""),
+        })
+    return out
+
+
+def _compact_refs(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        value = item.get("value")
+        if not isinstance(kind, str) or not isinstance(value, str):
+            continue
+        entry: dict = {
+            "kind": kind,
+            "value": value,
+            "label": str(item.get("label") or value),
+        }
+        if isinstance(item.get("project_label"), str) and item["project_label"]:
+            entry["project_label"] = item["project_label"]
+        out.append(entry)
+    return out
+
+
+async def outline(db: AsyncSession, session_id: int, thread_id: int | None = None) -> dict:
+    """plan-20261121-jumpdots-v2：全会话用户提问轻量大纲，支撑跨分页定位条与附件预览。"""
+    revision = (await db.execute(select(Session.message_revision).where(Session.id == session_id))).scalar_one_or_none()
+    if revision is None:
+        raise LookupError("会话不存在")
+    rows = (await db.execute(
+        select(Message.id, Message.turn_id, Message.content, Message.created_at)
+        .where(*scope(session_id, thread_id), Message.sender_type == "user")
+        .order_by(Message.id.asc())
+    )).all()
+    items: list[dict] = []
+    for row in rows:
+        content = row.content if isinstance(row.content, dict) else {}
+        if (content.get("subagent_wakeup") is True
+                or content.get("workflow_wakeup") is True
+                or content.get("goal_continuation") is True):
+            continue
+        refs = _compact_refs(content.get("refs"))
+        attachments = _compact_attachments(content.get("attachments"))
+        clean_text = _strip_ref_lines(str(content.get("text") or ""), bool(refs))
+        if len(clean_text) > _OUTLINE_TEXT_MAX:
+            clean_text = clean_text[:_OUTLINE_TEXT_MAX] + "…"
+        items.append({
+            "message_id": row.id,
+            "turn_id": row.turn_id,
+            "created_at": str(row.created_at) if row.created_at else None,
+            "text": clean_text,
+            "attachments": attachments,
+            "refs": refs,
+        })
+    return {"items": items, "revision": revision}

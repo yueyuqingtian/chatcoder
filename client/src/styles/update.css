@@ -131,53 +131,43 @@
 .about-upd-actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .about-upd-notes { padding: 14px 16px 16px; border-radius: var(--r-md); background: var(--surface); }
 /* 自动下载开关行：与上方更新区之间一条细分隔线，内距与 .about-upd 对齐 */
-.about-auto-row { padding: 14px 20px; border-top: 1px solid var(--border-light); border-bottom: none; }
 .about-sub-title { margin-bottom: 12px; font-size: 12px; font-weight: 600; color: var(--text-2); }
 
-/* plan-20261024-update-channel：下载通道卡片（关于页，自动下载开关之上）
- *  - 选中态只用底色 + 勾选图标 + 字重表达：不加品牌色边框、不加左侧装饰性竖线（AGENTS.md 2 节）；
- *  - 三列 → 窄宽单列用容器查询收敛，避免设置页限宽档位变化时卡片被压成竖排；
- *  - 勾选图标常驻槽位只切 opacity，切换通道时行内不抖动（AGENTS.md 2 节：预留固定槽位）。 */
+/* plan-20261121-file-tree-settings：通道和自动下载共享卡片，勾选状态保留固定槽位。 */
 .about-ch {
   /* 提示行的折叠容器加 .in-gap：折叠态靠等量负 margin 抵消这一份 gap（见 motion.css） */
   --collapse-gap: var(--sp-4);
   display: flex; flex-direction: column; gap: var(--sp-4);
-  /* 内距与 .settings-card 的直接子元素统一规则同值（global.css 该规则特异性更高，这里保持等价，
-     让通道卡片与上方「软件更新」区左右边界对齐） */
   padding: var(--sp-5);
-  border-top: 1px solid var(--border-light);
-  container-type: inline-size;
+  border-bottom: 1px solid var(--border-light);
+  container: download-channels / inline-size;
 }
-.about-ch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); }
+.about-ch-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-3); }
 .about-ch-head > div { min-width: 0; }
-.about-ch-title { font-size: 13px; font-weight: 600; line-height: 1.45; color: var(--text-1); }
+.about-ch-head > .btn { flex-shrink: 0; }
+.about-ch-title { font-size: 13.5px; font-weight: 600; line-height: 1.45; color: var(--text-1); }
 .about-ch-desc { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
 .about-ch-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); }
-.about-ch-item {
-  display: flex; flex-direction: column; gap: 5px; align-items: stretch;
-  padding: 9px 11px 10px;
-  border: 1px solid var(--border); border-radius: var(--r-md);
-  background: transparent; color: var(--text-1);
-  text-align: left; cursor: pointer;
-  transition: background var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard);
+.about-ch-grid > .about-ch-choice {
+  flex-direction: column; align-items: stretch; justify-content: center; gap: var(--sp-1);
+  min-width: 0; height: auto; padding-block: var(--sp-3);
+  text-align: start;
 }
-.about-ch-item:hover { background: var(--bg-hover); }
-.about-ch-item.is-on { background: var(--upd-soft); }
+.about-ch-choice[aria-pressed="true"] { border-color: var(--border-hover, var(--border)); }
 .about-ch-top { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-.about-ch-name { font-size: 13px; font-weight: 500; line-height: 1.4; color: var(--text-1); white-space: nowrap; }
-.about-ch-item.is-on .about-ch-name { font-weight: 600; }
+.about-ch-name { min-width: 0; font-weight: 500; line-height: 1.4; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.about-ch-choice[aria-pressed="true"] .about-ch-name { font-weight: 600; }
 .about-ch-tag {
   display: inline-flex; align-items: center; flex-shrink: 0; height: 17px; padding: 0 6px;
   border-radius: var(--r-pill); background: var(--upd-soft); color: var(--upd-ink);
   font-size: 10.5px; font-weight: 600; white-space: nowrap;
 }
-.about-ch-item.is-on .about-ch-tag { background: var(--upd-soft-2); }
 .about-ch-check {
   flex-shrink: 0; margin-left: auto; width: 14px; height: 14px;
-  color: var(--upd-ink); opacity: 0;
+  color: var(--text-1); opacity: 0;
   transition: opacity var(--dur-2) var(--ease-standard);
 }
-.about-ch-item.is-on .about-ch-check { opacity: 1; }
+.about-ch-choice[aria-pressed="true"] .about-ch-check { opacity: 1; }
 .about-ch-meta {
   font-size: 11.5px; line-height: 1.4; color: var(--text-2);
   font-variant-numeric: tabular-nums;
@@ -193,31 +183,18 @@
 .about-ch-tip-ic { flex-shrink: 0; color: var(--warning); }
 .about-ch-tip-text { flex: 1; min-width: 0; font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .about-ch-foot {
-  display: flex; align-items: center; gap: var(--sp-3); min-height: 20px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); min-height: var(--btn-h-xs);
   font-size: 11.5px; line-height: 1.5; color: var(--text-3);
 }
-.about-ch-foot span:last-child { margin-left: auto; text-align: right; }
-/* 「恢复自动优选」：文字按钮，不是并列的独立操作，不给按钮底色（避免与上方卡片抢层级） */
-.about-ch-auto {
-  margin-left: auto; padding: 0;
-  border: none; background: none;
-  color: var(--text-2); font-size: 11.5px; line-height: 1.5;
-  cursor: pointer;
-  transition: color var(--dur-2) var(--ease-standard);
-}
-.about-ch-auto:hover { color: var(--text-1); text-decoration: underline; text-underline-offset: 2px; }
-@container (max-width: 520px) {
+.about-ch-foot > .btn { margin-inline-start: auto; }
+@container download-channels (max-width: 470px) {
   .about-ch-grid { grid-template-columns: minmax(0, 1fr); }
-  .about-ch-foot { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .about-ch-foot span:last-child { margin-left: 0; text-align: left; }
-  .about-ch-auto { margin-left: 0; }
+  .about-ch-grid > .about-ch-choice { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+  .about-ch-meta { min-width: 0; }
 }
 
 /* 更新历史 */
 .about-history-card { overflow: hidden; }
-.about-history-head { display: flex; align-items: baseline; gap: 10px; padding: 16px 20px 8px; }
-.about-history-title { font-size: 14px; font-weight: 600; color: var(--text-1); }
-.about-history-desc { font-size: 12px; color: var(--text-3); }
 .about-history { display: flex; flex-direction: column; padding: 0 8px 8px; }
 .about-history-empty { padding: 16px 12px 12px; font-size: 12.5px; color: var(--text-3); }
 .about-rel + .about-rel { border-top: 1px solid var(--border-light); }

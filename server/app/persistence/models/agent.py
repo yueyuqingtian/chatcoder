@@ -17,6 +17,12 @@ class Agent(Base):
     parent_agent_id: Mapped[int | None] = mapped_column(BigInteger)  # 主代理 id
     # 工作流运行时：该子代理所属的工作流节点（workflow_nodes.id）；非工作流子代理为空
     workflow_node_id: Mapped[int | None] = mapped_column(BigInteger)
+    # 子代理执行模式与展示角色（readonly/agent/default 与 explore/coder/operator/verifier），
+    # 只读/计划模式屏蔽入参及续跑/未落位卡片仍可据此准确展示角色徽章。
+    subagent_mode: Mapped[str | None] = mapped_column(String(20))
+    subagent_profile_id: Mapped[int | None] = mapped_column(BigInteger)
+    subagent_profile_name: Mapped[str | None] = mapped_column(String(60))
+    subagent_role: Mapped[str | None] = mapped_column(String(20))
     # idle/running/done/failed/terminated；paused = 中断后保留检查点、可由主代理续跑
     status: Mapped[str] = mapped_column(String(20), default="idle")
     # 断点续跑检查点：{messages: [ChatMessage dict...], spec: {运行参数}, saved_at}；完成后清空

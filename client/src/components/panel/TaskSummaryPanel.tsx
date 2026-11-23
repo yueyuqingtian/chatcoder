@@ -118,6 +118,7 @@ function SessionSummary({ visible }: { visible: boolean }) {
    *  被删除的文件、本轮新建又删除的临时文件都不算产物）；刷新时机跟随变更清单（写盘 / 轮次结束都会重拉）。
    *  清单请求失败时才回退到 artifact 消息并集，且不展示已知被删除的文件。 */
   const turnChanges = useChatStore((state) => state.turnChanges);
+  const productsRefreshTick = useChatStore((state) => state.productsRefreshTick);
   const [productsResult, setProductsResult] = useState<{ sessionId: number; files: string[] } | null>(null);
   const productSessionId = sessionId;
   const productPaths = productsResult?.sessionId === productSessionId ? productsResult.files : null;
@@ -130,7 +131,7 @@ function SessionSummary({ visible }: { visible: boolean }) {
         .catch(() => { if (!dead) setProductsResult(null); });
     }, 300);
     return () => { dead = true; window.clearTimeout(timer); };
-  }, [visible, productSessionId, turnChanges, isRunning]);
+  }, [visible, productSessionId, turnChanges, isRunning, productsRefreshTick]);
   const productFiles = useMemo<string[]>(() => {
     if (productPaths) {
       // 后端已按归一路径去重；这里再按同一口径收一次，防止旧版本后端返回混合写法

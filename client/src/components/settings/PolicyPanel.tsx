@@ -8,15 +8,14 @@ import { api, type ExecPolicyRuleOut, type ExecPolicyToolInfo, type ModelOut, ty
 import { useChatStore } from "../../store/chat";
 import { IconRefresh, IconPlus, IconX, IconWrench, IconTerminal, IconPencil, IconTrash } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Checkbox, FormDialog, Input, Segmented, Select, Textarea, Tooltip } from "../ui";
-import { Row } from "./shared";
+import { Badge, Button, CardRow, Checkbox, Empty, FormDialog, IconButton, Input, List, ListRow, Menu, PageActions, Section, Segmented, Select, Tag, Textarea, Tooltip } from "../ui";
 import { ModelPicker } from "../chat/ModelPicker";
 
 const DECISION_OPTS = [
-  { value: "allow", label: "放行", color: "var(--success)" },
-  { value: "deny", label: "拒绝", color: "var(--error)" },
-  { value: "ask", label: "需审批", color: "var(--warning)" },
-];
+  { value: "allow", label: "放行", tone: "success" },
+  { value: "deny", label: "拒绝", tone: "danger" },
+  { value: "ask", label: "需审批", tone: "warning" },
+] as const;
 /** v3.0 (plan-88): 常用命令前缀快捷选择 */
 const COMMAND_PRESETS = ["git *", "npm *", "pnpm *", "python *", "pip *", "docker *"];
 
@@ -40,7 +39,22 @@ function RulesSection() {
   const [form, setForm] = useState<PolicyForm>(EMPTY_FORM);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<{ mode: "one"; id: number } | { mode: "batch" } | null>(null);
-  const load = useCallback(async () => { try { setRules(await api.listExecPolicyRules()); } catch {} }, []);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const next = await api.listExecPolicyRules();
+      setRules(next);
+      const ids = new Set(next.map((rule) => rule.id));
+      setSelected((previous) => new Set([...previous].filter((id) => ids.has(id))));
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
   const loadTools = useCallback(async () => { try { setTools(await api.listExecPolicyTools()); } catch {} }, []);
   useEffect(() => { load(); loadTools(); }, [load, loadTools]);
   const resetForm = () => { setForm(EMPTY_FORM); setEditingId(null); setShowCreate(false); };
@@ -126,18 +140,11 @@ function RulesSection() {
   const setRuleType = (t: RuleType) => setForm((p) => ({ ...p, ruleType: t }));
 
   return (
-    <div>
-      <div className="settings-toolbar">
-        <button className="btn btn-ghost btn-sm" onClick={load}><IconRefresh size={13} /> 刷新</button>
-        <button className="btn btn-primary btn-sm" onClick={() => { setForm(EMPTY_FORM); setEditingId(null); setShowCreate(true); }}><IconPlus size={13} /> 新建规则</button>
-      </div>
-      {rules.length > 0 && (
-        <div className="policy-batch-bar">
-          <Checkbox checked={selected.size === rules.length} onChange={toggleSelectAll} aria-label="全选规则" />
-          <span>已选 {selected.size}/{rules.length}</span>
-          <div className="policy-batch-actions ui-batch-slot" data-empty={selected.size > 0 ? undefined : ""}><span className="ui-batch-only"><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("allow")} style={{ color: "var(--success)" }}>批量放行</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("deny")} style={{ color: "var(--error)" }}>批量拒绝</button><button className="btn btn-ghost btn-xs" onClick={() => batchSetDecision("ask")} style={{ color: "var(--warning)" }}>批量审批</button><button className="btn btn-danger btn-xs" onClick={() => setConfirmDelete({ mode: "batch" })}>批量删除</button></span></div>
-        </div>
-      )}
+    <>
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} loading={loading} onClick={() => void load()}>刷新</Button>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setForm(EMPTY_FORM); setEditingId(null); setShowCreate(true); }}>新建规则</Button>
+      </PageActions>
       <FormDialog
         open={showCreate}
         onClose={resetForm}
@@ -148,10 +155,16 @@ function RulesSection() {
       >
         <div className="settings-form-field">
           <label className="settings-field-label">规则类型</label>
-          <div className="settings-chips">
-            <button type="button" className={"settings-chip" + (form.ruleType === "command" ? " on" : "")} onClick={() => setRuleType("command")}>命令规则</button>
-            <button type="button" className={"settings-chip" + (form.ruleType === "tool" ? " on" : "")} onClick={() => setRuleType("tool")}>工具规则</button>
-          </div>
+          <Segmented<RuleType>
+            size="sm"
+            value={form.ruleType}
+            onChange={setRuleType}
+            aria-label="规则类型"
+            options={[
+              { value: "command", label: "命令规则" },
+              { value: "tool", label: "工具规则" },
+            ]}
+          />
         </div>
         {form.ruleType === "tool" ? (
           <div className="settings-form-field">
@@ -176,37 +189,66 @@ function RulesSection() {
             <Input placeholder="如 git push、npm install *" value={form.command_pattern} onChange={(e) => setForm((p) => ({ ...p, command_pattern: e.target.value }))} aria-label="命令前缀" />
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
               {COMMAND_PRESETS.map((preset) => (
-                <button key={preset} type="button" className="settings-chip" onClick={() => setForm((p) => ({ ...p, command_pattern: preset }))}>{preset}</button>
+                <Button key={preset} type="button" variant="secondary" size="xs" onClick={() => setForm((p) => ({ ...p, command_pattern: preset }))}>{preset}</Button>
               ))}
             </div>
           </div>
         )}
-        <div className="settings-form-field"><label className="settings-field-label">审批决策</label><div className="settings-chips">{DECISION_OPTS.map((opt) => (<button key={opt.value} type="button" className={"settings-chip" + (form.decision === opt.value ? " on" : "")} onClick={() => setForm((p) => ({ ...p, decision: opt.value }))} style={form.decision === opt.value ? { borderColor: opt.color, color: opt.color } : {}}>{opt.label}</button>))}</div></div>
+        <div className="settings-form-field">
+          <label className="settings-field-label">审批决策</label>
+          <Segmented<string>
+            size="sm"
+            value={form.decision}
+            onChange={(v) => setForm((p) => ({ ...p, decision: v }))}
+            aria-label="审批决策"
+            options={DECISION_OPTS.map((opt) => ({ value: opt.value, label: opt.label }))}
+          />
+        </div>
         <div className="settings-form-field"><label className="settings-field-label">理由说明（可选）</label><Input value={form.justification} onChange={(e) => setForm((p) => ({ ...p, justification: e.target.value }))} /></div>
       </FormDialog>
-      <div className="settings-resource-list">
-        {rules.map((r) => { const dm = decisionMeta(r.decision); const isSel = selected.has(r.id); const isTool = Boolean(r.tool_name); return (
-          // plan-91-393：规则行改为「图标块 + 等宽规则名 + 决策胶囊 + 理由」，操作为悬停出现的图标按钮
-          <div key={r.id} className={"settings-resource-item pol-rule" + (isSel ? " is-sel" : "")} data-decision={r.decision}>
-            <Checkbox checked={isSel} onChange={() => toggleSelect(r.id)} aria-label="选择该规则" />
-            <span className="pol-rule-tile" aria-hidden>{isTool ? <IconWrench size={16} /> : <IconTerminal size={16} />}</span>
-            <div className="settings-resource-info">
-              <div className="pol-rule-name">
-                <code>{isTool ? r.tool_name : r.command_pattern}</code>
-                <span className="pol-rule-kind">{isTool ? "工具" : "命令"}</span>
-              </div>
-              <div className="pol-rule-meta">
-                <span className="pol-rule-decision">{dm.label}</span>
-                {r.justification && <span className="pol-rule-why">{r.justification}</span>}
-              </div>
+      <Section bare className="pol-rules">
+        <List toolbar={rules.length > 0 ? (
+          <div className="policy-batch-bar">
+            <div className="policy-selection">
+              <Checkbox checked={selected.size === rules.length} indeterminate={selected.size > 0 && selected.size < rules.length}
+                onChange={toggleSelectAll} label="全选" aria-label="全选规则" />
+              <span>已选 {selected.size} / {rules.length} 条</span>
             </div>
-            <div className="settings-resource-actions pol-rule-actions">
-              <Tooltip title="编辑"><button className="btn btn-ghost btn-sm btn-icon" aria-label="编辑规则" onClick={() => startEdit(r)}><IconPencil size={14} /></button></Tooltip>
-              <Tooltip title="删除"><button className="btn btn-ghost btn-sm btn-icon" aria-label="删除规则" onClick={() => setConfirmDelete({ mode: "one", id: r.id })}><IconTrash size={14} /></button></Tooltip>
-            </div>
-          </div>); })}
-        {rules.length === 0 && <div className="navpage-empty">暂无执行策略规则</div>}
-      </div>
+            <Menu trigger={<Button type="button" variant="ghost" size="sm" disabled={selected.size === 0}>批量操作</Button>}
+              entries={[
+                ...DECISION_OPTS.map((decision) => ({ label: `设为${decision.label}`, onSelect: () => void batchSetDecision(decision.value) })),
+                { label: "删除所选规则", danger: true, onSelect: () => setConfirmDelete({ mode: "batch" }) },
+              ]} />
+          </div>
+        ) : undefined}>
+          {loadError && <div className="pol-rules-message" role="alert">读取执行规则失败。可点击页头的「刷新」重试。</div>}
+          {rules.map((rule) => {
+            const decision = decisionMeta(rule.decision);
+            const isTool = Boolean(rule.tool_name);
+            const name = isTool ? rule.tool_name : rule.command_pattern;
+            return <ListRow key={rule.id} className="pol-rule"
+              leading={<Checkbox checked={selected.has(rule.id)} onChange={() => toggleSelect(rule.id)} aria-label={`选择规则 ${name}`} />}
+              icon={isTool ? <IconWrench size={16} /> : <IconTerminal size={16} />}
+              name={<div className="pol-rule-name">
+                <Tooltip content={name}><code>{name}</code></Tooltip>
+                <Tag>{isTool ? "工具" : "命令"}</Tag>
+                <Badge size="xs" tone={decision.tone}>{decision.label}</Badge>
+              </div>}
+              desc={rule.justification && <span className="pol-rule-why">{rule.justification}</span>}
+              actions={<>
+                <IconButton size="xs" title="编辑规则" aria-label={`编辑规则 ${name}`} icon={<IconPencil size={14} />} onClick={() => startEdit(rule)} />
+                <IconButton size="xs" tone="danger" title="删除规则" aria-label={`删除规则 ${name}`} icon={<IconTrash size={14} />} onClick={() => setConfirmDelete({ mode: "one", id: rule.id })} />
+              </>} />;
+          })}
+          {rules.length === 0 && (loading ? <div className="pol-rules-message" role="status">正在读取执行规则…</div> : !loadError && (
+            <Empty
+              title="暂无执行策略规则"
+              desc="可按命令前缀或工具名称配置放行、拒绝或审批规则"
+              action={<Button variant="secondary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setForm(EMPTY_FORM); setEditingId(null); setShowCreate(true); }}>新建规则</Button>}
+            />
+          ))}
+        </List>
+      </Section>
       <ConfirmDialog
         open={confirmDelete !== null}
         title="删除执行策略规则"
@@ -215,7 +257,7 @@ function RulesSection() {
         onCancel={() => setConfirmDelete(null)}
         onConfirm={doDelete}
       />
-    </div>
+    </>
   );
 }
 
@@ -362,21 +404,21 @@ function ModeProfilesSection() {
   const KIND_LABEL: Record<string, string> = { full: "完全型", readonly: "只读型", plan: "规划型" };
 
   return (
-    <div>
+    <>
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void load()}>刷新</Button>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => openCreate()}>新建模式</Button>
+      </PageActions>
       {err && <div className="sched-error">{err}</div>}
-      <div className="settings-toolbar">
-        <button className="btn btn-ghost btn-sm" onClick={() => void load()}><IconRefresh size={13} /> 刷新</button>
-        <button className="btn btn-primary btn-sm" onClick={() => openCreate()}><IconPlus size={13} /> 新建模式</button>
-      </div>
       {/* S13（plan-41-197）：快速模板——一键预填工具组合与行为提示词 */}
       <div className="mode-tpl-row">
         <span className="mode-tpl-label">快速模板</span>
         {MODE_TEMPLATES.map((tpl) => (
-          <button key={tpl.key} type="button" className="settings-chip"
-            title={`${tpl.desc}｜预填 ${tpl.tools.length} 个工具与行为提示词`}
-            onClick={() => openCreate(tpl)}>
-            {tpl.label}
-          </button>
+          <Tooltip key={tpl.key} content={`${tpl.desc}｜预填 ${tpl.tools.length} 个工具与行为提示词`}>
+            <Button variant="secondary" size="xs" onClick={() => openCreate(tpl)}>
+              {tpl.label}
+            </Button>
+          </Tooltip>
         ))}
       </div>
       <div className="ui-field-hint mode-intro-hint">
@@ -389,22 +431,22 @@ function ModeProfilesSection() {
               <div className="settings-resource-info" onClick={() => { setIsNew(false); setEditing({ ...p }); }} style={{ cursor: "pointer" }}>
                 <div className="settings-resource-name">
                   {p.display_name || p.name}
-                  <span className="settings-resource-tag" style={{ marginLeft: 8 }}>{p.builtin ? "内置" : "自定义"}</span>
-                  <span className="settings-resource-tag" style={{ marginLeft: 4 }}>{KIND_LABEL[p.kind] || p.kind}</span>
+                  <span style={{ marginLeft: 8 }}><Tag>{p.builtin ? "内置" : "自定义"}</Tag></span>
+                  <span style={{ marginLeft: 4 }}><Tag>{KIND_LABEL[p.kind] || p.kind}</Tag></span>
                 </div>
                 <div className="settings-resource-desc">
                   <span>{p.description || "—"}</span>
-                  <span className="settings-resource-tag">{p.tools.length === 0 ? "全量工具" : `${p.tools.length} 个工具`}</span>
+                  <Tag>{p.tools.length === 0 ? "全量工具" : `${p.tools.length} 个工具`}</Tag>
                 </div>
               </div>
               {!p.builtin && (
                 <div className="settings-resource-actions">
-                  <button className="btn btn-ghost btn-xs" onClick={() => void handleDelete(p.name)}><IconX size={12} /></button>
+                  <IconButton size="xs" tone="danger" title="删除模式" aria-label={`删除模式 ${p.display_name || p.name}`} icon={<IconX size={12} />} onClick={() => void handleDelete(p.name)} />
                 </div>
               )}
             </div>
           ))}
-          {profiles.length === 0 && <div className="navpage-empty">暂无模式</div>}
+          {profiles.length === 0 && <Empty size="sm" title="暂无模式" />}
         </div>
         {editing ? (
           <div className="perm-mode-editor settings-create-form">
@@ -423,14 +465,13 @@ function ModeProfilesSection() {
             </div>
             <div className="settings-form-field">
               <label className="settings-field-label">模式类型（决定写盘/命令审批语义）</label>
-              <div className="settings-chips">
-                {(["full", "readonly", "plan"] as const).map((k) => (
-                  <button key={k} type="button" className={"settings-chip" + (editing.kind === k ? " on" : "")}
-                    onClick={() => setEditing((p) => p && { ...p, kind: k })}>
-                    {KIND_LABEL[k]}
-                  </button>
-                ))}
-              </div>
+              <Segmented<"full" | "readonly" | "plan">
+                size="sm"
+                value={editing.kind as "full" | "readonly" | "plan"}
+                onChange={(k) => setEditing((p) => p && { ...p, kind: k })}
+                aria-label="模式类型"
+                options={(["full", "readonly", "plan"] as const).map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+              />
             </div>
             <div className="settings-form-field">
               <label className="settings-field-label">描述（显示在模式菜单 tooltip）</label>
@@ -449,14 +490,14 @@ function ModeProfilesSection() {
                 <Input value={toolQuery} placeholder="搜索工具名或说明，如 suggest、建议"
                   aria-label="搜索工具"
                   onChange={(e) => setToolQuery(e.target.value)} />
-                <div className="settings-chips">
-                  {TOOL_GROUP_FILTERS.map((g) => (
-                    <button key={g.key} type="button"
-                      className={"settings-chip" + (toolGroup === g.key ? " on" : "")}
-                      onClick={() => setToolGroup(g.key)}>
-                      {g.label}
-                    </button>
-                  ))}
+                <div className="pol-mode-row-actions">
+                  <Segmented<"all" | "core" | "subagent" | "mcp">
+                    size="sm"
+                    value={toolGroup}
+                    onChange={setToolGroup}
+                    aria-label="工具类别"
+                    options={TOOL_GROUP_FILTERS.map((g) => ({ value: g.key, label: g.label }))}
+                  />
                   <label className="perm-tool-picked">
                     <Checkbox checked={pickedOnly} onChange={() => setPickedOnly((v) => !v)}
                       aria-label="只看已选工具" />
@@ -492,10 +533,10 @@ function ModeProfilesSection() {
                 onChange={(e) => setEditing((p) => p && { ...p, hint: e.target.value })} />
             </div>
             <div className="settings-create-actions">
-              <button className="btn btn-ghost btn-sm" onClick={() => { setEditing(null); setIsNew(false); }}>取消</button>
-              <button className="btn btn-primary btn-sm" disabled={saving || !editing.name.trim()} onClick={() => void handleSave()}>
+              <Button variant="secondary" size="sm" onClick={() => { setEditing(null); setIsNew(false); }}>取消</Button>
+              <Button variant="primary" size="sm" loading={saving} disabled={saving || !editing.name.trim()} onClick={() => void handleSave()}>
                 {saving ? "保存中…" : "保存模式"}
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -503,7 +544,7 @@ function ModeProfilesSection() {
           <div className="perm-mode-empty">从左侧选择一个模式进行编辑，或点击「新建模式」</div>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -557,13 +598,11 @@ function ApprovalExplainSection() {
   ];
 
   return (
-    // plan-121-482：不再套第二层卡片（外层已是卡片）；行直接排在卡片上，横线由 CSS 贴卡片边缘。
-    <div className="explain-sec">
-      <div className="ui-field-hint">
-        审批卡左下角「解释」会把当前命令交给 AI 分析用途与风险。默认沿用当前会话的模型与思考深度；
-        如需固定为更轻快或更强的组合，可在此单独指定。
-      </div>
-      <Row title="解释专用模型" desc="留空则跟随当前会话所用模型">
+    <Section
+      title="审批解释模型"
+      desc="审批卡左下角「解释」会把当前命令交给 AI 分析用途与风险。默认沿用当前会话的模型与思考深度；如需固定为更轻快或更强的组合，可在此单独指定。"
+    >
+      <CardRow title="解释专用模型" desc="留空则跟随当前会话所用模型">
         {/* plan-91-393：改用全局模型选择器，与输入框模型弹窗一致（分组/标签/余额） */}
         <div className="sb-model-picker">
           <ModelPicker
@@ -580,8 +619,8 @@ function ApprovalExplainSection() {
             }}
           />
         </div>
-      </Row>
-      <Row
+      </CardRow>
+      <CardRow
         title="解释专用思考深度"
         desc={supportsEffort ? "留空则跟随当前会话所用思考深度" : "选定支持思考档位的专用模型后可选"}
       >
@@ -593,9 +632,9 @@ function ApprovalExplainSection() {
           style={{ minWidth: 220 }}
           aria-label="解释专用思考深度"
         />
-      </Row>
+      </CardRow>
       {err && <div className="sched-error">{err}</div>}
-    </div>
+    </Section>
   );
 }
 

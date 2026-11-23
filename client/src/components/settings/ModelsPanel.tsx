@@ -10,19 +10,26 @@
  * - workbuddy 账号可查看积分余额、刷新、一键「Buddy 加油站」签到；
  * - 每供应商可选独立代理（自定义地址）或跟随全局 / 直连。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api, type ModelOut, type ProviderCredentialOut, type ProviderOut,
+  api, type ModelOut, type ProviderAntigravityFields, type ProviderCredentialOut, type ProviderOut,
 } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff, IconCopy, IconCheck } from "../icons";
+import {
+  IconRefresh, IconPlus, IconX, IconTrash, IconPencil, IconEye, IconEyeOff,
+  IconCopy, IconCheck, IconInfo, IconSearch, IconMoreHorizontal,
+} from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Button, Checkbox, Collapse, Empty, IconButton, Input, PageActions, Segmented, Select, Switch, Tag, Tooltip } from "../ui";
+import {
+  Badge, Button, Checkbox, Collapse, Dialog, Empty, Field, IconButton, Input,
+  Menu, PageActions, Segmented, Select, Switch, Tag, Tooltip, type MenuEntry,
+} from "../ui";
 import { Sw } from "./shared";
 import { Ta3QuotaSection } from "./Ta3QuotaSection";
 import { Ta3ConnectionFields } from "./Ta3ConnectionFields";
 import { KiroQuotaSection } from "./KiroQuotaSection";
+import { AntigravityQuotaSection } from "./AntigravityQuotaSection";
 import { ProviderSideList } from "./ProviderSideList";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { OAUTH_FORMATS } from "../chat/modelGroups";
@@ -46,6 +53,8 @@ const OAUTH_DEFAULT_BASE: Record<string, string> = {
   // plan-116-456：kiro 的 Base URL 存端点地址（默认为 us-east-1 区域端点；
   // 留空时后端也按区域自动推导，但显式存值界面与「测试连接」都更直观）
   kiro: "https://q.us-east-1.amazonaws.com",
+  // antigravity 与 kiro 同为「端点覆盖」语义：留空时后端按默认网关地址推导
+  antigravity: "https://daily-cloudcode-pa.googleapis.com",
 };
 
 const API_FORMAT_LABEL: Record<string, string> = {
@@ -56,7 +65,24 @@ const API_FORMAT_LABEL: Record<string, string> = {
   workbuddy: "workbuddy（腾讯 CodeBuddy）",
   trae: "trae（TRAE SOLO）",
   kiro: "kiro（AWS Kiro）",
+  antigravity: "antigravity（Google Antigravity）",
 };
+
+/** 暂不对外开放的格式：trae 兼容性还没做好，先隐藏新增入口，避免用户建出用不了的供应商。
+ *  标签仍保留在 API_FORMAT_LABEL，存量的 trae 供应商在详情里照常显示格式名。 */
+const HIDDEN_API_FORMATS = new Set(["trae"]);
+
+/** API 格式下拉选项：过滤隐藏项；但 current 本身是隐藏项时补回，
+ *  否则存量 trae 供应商在详情里会退化成 placeholder。 */
+function apiFormatOptions(current?: string) {
+  return Object.entries(API_FORMAT_LABEL)
+    .filter(([v]) => !HIDDEN_API_FORMATS.has(v) || v === current)
+    .map(([v, label]) => ({ value: v, label }));
+}
+
+/** antigravity 应用内登录：浏览器授权由后端发起，前端轮询结果（1.5s 一次，最长 120s） */
+const ANTIGRAVITY_POLL_MS = 1500;
+const ANTIGRAVITY_POLL_DEADLINE_MS = 120_000;
 
 /** 代理模式选项（plan-248-1258 M2.3） */
 const PROXY_MODES: Array<{ value: string; label: string; desc: string }> = [
@@ -79,14 +105,27 @@ function statusDotClass(p: ProviderOut) {
   return "models-dot on";
 }
 
+/** antigravity 详情区常显信息：档位与 project（后端 ProviderOut 新增字段，其它供应商恒为空）。
+ *  两者都为空时返回空串，调用方据此整行不渲染。 */
+function describeAntigravityAccount(p: ProviderOut): string {
+  const meta = p as ProviderOut & ProviderAntigravityFields;
+  return [
+    meta.antigravity_tier ? `档位 ${meta.antigravity_tier}` : "",
+    meta.antigravity_project ? `项目 ${meta.antigravity_project}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
 // ─────────────────────────────────────────────
 // 弹窗：供应商编辑
 // ─────────────────────────────────────────────
 function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean; editing: ProviderOut | null; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ name: "", base_url: "", api_key: "", api_format: "openai", is_active: true, proxy_mode: "inherit", proxy_url: "" });
   const isOAuthFormat = OAUTH_FORMATS.has(form.api_format);
-  // kiro 虽为账号登录型，但 base_url 是「端点覆盖」语义（可留空，留空按区域推导）
+  // kiro / antigravity 虽为账号登录型，但 base_url 是「端点覆盖」语义（可留空，留空按默认值推导）
   const isKiro = form.api_format === "kiro";
+  const isAntigravity = form.api_format === "antigravity";
+  /** 两者共用「可留空 + 留空用内置默认端点」这条路径 */
+  const isBlankableOAuth = isKiro || isAntigravity;
   useEffect(() => {
     if (editing) {
       setForm({
@@ -104,8 +143,8 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
       const trimmedBase = form.base_url.trim();
       const finalBase = form.api_format === "commandcode" && !trimmedBase
         ? OAUTH_DEFAULT_BASE.commandcode
-        : isKiro
-          ? (trimmedBase || OAUTH_DEFAULT_BASE.kiro)
+        : isBlankableOAuth
+          ? (trimmedBase || OAUTH_DEFAULT_BASE[form.api_format])
           : isOAuthFormat
             ? (form.api_format === "ta3" && trimmedBase ? trimmedBase : OAUTH_DEFAULT_BASE[form.api_format])
             : trimmedBase;
@@ -133,21 +172,23 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
       height="auto"
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && !form.base_url.trim())}>{editing ? "保存" : "创建"}</button>
+          <Button variant="secondary" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="primary" size="sm" onClick={handleSave} disabled={!form.name.trim() || (!isOAuthFormat && !form.base_url.trim())}>{editing ? "保存" : "创建"}</Button>
         </>
       }
     >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row"><label>供应商名称</label><Input placeholder="如 Ta+3 牛码" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
-        <div className="settings-modal-form-row"><label>API 格式</label><Select value={form.api_format} onChange={(v) => setForm((p) => ({ ...p, api_format: v, base_url: v === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))} options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))} aria-label="API 格式" /></div>
-        {(!isOAuthFormat || isKiro) && <div className="settings-modal-form-row"><label>{isKiro ? "端点覆盖 / 区域（可选）" : "Base URL"}</label><Input placeholder={isKiro ? "留空默认 us-east-1；可填区域名（如 eu-central-1）或完整端点 URL" : form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
+        <div className="settings-modal-form-row"><label>API 格式</label><Select value={form.api_format} onChange={(v) => setForm((p) => ({ ...p, api_format: v, base_url: v === "commandcode" && !p.base_url ? OAUTH_DEFAULT_BASE.commandcode : p.base_url }))} options={apiFormatOptions(form.api_format)} aria-label="API 格式" /></div>
+        {(!isOAuthFormat || isBlankableOAuth) && <div className="settings-modal-form-row"><label>{isKiro ? "端点覆盖 / 区域（可选）" : isAntigravity ? "端点覆盖（可选）" : "Base URL"}</label><Input placeholder={isKiro ? "留空默认 us-east-1；可填区域名（如 eu-central-1）或完整端点 URL" : isAntigravity ? "留空默认 https://daily-cloudcode-pa.googleapis.com；仅需反代时填写" : form.api_format === "commandcode" ? "https://api.commandcode.ai" : "https://.../v1"} value={form.base_url} onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))} /></div>}
         {!isOAuthFormat && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input placeholder={form.api_format === "commandcode" ? "user_..." : "sk-..."} type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
         {form.api_format === "commandcode" && <div className="models-hint">CommandCode 直连模式，API Key 为以 user_ 开头的密钥（可从 ~/.commandcode/auth.json 或 commandcode.ai/studio 获取）。</div>}
         {isOAuthFormat && <div className="models-hint">{form.api_format === "kiro"
           ? "kiro 类型需先在 Kiro IDE/CLI 中登录；保存后在详情面板点击「登录账号」导入本机登录态。默认使用 us-east-1 端点（模型最全），可在「端点覆盖」中改走其它区域或反代。"
           : form.api_format === "ta3"
           ? "TA3 使用系统浏览器网页登录，已内置内外网主备地址；创建后可在连接设置修改，点击「网页登录」授权。"
+          : form.api_format === "antigravity"
+            ? "antigravity 类型使用 Google 账号登录：保存后在详情面板「导入本机登录态」（主路径）或「应用内登录」。服务端地址已内置，仅在需要反代时才填端点覆盖。"
           : form.api_format === "workbuddy"
             ? "workbuddy 类型使用账号登录获取模型，服务端地址已内置（copilot.tencent.com）；保存后在详情面板点击「登录账号」，支持登录多个账号。"
             : "trae 类型使用账号登录获取模型，服务端地址已内置（trae-api-cn.mchost.guru）；保存后在详情面板点击「登录账号」。"}</div>}
@@ -161,8 +202,6 @@ function ProviderFormModal({ open, editing, onClose, onSaved }: { open: boolean;
 // 弹窗：扫描模型
 // ─────────────────────────────────────────────
 interface ScanItem { name: string; enabled: boolean; context_window: string; is_multimodal: boolean; existing: boolean }
-
-const MULTIMODAL_HINT = /vision|vl-|4v|omni|image|audio|realtime/i;
 
 function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; provider: ProviderOut | null; onClose: () => void; onSaved: () => void }) {
   const [items, setItems] = useState<ScanItem[]>([]);
@@ -186,7 +225,8 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
             name: s.id,
             enabled: ex ? ex.is_active : false,
             context_window: String(ex?.context_window || s.context_window || 200000),
-            is_multimodal: ex ? ex.is_multimodal : MULTIMODAL_HINT.test(s.id),
+            // plan-20261123-ux-fixes：已存在模型保留原多模态设置，新同步/扫描模型默认开启多模态
+            is_multimodal: ex ? ex.is_multimodal : true,
             existing: !!ex,
           };
         }));
@@ -234,8 +274,8 @@ function ScanModelsModal({ open, provider, onClose, onSaved }: { open: boolean; 
       height="auto"
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={loading || saving || items.length === 0}>{saving ? "保存中…" : `保存（启用 ${enabledCount} 个）`}</button>
+          <Button variant="secondary" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="primary" size="sm" loading={saving} onClick={handleSave} disabled={loading || saving || items.length === 0}>{saving ? "保存中…" : `保存（启用 ${enabledCount} 个）`}</Button>
         </>
       }
     >
@@ -324,8 +364,8 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
       height="auto"
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</button>
+          <Button variant="secondary" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="primary" size="sm" onClick={handleSave} disabled={!form.name.trim()}>{editing ? "保存" : "创建"}</Button>
         </>
       }
     >
@@ -337,10 +377,245 @@ function ModelFormModal({ open, editing, targetProvider, onClose, onSaved }: { o
         {!underProvider && <div className="settings-modal-form-row"><label>API Key {editing && "(留空不修改)"}</label><Input placeholder="sk-..." type="password" value={form.api_key} onChange={(e) => setForm((p) => ({ ...p, api_key: e.target.value }))} /></div>}
         <div className="settings-modal-form-row"><label>上下文窗口 (tokens)</label><Input value={form.context_window} onChange={(e) => setForm((p) => ({ ...p, context_window: e.target.value }))} /></div>
         <div className="settings-modal-form-row"><label>多模态（支持图片输入）</label><Sw checked={form.is_multimodal} onChange={(v) => setForm((p) => ({ ...p, is_multimodal: v }))} /></div>
-        <div className="settings-modal-form-row"><label>思考深度档位</label><div className="settings-chips">{REASONING_OPTS.map((eff) => { const on = form.reasoning_efforts.includes(eff); return <button key={eff} type="button" className={"settings-chip" + (on ? " on" : "")} onClick={() => setForm((p) => ({ ...p, reasoning_efforts: on ? p.reasoning_efforts.filter((x) => x !== eff) : [...p.reasoning_efforts, eff] }))}>{eff}</button>; })}</div></div>
+        <div className="settings-modal-form-row">
+          <label>思考深度档位</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {REASONING_OPTS.map((eff) => {
+              const on = form.reasoning_efforts.includes(eff);
+              return (
+                <Button
+                  key={eff}
+                  type="button"
+                  size="xs"
+                  variant={on ? "primary" : "outline"}
+                  onClick={() => setForm((p) => ({ ...p, reasoning_efforts: on ? p.reasoning_efforts.filter((x) => x !== eff) : [...p.reasoning_efforts, eff] }))}
+                >
+                  {eff}
+                </Button>
+              );
+            })}
+          </div>
+        </div>
         <div className="settings-modal-form-row"><label>启用状态</label><Sw checked={form.is_active} onChange={(v) => setForm((p) => ({ ...p, is_active: v }))} /></div>
       </div>
     </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────
+// 弹窗：批量配置模型（plan-20261123-ux-fixes）
+// ─────────────────────────────────────────────
+type TriState = "keep" | "on" | "off";
+type EffortBatchMode = "keep" | "set" | "clear";
+
+const CONTEXT_PRESETS: ReadonlyArray<{ label: string; value: number }> = [
+  { label: "128K", value: 128000 },
+  { label: "200K", value: 200000 },
+  { label: "512K", value: 512000 },
+  { label: "1M", value: 1000000 },
+];
+
+function BatchModelsModal({
+  open,
+  provider,
+  models,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  provider: ProviderOut | null;
+  models: ModelOut[];
+  onClose: () => void;
+  onSaved: (updated: ModelOut[]) => void;
+}) {
+  const [activeMode, setActiveMode] = useState<TriState>("keep");
+  const [multimodalMode, setMultimodalMode] = useState<TriState>("keep");
+  const [contextWindow, setContextWindow] = useState("");
+  const [effortMode, setEffortMode] = useState<EffortBatchMode>("keep");
+  const [efforts, setEfforts] = useState<string[]>(["low", "medium", "high"]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setActiveMode("keep");
+    setMultimodalMode("keep");
+    setContextWindow("");
+    setEffortMode("keep");
+    setEfforts(["low", "medium", "high"]);
+    setSaving(false);
+  }, [open]);
+
+  const trimmedCtx = contextWindow.trim();
+  const parsedCtx = trimmedCtx ? Number(trimmedCtx) : null;
+  const ctxValid = !trimmedCtx || (Number.isInteger(parsedCtx) && (parsedCtx ?? 0) > 0);
+
+  const changeCount =
+    (activeMode !== "keep" ? 1 : 0)
+    + (multimodalMode !== "keep" ? 1 : 0)
+    + (trimmedCtx ? 1 : 0)
+    + (effortMode !== "keep" ? 1 : 0);
+
+  const canSubmit = !saving && models.length > 0 && changeCount > 0 && ctxValid;
+
+  const handleApply = async () => {
+    if (!provider || !canSubmit) return;
+    const payload: {
+      model_ids: number[];
+      is_active?: boolean;
+      is_multimodal?: boolean;
+      context_window?: number;
+      reasoning_efforts?: string[];
+    } = {
+      model_ids: models.map((m) => m.id),
+    };
+    if (activeMode !== "keep") payload.is_active = activeMode === "on";
+    if (multimodalMode !== "keep") payload.is_multimodal = multimodalMode === "on";
+    if (trimmedCtx && parsedCtx != null) payload.context_window = parsedCtx;
+    if (effortMode === "set") payload.reasoning_efforts = efforts;
+    else if (effortMode === "clear") payload.reasoning_efforts = [];
+
+    setSaving(true);
+    try {
+      const updated = await api.batchUpdateProviderModels(provider.id, payload);
+      notify(`已批量更新 ${models.length} 个模型`);
+      onSaved(updated);
+      onClose();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const previewNames = models.slice(0, 6);
+  const hiddenCount = Math.max(0, models.length - previewNames.length);
+
+  return (
+    <Dialog
+      open={open}
+      onClose={() => { if (!saving) onClose(); }}
+      width={540}
+      title={`批量配置模型（${models.length} 个）`}
+      subtitle={provider ? `所属供应商：${provider.name} · 仅修改你指定的项，其余保持各模型原配置` : undefined}
+      footer={
+        <div className="models-batch-footer">
+          <span className="models-batch-footer-hint">
+            {!ctxValid
+              ? "上下文窗口需为大于 0 的整数"
+              : changeCount === 0
+                ? "请至少修改一项配置"
+                : `将应用 ${changeCount} 项配置到 ${models.length} 个模型`}
+          </span>
+          <div className="models-batch-footer-actions">
+            <Button variant="secondary" size="sm" disabled={saving} onClick={onClose}>取消</Button>
+            <Button variant="primary" size="sm" loading={saving} disabled={!canSubmit} onClick={() => void handleApply()}>
+              应用配置
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="models-batch-form">
+        <div className="models-batch-picked">
+          {previewNames.map((m) => (
+            <Tag key={m.id}>{m.name}</Tag>
+          ))}
+          {hiddenCount > 0 && <Badge size="xs" tone="neutral">+{hiddenCount} 个</Badge>}
+        </div>
+
+        <Field label="启用状态">
+          <Segmented<TriState>
+            block
+            size="sm"
+            aria-label="批量设置启用状态"
+            value={activeMode}
+            onChange={setActiveMode}
+            options={[
+              { value: "keep", label: "保持不变" },
+              { value: "on", label: "全部启用" },
+              { value: "off", label: "全部停用" },
+            ]}
+          />
+        </Field>
+
+        <Field label="多模态（支持图片输入）">
+          <Segmented<TriState>
+            block
+            size="sm"
+            aria-label="批量设置多模态"
+            value={multimodalMode}
+            onChange={setMultimodalMode}
+            options={[
+              { value: "keep", label: "保持不变" },
+              { value: "on", label: "全部开启" },
+              { value: "off", label: "全部关闭" },
+            ]}
+          />
+        </Field>
+
+        <Field
+          label="上下文窗口 (tokens)"
+          hint="留空表示保持各模型原有上下文窗口不变"
+          error={!ctxValid ? "请输入大于 0 的整数" : undefined}
+        >
+          <Input
+            size="sm"
+            clearable
+            invalid={!ctxValid}
+            placeholder="留空保持不变，如 200000 或 1000000"
+            value={contextWindow}
+            onChange={(e) => setContextWindow(e.target.value)}
+            aria-label="批量设置上下文窗口"
+          />
+          <div className="models-batch-presets">
+            {CONTEXT_PRESETS.map((p) => (
+              <Button
+                key={p.value}
+                type="button"
+                size="xs"
+                variant={trimmedCtx === String(p.value) ? "primary" : "subtle"}
+                onClick={() => setContextWindow(String(p.value))}
+              >
+                {p.label}
+              </Button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="思考深度档位">
+          <Segmented<EffortBatchMode>
+            block
+            size="sm"
+            aria-label="批量设置思考深度"
+            value={effortMode}
+            onChange={setEffortMode}
+            options={[
+              { value: "keep", label: "保持不变" },
+              { value: "set", label: "统一设为" },
+              { value: "clear", label: "全部清空" },
+            ]}
+          />
+          <Collapse open={effortMode === "set"}>
+            <div className="models-batch-efforts">
+              {REASONING_OPTS.map((eff) => {
+                const on = efforts.includes(eff);
+                return (
+                  <Button
+                    key={eff}
+                    type="button"
+                    size="xs"
+                    variant={on ? "primary" : "outline"}
+                    onClick={() => setEfforts((prev) => (on ? prev.filter((x) => x !== eff) : [...prev, eff]))}
+                  >
+                    {eff}
+                  </Button>
+                );
+              })}
+            </div>
+          </Collapse>
+        </Field>
+      </div>
+    </Dialog>
   );
 }
 
@@ -389,8 +664,8 @@ function CredentialFormModal({ open, providerId, editing, onClose, onSaved }: {
       height="auto"
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave}>{editing ? "保存" : "添加"}</button>
+          <Button variant="secondary" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="primary" size="sm" onClick={handleSave}>{editing ? "保存" : "添加"}</Button>
         </>
       }
     >
@@ -434,6 +709,13 @@ export function ModelsPanel() {
   const [showModelForm, setShowModelForm] = useState(false);
   const [showCredForm, setShowCredForm] = useState(false);
   const [editingCred, setEditingCred] = useState<ProviderCredentialOut | null>(null);
+  // plan-20261123-ux-fixes：模型批量管理态（切换供应商自动重置）
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedModelIds, setSelectedModelIds] = useState<Set<number>>(() => new Set());
+  const [batchQuery, setBatchQuery] = useState("");
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const lastPickedIndexRef = useRef<number | null>(null);
+  const batchShiftRef = useRef(false);
 
   // 登录/同步状态（ta3/workbuddy/trae 共用：providerId → phase）
   const [authStatus, setAuthStatus] = useState<Record<number, { phase: "idle" | "pending" | "done" | "failed"; label?: string; error?: string }>>({});
@@ -509,6 +791,8 @@ export function ModelsPanel() {
   const totalCredits = creditValues.length > 0 ? creditValues.reduce((a, b) => a + Number(b), 0) : null;
   /** plan-41-225（右列照图）：主区密码框绑定的凭据（优先级最高的那条；无凭据时为 null） */
   const primaryCred = credentials.length > 0 ? credentials[0] : null;
+  /** antigravity 档位 / project 常显行文案（非 antigravity 或两个字段都为空时为 ""） */
+  const antigravityInfo = selected ? describeAntigravityAccount(selected) : "";
 
   // 选中供应商 → 拉取其模型与凭据。切换时保留旧详情直到新详情准备好，
   // 避免双栏右侧空白/高度跳变；requestId 防止慢响应回写到错误供应商。
@@ -615,12 +899,17 @@ export function ModelsPanel() {
     })();
   }, [selected, detailLoading, loadDetail]);
 
-  // 切换供应商时重置「编辑名称 / 显示密钥 / 展开多凭据」三个临时态，避免串到下一家
+  // 切换供应商时重置「编辑名称 / 显示密钥 / 展开多凭据 / 批量管理」临时态，避免串到下一家
   useEffect(() => {
     setRenamingName(false);
     setShowKey(false);
     setRevealedKey(null);
     setShowAllCreds(false);
+    setBatchMode(false);
+    setSelectedModelIds(new Set());
+    setBatchQuery("");
+    setShowBatchModal(false);
+    lastPickedIndexRef.current = null;
     // plan-537-2245：重命名的快照与取消标记同属临时态，切走必须清，
     // 否则上一家的快照会当成下一家改名时的回滚目标
     renameBaseRef.current = "";
@@ -629,15 +918,159 @@ export function ModelsPanel() {
     if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
   }, [selectedId]);
 
+  // 模型列表变化（删除 / 刷新）时裁剪已失效的勾选 id
+  useEffect(() => {
+    setSelectedModelIds((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(providerModels.map((m) => m.id));
+      let changed = false;
+      const next = new Set<number>();
+      for (const id of prev) {
+        if (alive.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [providerModels]);
+
+  const visibleProviderModels = useMemo(() => {
+    if (!batchMode) return providerModels;
+    const q = batchQuery.trim().toLowerCase();
+    if (!q) return providerModels;
+    return providerModels.filter((m) => m.name.toLowerCase().includes(q));
+  }, [batchMode, batchQuery, providerModels]);
+
+  const selectedBatchModels = useMemo(
+    () => providerModels.filter((m) => selectedModelIds.has(m.id)),
+    [providerModels, selectedModelIds],
+  );
+
+  const visibleSelectedCount = useMemo(
+    () => visibleProviderModels.reduce((acc, m) => acc + (selectedModelIds.has(m.id) ? 1 : 0), 0),
+    [visibleProviderModels, selectedModelIds],
+  );
+  const allVisibleSelected = visibleProviderModels.length > 0 && visibleSelectedCount === visibleProviderModels.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && visibleSelectedCount < visibleProviderModels.length;
+
+  const toggleBatchMode = () => {
+    setBatchMode((prev) => {
+      if (prev) {
+        setSelectedModelIds(new Set());
+        setBatchQuery("");
+        lastPickedIndexRef.current = null;
+      }
+      return !prev;
+    });
+  };
+
+  const toggleSelectAllVisible = (checked: boolean) => {
+    setSelectedModelIds((prev) => {
+      const next = new Set(prev);
+      for (const m of visibleProviderModels) {
+        if (checked) next.add(m.id);
+        else next.delete(m.id);
+      }
+      return next;
+    });
+  };
+
+  const togglePickModel = (modelId: number, rowIndex: number, shiftKey = false) => {
+    setSelectedModelIds((prev) => {
+      const next = new Set(prev);
+      if (shiftKey && lastPickedIndexRef.current != null && lastPickedIndexRef.current !== rowIndex) {
+        const start = Math.min(lastPickedIndexRef.current, rowIndex);
+        const end = Math.max(lastPickedIndexRef.current, rowIndex);
+        const shouldSelect = !prev.has(modelId);
+        for (let i = start; i <= end; i++) {
+          const item = visibleProviderModels[i];
+          if (!item) continue;
+          if (shouldSelect) next.add(item.id);
+          else next.delete(item.id);
+        }
+      } else if (next.has(modelId)) {
+        next.delete(modelId);
+      } else {
+        next.add(modelId);
+      }
+      return next;
+    });
+    lastPickedIndexRef.current = rowIndex;
+  };
+
+  const batchMoreEntries: MenuEntry[] = [
+    {
+      key: "pick-active",
+      label: "勾选全部已启用",
+      onSelect: () => setSelectedModelIds(new Set(visibleProviderModels.filter((m) => m.is_active).map((m) => m.id))),
+    },
+    {
+      key: "pick-inactive",
+      label: "勾选全部已停用",
+      onSelect: () => setSelectedModelIds(new Set(visibleProviderModels.filter((m) => !m.is_active).map((m) => m.id))),
+    },
+    {
+      key: "clear-pick",
+      label: "清空已选",
+      disabled: selectedModelIds.size === 0,
+      divider: true,
+      onSelect: () => setSelectedModelIds(new Set()),
+    },
+    {
+      key: "batch-delete",
+      label: `删除所选（${selectedModelIds.size}）`,
+      icon: <IconTrash size={13} />,
+      danger: true,
+      disabled: selectedModelIds.size === 0,
+      onSelect: () => {
+        if (!selected || selectedModelIds.size === 0) return;
+        const ids = Array.from(selectedModelIds);
+        setConfirmDialog({
+          open: true,
+          title: "批量删除模型",
+          message: `确认删除选中的 ${ids.length} 个模型？删除后无法恢复。`,
+          danger: true,
+          onConfirm: async () => {
+            closeConfirm();
+            try {
+              const res = await api.batchDeleteProviderModels(selected.id, ids);
+              setSelectedModelIds(new Set());
+              await loadDetail(selected, true, true);
+              await load();
+              notify(`已删除 ${res.deleted} 个模型`);
+            } catch (e) {
+              notify(String(e));
+            }
+          },
+        });
+      },
+    },
+  ];
+
+  // plan-20261123-ux-fixes：按供应商维度为 patchProvider 分配单调序号，避免连续点击时旧响应覆盖新乐观状态
+  const patchSeqRef = useRef<Record<number, number>>({});
   const patchProvider = async (id: number, data: Record<string, unknown>) => {
-    // plan-114-449：乐观更新——先改本地状态让界面即时反馈，再静默同步详情；失败时回滚
-    const prevProviders = providers;
-    setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, ...data } as ProviderOut : p)));
+    const seq = (patchSeqRef.current[id] || 0) + 1;
+    patchSeqRef.current[id] = seq;
+    let rollbackItem: ProviderOut | undefined;
+    setProviders((prev) => prev.map((p) => {
+      if (p.id !== id) return p;
+      rollbackItem = p;
+      return { ...p, ...data } as ProviderOut;
+    }));
     try {
       const updated = await api.updateProvider(id, data);
+      if (patchSeqRef.current[id] !== seq) return;
       setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, ...updated } : p)));
-      if (selectedId === id) await loadDetail(updated, true, true);
-    } catch (e) { setProviders(prevProviders); notify(String(e)); }
+      if (selectedId === id && ("credential_strategy" in data || "api_format" in data)) {
+        await loadDetail(updated, true, true);
+      }
+    } catch (e) {
+      if (patchSeqRef.current[id] === seq && rollbackItem) {
+        const snap = rollbackItem;
+        setProviders((prev) => prev.map((p) => (p.id === id ? snap : p)));
+      }
+      notify(String(e));
+    }
   };
 
   /** plan-565-2323 G3：手动复位凭据（清冷却与错误，恢复为可用）。
@@ -814,6 +1247,14 @@ export function ModelsPanel() {
   const handleSync = async (p: ProviderOut, showMsg = true, reloadList = true) => {
     setSyncBusy(p.id);
     try {
+      // antigravity 的同步返回 {ok, added, total}，与其它账号型供应商的 {synced, models} 形状不同
+      if (p.api_format === "antigravity") {
+        const r = await api.antigravitySync(p.id);
+        if (reloadList) await load();
+        await loadDetail(p, true);
+        if (showMsg) notify(`同步完成：新增 ${r.added} 个，共 ${r.total} 个模型`);
+        return;
+      }
       const r = p.api_format === "workbuddy" ? await api.workbuddySync(p.id)
         : p.api_format === "ta3" ? await api.ta3Sync(p.id)
           : p.api_format === "kiro" ? await api.kiroSync(p.id) : await api.traeSync(p.id);
@@ -845,6 +1286,7 @@ export function ModelsPanel() {
           if (p.api_format === "workbuddy") await api.workbuddyLogout(p.id, cred?.id);
           else if (p.api_format === "ta3") await api.ta3Logout(p.id);
           else if (p.api_format === "kiro") await api.kiroLogout(p.id);
+          else if (p.api_format === "antigravity") await api.antigravityLogout(p.id);
           else await api.traeLogout(p.id);
           await load();
           await loadDetail(p, true);
@@ -852,6 +1294,83 @@ export function ModelsPanel() {
         } catch (e) { notify(String(e)); }
       },
     });
+  };
+
+  // ── antigravity：两条登录路径 ──
+  // 主路径导入本机 Antigravity 客户端登录态（即时完成），兜底路径走应用内 Google OAuth。
+  // 两条成功后动作一致：刷新供应商 / 凭据，再自动同步一次模型目录。
+  const handleAntigravityLoggedIn = async (p: ProviderOut, info?: { account?: string; tier?: string }) => {
+    await load();
+    await loadDetail(p, true);
+    setAuthStatus((s) => ({ ...s, [p.id]: { phase: "done", label: info?.account || "已登录" } }));
+    notify(`Antigravity 登录成功${info?.account ? `：${info.account}` : ""}${info?.tier ? ` · 档位 ${info.tier}` : ""}`);
+    // 同步失败只走 notify 提示，不影响「登录成功」这个结论
+    await handleSync(p, false);
+  };
+
+  const handleAntigravityImport = async (p: ProviderOut) => {
+    const sequence = (loginSequence.current[p.id] || 0) + 1;
+    loginSequence.current[p.id] = sequence;
+    setAuthStatus((s) => ({ ...s, [p.id]: { phase: "pending" } }));
+    try {
+      const r = await api.antigravityLoginImport(p.id);
+      if (loginSequence.current[p.id] !== sequence) return;
+      // 后端在「本机无登录态」时返回 200 + ok=false + error（4xx/5xx 只用于服务端异常），两条都要兜
+      if (!r.ok) {
+        setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: r.error || "导入本机登录态失败" } }));
+        return;
+      }
+      await handleAntigravityLoggedIn(p, { account: r.account, tier: r.tier });
+    } catch (e) {
+      if (loginSequence.current[p.id] !== sequence) return;
+      setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: String(e) } }));
+    }
+  };
+
+  const handleAntigravityOAuth = async (p: ProviderOut) => {
+    const sequence = (loginSequence.current[p.id] || 0) + 1;
+    loginSequence.current[p.id] = sequence;
+    setAuthStatus((s) => ({ ...s, [p.id]: { phase: "pending" } }));
+    try {
+      const start = await api.antigravityLoginStart(p.id);
+      if (loginSequence.current[p.id] !== sequence) return;
+      if (!start.ok || !start.auth_url) {
+        setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: start.error || "未获取到授权地址" } }));
+        return;
+      }
+      const w = window as Window & { chatcoderAPI?: { openExternal?: (u: string) => Promise<unknown> } };
+      if (w.chatcoderAPI?.openExternal) await w.chatcoderAPI.openExternal(start.auth_url);
+      else window.open(start.auth_url, "_blank");
+      // 每 1.5s 轮询一次，最长 120s；success 刷新，failed/cancelled 提示 message 并停止
+      const deadline = Date.now() + ANTIGRAVITY_POLL_DEADLINE_MS;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, ANTIGRAVITY_POLL_MS));
+        if (loginSequence.current[p.id] !== sequence) return;
+        const st = await api.antigravityLoginStatus(p.id);
+        if (loginSequence.current[p.id] !== sequence) return;
+        if (st.status === "success") {
+          await handleAntigravityLoggedIn(p, { account: st.account });
+          return;
+        }
+        if (st.status === "failed" || st.status === "cancelled") {
+          setAuthStatus((s) => ({
+            ...s,
+            [p.id]: { phase: "failed", error: st.message || (st.status === "cancelled" ? "登录已取消" : "登录失败") },
+          }));
+          return;
+        }
+      }
+      setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: "登录超时，请重试" } }));
+    } catch (e) {
+      if (loginSequence.current[p.id] !== sequence) return;
+      setAuthStatus((s) => ({ ...s, [p.id]: { phase: "failed", error: String(e) } }));
+    }
+  };
+
+  const handleAntigravityCancel = async (p: ProviderOut) => {
+    loginSequence.current[p.id] = (loginSequence.current[p.id] || 0) + 1;
+    try { await api.antigravityLoginCancel(p.id); } catch (e) { notify(String(e)); }
+    setAuthStatus((s) => ({ ...s, [p.id]: { phase: "idle" } }));
   };
 
   return (
@@ -980,7 +1499,8 @@ export function ModelsPanel() {
                 <Input
                   key={`base-${selected.id}`}
                   defaultValue={selected.base_url || ""}
-                  disabled={OAUTH_FORMATS.has(selected.api_format) && selected.api_format !== "kiro"}
+                  // kiro / antigravity 的 base_url 是端点覆盖（可编辑），其余账号型供应商走内置地址且禁用
+                  disabled={OAUTH_FORMATS.has(selected.api_format) && selected.api_format !== "kiro" && selected.api_format !== "antigravity"}
                   onBlur={(e) => { if (e.target.value.trim() !== (selected.base_url || "")) patchProvider(selected.id, { base_url: e.target.value.trim() }); }}
                   aria-label="Base URL"
                 />
@@ -990,7 +1510,7 @@ export function ModelsPanel() {
                 <Select
                   value={selected.api_format}
                   onChange={(v) => patchProvider(selected.id, { api_format: v })}
-                  options={Object.entries(API_FORMAT_LABEL).map(([v, l]) => ({ value: v, label: l }))}
+                  options={apiFormatOptions(selected.api_format)}
                   aria-label="API 格式"
                 />
               </div>
@@ -1085,7 +1605,24 @@ export function ModelsPanel() {
               {/* 账号登录型供应商：登录 / 同步 / 退出 */}
               {isOAuth && (
                 <div className="models-section">
-                  <div className="models-section-title">账号</div>
+                  <div className="models-section-title">
+                    <span className="ag-quota-title-inline">
+                      账号
+                      {selected.api_format === "antigravity" && (
+                        <Tooltip
+                          content={
+                            selected.auth_status === "logged_in"
+                              ? "已通过 Google 账号连接。「导入本机登录态」复用已登录的 Antigravity 客户端；「应用内登录」走浏览器 Google 授权，适合没装客户端的机器；也可以在下方凭据里新增 API Key，走 Gemini 兼容接口。"
+                              : "「导入本机登录态」复用已登录的 Antigravity 客户端（推荐）；「应用内登录」走浏览器 Google 授权，适合没装客户端的机器；也可以在下方凭据里新增 API Key，走 Gemini 兼容接口。"
+                          }
+                        >
+                          <span className="ag-quota-info-ic" tabIndex={0} aria-label="查看 Antigravity 账号连接说明">
+                            <IconInfo size={13} />
+                          </span>
+                        </Tooltip>
+                      )}
+                    </span>
+                  </div>
                   {/* plan-91-393：账号区改为「头像 + 名称 + 状态角标」卡片，操作按钮靠右成组，不再与标签挤在一行 */}
                   <div className="acct-card">
                     <span className="acct-avatar" aria-hidden>{(selected.account_label || selected.name || "?").slice(0, 1).toUpperCase()}</span>
@@ -1094,14 +1631,29 @@ export function ModelsPanel() {
                       <span className={"acct-state" + (selected.auth_status === "logged_in" ? " is-on" : "")}>{selected.auth_status === "logged_in" ? "已连接" : "未登录"}</span>
                     </span>
                     <span className="acct-actions">
+                    {/* antigravity 有两条登录路径：导入本机客户端登录态（主）与应用内 OAuth（兜底） */}
+                    {selected.api_format === "antigravity" ? (
+                      <>
+                        <Button variant="secondary" size="sm" onClick={() => handleAntigravityImport(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
+                          {authStatus[selected.id]?.phase === "pending" ? "登录中…" : "导入本机登录态"}
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleAntigravityOAuth(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
+                          应用内登录
+                        </Button>
+                        {authStatus[selected.id]?.phase === "pending" && (
+                          <Button variant="ghost" size="sm" onClick={() => handleAntigravityCancel(selected)}>取消登录</Button>
+                        )}
+                      </>
+                    ) : (
+                      <>
                     {/* plan-271-1364：workbuddy 支持多账号——按钮语义为「登录新账号」，
                         成功后自动新增一条账号凭据；ta3/trae 保持原单账号文案与行为 */}
-                    <button className="btn btn-secondary btn-sm" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
+                    <Button variant="secondary" size="sm" onClick={() => handleLogin(selected)} disabled={authStatus[selected.id]?.phase === "pending"}>
                       {authStatus[selected.id]?.phase === "pending" ? "登录中…"
                         : selected.api_format === "workbuddy" ? "登录新账号"
                           : selected.api_format === "ta3" ? "网页登录"
                             : selected.auth_status === "logged_in" ? "重新登录" : "登录账号"}
-                    </button>
+                    </Button>
                     {selected.api_format === "ta3" && authStatus[selected.id]?.phase === "pending" && (
                       <Button variant="ghost" size="sm" onClick={async () => {
                         loginSequence.current[selected.id] = (loginSequence.current[selected.id] || 0) + 1;
@@ -1109,15 +1661,30 @@ export function ModelsPanel() {
                         setAuthStatus(s => ({ ...s, [selected.id]: { phase: "idle" } }));
                       }}>取消登录</Button>
                     )}
+                      </>
+                    )}
                     {selected.auth_status === "logged_in" && (
                       <>
-                        <button className="btn btn-secondary btn-sm" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</button>
+                        <Button variant="secondary" size="sm" onClick={() => handleSync(selected)} disabled={syncBusy === selected.id}>{syncBusy === selected.id ? "同步中…" : "同步模型"}</Button>
                         {/* 多账号：workbuddy 的「退出」逐账号在凭据行内操作，此处保留整体退出 */}
-                        <button className="btn btn-ghost btn-sm" onClick={() => handleLogout(selected)}>{selected.api_format === "workbuddy" ? "退出全部" : "退出"}</button>
+                        <Button variant="ghost" size="sm" onClick={() => handleLogout(selected)}>{selected.api_format === "workbuddy" ? "退出全部" : "退出"}</Button>
                       </>
                     )}
                     </span>
                   </div>
+                  {selected.api_format === "antigravity" && (
+                    <>
+                      {/* 档位 / project 常显（后端 ProviderOut 新增字段，两者都为空时整行不渲染） */}
+                      {antigravityInfo && (
+                        <div className="models-hint" role="status" style={{ padding: 0, marginTop: 6 }}>{antigravityInfo}</div>
+                      )}
+                      {authStatus[selected.id]?.phase === "pending" && (
+                        <div className="models-hint" role="status" style={{ padding: 0, marginTop: 6, lineHeight: 1.6 }}>
+                          已打开浏览器授权页，请完成 Google 账号授权（最长等待 2 分钟）。
+                        </div>
+                      )}
+                    </>
+                  )}
                   {selected.api_format === "ta3" && <div className="models-hint" role="status" style={{ padding: 0, lineHeight: 1.6, minHeight: "1.6em" }}>
                     {authStatus[selected.id]?.phase === "pending" ? "等待浏览器授权，请在系统浏览器完成登录。"
                       : selected.auth_status === "login_required" ? "TA3 登录方式已升级，请重新网页登录。"
@@ -1140,6 +1707,17 @@ export function ModelsPanel() {
               {/* kiro 剩余积分（plan-116-456：与 Kiro IDE 积分计同源） */}
               {selected.api_format === "kiro" && <KiroQuotaSection provider={selected} />}
 
+              {/* antigravity 配额（周限额 + 5 小时限额）：已登录或已有 OAuth 账号凭据时才查询 */}
+              {selected.api_format === "antigravity"
+                && (selected.auth_status === "logged_in"
+                  || credentials.some((c) => (c.extra as Record<string, unknown> | null)?.kind === "antigravity_account")) && (
+                <AntigravityQuotaSection
+                  key={selected.id}
+                  providerId={selected.id}
+                  credentials={credentials}
+                />
+              )}
+
               {/* 凭据管理（多 Key / 多账号）：账号登录类常驻；其余类型由上方入口展开。
                   plan-114-449：用 Collapse 做高度过渡，点「管理多个 Key」不再整块跳出 */}
               <Collapse open={isOAuth || showAllCreds}>
@@ -1147,14 +1725,14 @@ export function ModelsPanel() {
                 <div className="models-section-title">
                   {credentialsSectionTitle(selected.api_format)}
                   {selected.api_format !== "workbuddy" && (
-                    <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(null); setShowCredForm(true); }}><IconPlus size={12} /> 添加 Key</button>
+                    <Button variant="ghost" size="xs" icon={<IconPlus size={12} />} onClick={() => { setEditingCred(null); setShowCredForm(true); }}>添加 Key</Button>
                   )}
                 </div>
                 {/* plan-565-2323 G2：刷新失败常驻提示——有旧数据时也要能看出「这不是最新状态」 */}
                 {credentialsError && credentials.length > 0 && (
                   <div className="models-inline-row" style={{ marginBottom: 8 }}>
                     <span className="models-hint" style={{ padding: 0, color: "var(--warning)" }}>账号列表刷新失败，下面是上次的数据</span>
-                    <button className="btn btn-ghost btn-xs" onClick={() => void loadDetail(selected, true, true)}>重试</button>
+                    <Button variant="ghost" size="xs" onClick={() => void loadDetail(selected, true, true)}>重试</Button>
                   </div>
                 )}
                 {/* plan-271-1364 M3.2: 取用策略切换（多凭据时才显示）
@@ -1199,50 +1777,58 @@ export function ModelsPanel() {
                         {/* plan-565-2323 G3：暂缓/冷却中的账号可一键复位（清冷却与错误） */}
                         {(c.demoted || c.status === "cooldown") && c.is_active !== false && (
                           <Tooltip content="清除冷却与错误，恢复为可用">
-                            <button className="btn btn-ghost btn-xs" onClick={() => void handleResetCredential(c)}>复位</button>
+                            <Button variant="ghost" size="xs" onClick={() => void handleResetCredential(c)}>复位</Button>
                           </Tooltip>
                         )}
                         {selected.api_format === "workbuddy" && (
                           <>
-                            <Tooltip content="刷新积分余额">
-                              <button className="btn btn-ghost btn-xs" onClick={() => loadCredits(selected, true)}>
-                                <IconRefresh size={12} />
-                              </button>
-                            </Tooltip>
+                            <IconButton size="xs" title="刷新积分余额" aria-label="刷新积分余额" icon={<IconRefresh size={12} />} onClick={() => loadCredits(selected, true)} />
                             {/* plan-565-2323 G2：停用账号不参与签到（它不在取用池里，签到只会白耗一次请求） */}
-                            <button
-                              className="btn btn-ghost btn-xs"
+                            <Button
+                              variant="ghost"
+                              size="xs"
                               onClick={() => handleCheckin(selected, c.id)}
                               disabled={busy || c.is_active === false}
-                            >签到</button>
+                            >签到</Button>
                           </>
                         )}
                         <Sw checked={c.is_active} onChange={async (v) => {
-                          // plan-565-2323 G2：停用行照常渲染（后端已返回全部凭据），关掉的账号再点一下即启用；
-                          // 左列徽标的可用/停用数会跟着变，所以启停后补一次供应商列表刷新。
+                          // plan-565-2323 G2 + plan-20261123-ux-fixes：乐观切换并支持失败回滚，避免等待往返时开关迟滞或回弹
+                          const prevActive = c.is_active;
+                          setCredentials((prev) => prev.map((row) => (row.id === c.id ? { ...row, is_active: v } : row)));
                           try {
                             await api.updateProviderCredential(c.id, { is_active: v });
                             await loadDetail(selected, true, true);
                             await load();
-                          } catch (e) { notify(String(e)); }
+                          } catch (e) {
+                            setCredentials((prev) => prev.map((row) => (row.id === c.id ? { ...row, is_active: prevActive } : row)));
+                            notify(String(e));
+                          }
                         }} />
                         {!OAUTH_FORMATS.has(selected.api_format) && (
-                          <button className="btn btn-ghost btn-xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</button>
+                          <Button variant="ghost" size="xs" onClick={() => { setEditingCred(c); setShowCredForm(true); }}>编辑</Button>
                         )}
                         {selected.api_format === "workbuddy" ? (
                           // 账号行：退出该账号（清其 auth 行并移除该凭据，其他账号不受影响）
-                          <button className="btn btn-ghost btn-xs" onClick={() => handleLogout(selected, c)}>退出该账号</button>
+                          <Button variant="ghost" size="xs" onClick={() => handleLogout(selected, c)}>退出该账号</Button>
                         ) : (
-                          <button className="btn btn-ghost btn-xs" onClick={() => setConfirmDialog({
-                            open: true,
-                            title: "删除凭据",
-                            message: `删除凭据「${c.label || c.id}」？`,
-                            danger: true,
-                            onConfirm: async () => {
-                              closeConfirm();
-                              try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); }
-                            },
-                          })}><IconX size={12} /></button>
+                          <IconButton
+                            size="xs"
+                            tone="danger"
+                            title="删除凭据"
+                            aria-label="删除凭据"
+                            icon={<IconX size={12} />}
+                            onClick={() => setConfirmDialog({
+                              open: true,
+                              title: "删除凭据",
+                              message: `删除凭据「${c.label || c.id}」？`,
+                              danger: true,
+                              onConfirm: async () => {
+                                closeConfirm();
+                                try { await api.deleteProviderCredential(c.id); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); }
+                              },
+                            })}
+                          />
                         )}
                       </div>
                     </div>
@@ -1254,9 +1840,9 @@ export function ModelsPanel() {
                       <div className="navpage-empty">
                         账号列表加载失败，点击刷新重试
                         <div style={{ marginTop: 8 }}>
-                          <button className="btn btn-ghost btn-xs" onClick={() => void loadDetail(selected, true, true)}>
-                            <IconRefresh size={12} /> 刷新
-                          </button>
+                          <Button variant="ghost" size="xs" icon={<IconRefresh size={12} />} onClick={() => void loadDetail(selected, true, true)}>
+                            刷新
+                          </Button>
                         </div>
                       </div>
                     ) : (
@@ -1270,22 +1856,19 @@ export function ModelsPanel() {
                 </div>
                 {selected.api_format === "workbuddy" && (
                   <div className="models-inline-row" style={{ marginTop: 8 }}>
-                    <button
-                      className="btn btn-primary btn-xs"
+                    <Button
+                      variant="primary"
+                      size="xs"
                       disabled={busy || (credentials.length > 0 && activeCredentials.length === 0)}
                       onClick={() => handleCheckin(selected)}
                     >
                       {busy ? "签到中…" : "Buddy 加油站 · 签到领取积分"}
-                    </button>
+                    </Button>
                     {/* 积分余额（多账号合计；停用账号不计入）+ 实时刷新 */}
                     <Tooltip content="workbuddy 积分余额（不含停用账号）">
                       <span className="models-credits-head">
                         积分 {totalCredits != null ? formatCredits(totalCredits) : "--"}
-                        <Tooltip content="刷新积分余额">
-                          <button className="btn btn-ghost btn-xs" onClick={() => loadCredits(selected, true)}>
-                            <IconRefresh size={12} />
-                          </button>
-                        </Tooltip>
+                        <IconButton size="xs" title="刷新积分余额" aria-label="刷新积分余额" icon={<IconRefresh size={12} />} onClick={() => loadCredits(selected, true)} />
                       </span>
                     </Tooltip>
                     <span className="models-hint" style={{ padding: 0 }}>
@@ -1322,7 +1905,7 @@ export function ModelsPanel() {
                   </div>
                 </Collapse>
                 <div className="models-inline-row" style={{ marginTop: 8 }}>
-                  <button className="btn btn-ghost btn-xs" onClick={() => handleProxyTest(selected)}>测试该配置</button>
+                  <Button variant="ghost" size="xs" onClick={() => handleProxyTest(selected)}>测试该配置</Button>
                   {/* 结果槽位常驻（空时只占一行高度），出现结果时不推动下方内容 */}
                   <span className="models-hint models-test-slot" style={{ padding: 0 }} aria-live="polite">{proxyTest || ""}</span>
                 </div>
@@ -1332,11 +1915,96 @@ export function ModelsPanel() {
               <div className="models-section">
                 <div className="models-section-title">
                   <span>模型 <span className="models-count">{providerModels.length}</span></span>
-                  {!isOAuth && <Button variant="secondary" size="xs" icon={<IconRefresh size={12} />} onClick={() => setScanningProvider(selected)}>扫描模型</Button>}
+                  <div className="models-section-head-actions">
+                    {providerModels.length > 0 && (
+                      <Button
+                        variant={batchMode ? "secondary" : "ghost"}
+                        size="xs"
+                        onClick={toggleBatchMode}
+                      >
+                        {batchMode ? "退出批量" : "批量管理"}
+                      </Button>
+                    )}
+                    {!isOAuth && <Button variant="secondary" size="xs" icon={<IconRefresh size={12} />} onClick={() => setScanningProvider(selected)}>扫描模型</Button>}
+                  </div>
                 </div>
                 <div className="models-model-list">
-                  {providerModels.map((m) => (
-                    <div key={m.id} className="models-model-item">
+                  {/* plan-20261123-ux-fixes：批量管理工具条（收进 Collapse 平滑展开；危险批量删除收进更多 Menu） */}
+                  <Collapse open={batchMode && providerModels.length > 0}>
+                    <div className="models-batch-bar">
+                      <div className="models-batch-bar-row">
+                        <Checkbox
+                          checked={allVisibleSelected}
+                          indeterminate={someVisibleSelected}
+                          onChange={toggleSelectAllVisible}
+                          label={
+                            <span className="models-batch-picked-count">
+                              已选 {selectedModelIds.size} / {providerModels.length}
+                            </span>
+                          }
+                          aria-label="全选当前显示模型"
+                        />
+                        <div className="models-batch-bar-actions">
+                          <Button
+                            variant="primary"
+                            size="xs"
+                            disabled={selectedModelIds.size === 0}
+                            onClick={() => setShowBatchModal(true)}
+                          >
+                            批量配置{selectedModelIds.size > 0 ? `（${selectedModelIds.size}）` : ""}
+                          </Button>
+                          <Menu
+                            align="end"
+                            entries={batchMoreEntries}
+                            trigger={
+                              <IconButton
+                                size="xs"
+                                icon={<IconMoreHorizontal size={14} />}
+                                title="更多批量操作"
+                                aria-label="更多批量操作"
+                              />
+                            }
+                          />
+                        </div>
+                      </div>
+                      {providerModels.length > 6 && (
+                        <Input
+                          size="sm"
+                          clearable
+                          prefix={<IconSearch size={12} />}
+                          value={batchQuery}
+                          onChange={(e) => setBatchQuery(e.target.value)}
+                          placeholder="筛选模型名（可配合全选快速批量勾选，按住 Shift 可连选）…"
+                          aria-label="筛选模型"
+                        />
+                      )}
+                    </div>
+                  </Collapse>
+
+                  {visibleProviderModels.map((m, idx) => {
+                    const picked = batchMode && selectedModelIds.has(m.id);
+                    return (
+                    <div
+                      key={m.id}
+                      className={"models-model-item" + (batchMode ? " is-batch" : "") + (picked ? " is-picked" : "")}
+                      onClick={batchMode ? (e) => togglePickModel(m.id, idx, e.shiftKey) : undefined}
+                    >
+                      {batchMode && (
+                        <span
+                          className="models-model-check"
+                          onPointerDown={(e) => { batchShiftRef.current = e.shiftKey; }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Checkbox
+                            checked={picked}
+                            onChange={() => {
+                              togglePickModel(m.id, idx, batchShiftRef.current);
+                              batchShiftRef.current = false;
+                            }}
+                            aria-label={`选择 ${m.name}`}
+                          />
+                        </span>
+                      )}
                       <div className="models-model-main">
                         <div className="models-model-name">{m.name}</div>
                         {/* plan-114-450：标签统一为 Tag；没有任何标签时不渲染该行，行高由 min-height 保底（不随有无标签跳变） */}
@@ -1351,7 +2019,7 @@ export function ModelsPanel() {
                           </div>
                         ) : null}
                       </div>
-                      <div className="models-model-actions">
+                      <div className="models-model-actions" onClick={(e) => { if (batchMode) e.stopPropagation(); }}>
                         {/* plan-114-450：编辑/删除悬停显示（固定槽位只切透明度），开关常驻在最右 */}
                         <span className="ui-row-hover">
                         <IconButton size="xs" title="编辑模型" icon={<IconPencil size={13} />} onClick={() => { setEditingModel(m); setTargetProviderForModel(selected); setShowModelForm(true); }} />
@@ -1366,10 +2034,24 @@ export function ModelsPanel() {
                           },
                         })} />
                         </span>
-                        <Sw checked={m.is_active} onChange={async (v) => { try { await api.updateModel(m.id, { is_active: v }); await loadDetail(selected, true, true); } catch (e) { notify(String(e)); } }} />
+                        <Sw checked={m.is_active} onChange={async (v) => {
+                          const prevActive = m.is_active;
+                          setProviderModels((prev) => prev.map((row) => (row.id === m.id ? { ...row, is_active: v } : row)));
+                          try {
+                            await api.updateModel(m.id, { is_active: v });
+                            await loadDetail(selected, true, true);
+                          } catch (e) {
+                            setProviderModels((prev) => prev.map((row) => (row.id === m.id ? { ...row, is_active: prevActive } : row)));
+                            notify(String(e));
+                          }
+                        }} />
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
+                  {batchMode && providerModels.length > 0 && visibleProviderModels.length === 0 && (
+                    <Empty size="sm" title="没有匹配的模型" desc="尝试清空筛选关键字" />
+                  )}
                   {providerModels.length === 0 && (
                     <Empty size="sm" title="还没有模型" desc={isOAuth ? "先登录账号，再点「同步模型」" : "点「扫描模型」自动获取，或在下方手动添加"} />
                   )}
@@ -1391,6 +2073,19 @@ export function ModelsPanel() {
       <ProviderFormModal open={showProviderForm} editing={editingProvider} onClose={() => setShowProviderForm(false)} onSaved={load} />
       <ScanModelsModal open={!!scanningProvider} provider={scanningProvider} onClose={() => setScanningProvider(null)} onSaved={async () => { await load(); await loadDetail(selected, true, true); }} />
       <ModelFormModal open={showModelForm} editing={editingModel} targetProvider={targetProviderForModel} onClose={() => { setShowModelForm(false); setTargetProviderForModel(null); }} onSaved={async () => { await load(); await loadDetail(selected, true, true); }} />
+      <BatchModelsModal
+        open={showBatchModal}
+        provider={selected}
+        models={selectedBatchModels}
+        onClose={() => setShowBatchModal(false)}
+        onSaved={(updated) => {
+          setProviderModels(updated);
+          if (selected) {
+            const cached = detailCache.current.get(selected.id);
+            if (cached) detailCache.current.set(selected.id, { ...cached, models: updated });
+          }
+        }}
+      />
       <CredentialFormModal open={showCredForm} providerId={selected?.id ?? null} editing={editingCred} onClose={() => { setShowCredForm(false); setEditingCred(null); }} onSaved={async () => { await loadDetail(selected, true, true); await load(); }} />
       <ConfirmDialog
         open={confirmDialog.open}

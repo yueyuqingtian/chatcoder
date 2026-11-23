@@ -11,6 +11,7 @@
 
 export interface ConsoleEntry {
   seq: number;
+  navSeq: number;
   level: string;
   text: string;
   source: string;
@@ -106,7 +107,7 @@ export function noteLoadingStop(sid: string, tabId: string) {
 export function pushConsole(sid: string, tabId: string, level: string, text: string, source: string) {
   const rec = frames.get(frameKey(sid, tabId));
   if (!rec) return;
-  rec.console.push({ seq: ++consoleSeq, level, text: text.slice(0, 2000), source: source.slice(0, 200) });
+  rec.console.push({ seq: ++consoleSeq, navSeq: rec.navSeq, level, text: text.slice(0, 2000), source: source.slice(0, 200) });
   if (rec.console.length > CONSOLE_MAX) rec.console.splice(0, rec.console.length - CONSOLE_MAX);
 }
 

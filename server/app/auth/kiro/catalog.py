@@ -119,24 +119,29 @@ async def sync_kiro_models(
         for e in entries:
             name = e["name"]
             m = by_name.get(name)
-            if m is None:
+            is_new = m is None
+            if is_new:
                 m = Model(tenant_id=1, name=name, provider_id=provider_id, source_type="byok")
                 s.add(m)
                 by_name[name] = m
             m.api_format = "kiro"
             m.provider = "kiro"
-            m.is_active = True
             if not m.api_key:
                 m.api_key = KIRO_SESSION_KEY
             meta = dict(m.kiro_meta or {})
             meta["model_id"] = e["model_id"]
             meta["vendor"] = e.get("vendor") or "kiro"
             m.kiro_meta = meta
-            if e.get("context_window"):
+            # plan-20261123-ux-fixes：已有模型保留启用态、上下文窗口、思考深度与多模态配置；
+            # 新同步的模型默认开启多模态。
+            if is_new:
+                m.is_active = True
+                m.context_window = e.get("context_window") or 200000
+                m.is_multimodal = True
+                if e.get("reasoning_efforts") is not None:
+                    m.reasoning_efforts = e["reasoning_efforts"]
+            elif not m.context_window and e.get("context_window"):
                 m.context_window = e["context_window"]
-            m.is_multimodal = bool(e.get("is_multimodal", False))
-            if e.get("reasoning_efforts") is not None:
-                m.reasoning_efforts = e["reasoning_efforts"]
         s.flush()
         s.commit()
 

@@ -183,11 +183,6 @@ async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str,
                        provider.id, len(models))
         return []
 
-    # upsert
-    existing = (await db.execute(
-        select(Model).where(Model.provider_id == provider.id)
-    )).scalars().all()
-    by_name = {m.name: m for m in existing}
     # 缓存目录原文（不含敏感字段）
     sanitized_catalog = {
         "models": [
@@ -200,23 +195,33 @@ async def sync_workbuddy_models(db: AsyncSession, provider, api_base: str,
     from app.persistence.database import run_write_locked
 
     def _persist(s):
-        by_name_local = dict(by_name)
+        # plan-20261123-ux-fixes：在同步写会话内查询既有模型（修复跨 session 对象不落库隐患），
+        # 已有模型保留用户配置的上下文窗口、思考深度与多模态；新同步模型默认开启多模态。
+        by_name_local = {
+            m.name: m for m in s.execute(
+                select(Model).where(Model.provider_id == provider.id)
+            ).scalars().all()
+        }
         created_local = 0
         updated_local = 0
         for name, entry in entries.items():
             m = by_name_local.get(name)
-            if m is None:
+            is_new = m is None
+            if is_new:
                 m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
                 s.add(m)
                 by_name_local[name] = m
                 created_local += 1
             m.api_key = "__workbuddy_session__"  # 占位：真实 token 由 registry 从 auth 表动态取
             m.base_url = api_base
-            m.context_window = entry.get("context_window") or 200000
-            m.is_multimodal = bool(entry.get("is_multimodal"))
             m.api_format = "workbuddy"
-            efforts = entry.get("reasoning_efforts") or []
-            m.reasoning_efforts = efforts if efforts else None
+            if is_new:
+                m.context_window = entry.get("context_window") or 200000
+                m.is_multimodal = True
+                efforts = entry.get("reasoning_efforts") or []
+                m.reasoning_efforts = efforts if efforts else None
+            elif not m.context_window:
+                m.context_window = entry.get("context_window") or 200000
             # 必须复制新 dict 再赋回：SQLAlchemy 对可变 JSON 列赋同一对象引用
             # 不触发 change detection，原地 update 会导致 meta 更新不落库
             meta = dict(m.workbuddy_meta or {})

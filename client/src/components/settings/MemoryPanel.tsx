@@ -20,8 +20,7 @@ import { parseServerTime } from "../../utils/time";
 import { IconArrowUp, IconPencil, IconRefresh, IconSearch, IconTrash } from "../icons";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Modal } from "../Modal";
-import { Button, CardRow, Checkbox, Empty, Input, PageActions, Section, Segmented, Tooltip } from "../ui";
-import { Sw } from "./shared";
+import { Button, CardRow, Checkbox, Empty, IconButton, Input, PageActions, Section, Segmented, Switch, Textarea, Tooltip } from "../ui";
 
 type ScopeFilter = "all" | "global" | "project" | "session";
 
@@ -228,12 +227,8 @@ export function MemoryPanel() {
           </div>
         </div>
         <div className="mem-card-actions">
-          <Tooltip content="查看 / 编辑">
-            <button className="ui-icon-btn size-xs" aria-label="查看或编辑" onClick={() => openDetail(m)}><IconPencil size={13} /></button>
-          </Tooltip>
-          <Tooltip content="删除">
-            <button className="ui-icon-btn size-xs tone-danger" aria-label="删除" onClick={() => setConfirmTarget(m)}><IconTrash size={13} /></button>
-          </Tooltip>
+          <IconButton size="xs" title="查看 / 编辑" aria-label="查看或编辑" icon={<IconPencil size={13} />} onClick={() => openDetail(m)} />
+          <IconButton size="xs" tone="danger" title="删除" aria-label="删除" icon={<IconTrash size={13} />} onClick={() => setConfirmTarget(m)} />
         </div>
       </div>
     );
@@ -268,10 +263,10 @@ export function MemoryPanel() {
       </PageActions>
       <Section>
         <CardRow title="AI 主动生成记忆" desc="开启后每轮对话结束时，AI 会自主提取关键事实/偏好写入记忆库；关闭则不再自动生成记忆">
-          <Sw checked={memoryEnabled} onChange={handleToggle} />
+          <Switch checked={memoryEnabled} onChange={handleToggle} />
         </CardRow>
         <CardRow title="显示候选记忆" desc="低置信记忆不注入提示词，但可被检索；编辑或提升后转为正式记忆">
-          <Sw checked={includeCandidate} onChange={setIncludeCandidate} />
+          <Switch checked={includeCandidate} onChange={setIncludeCandidate} />
         </CardRow>
       </Section>
 
@@ -340,22 +335,24 @@ export function MemoryPanel() {
         width={620}
         footer={
           <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setDetail(null)}>取消</button>
-            <button
-              className="btn btn-primary btn-sm"
+            <Button variant="secondary" size="sm" onClick={() => setDetail(null)}>取消</Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={detailSaving}
               disabled={detailSaving || !detailText.trim()}
               aria-busy={detailSaving}
               onClick={() => void saveDetail()}
             >
               {detailSaving ? "保存中…" : "保存"}
-            </button>
+            </Button>
           </>
         }
       >
         {detail && (
           <div className="mem-detail">
-            <textarea
-              className="ui-textarea mem-detail-text"
+            <Textarea
+              className="mem-detail-text"
               value={detailText}
               onChange={(e) => setDetailText(e.target.value)}
               rows={6}
@@ -371,20 +368,20 @@ export function MemoryPanel() {
             </div>
             <div className="mem-detail-actions">
               {(detail.scope as string) !== "global" && (
-                <button className="btn btn-ghost btn-sm" disabled={busyId === detail.id}
+                <Button variant="ghost" size="sm" icon={<IconArrowUp size={12} />} disabled={busyId === detail.id}
                   onClick={async () => { await promote(detail, detail.scope === "session" ? "project" : "global"); setDetail(null); }}>
-                  <IconArrowUp size={12} /> {detail.scope === "session" ? "提升为项目记忆" : "提升为全局记忆"}
-                </button>
+                  {detail.scope === "session" ? "提升为项目记忆" : "提升为全局记忆"}
+                </Button>
               )}
               {(detail.scope as string) !== "session" && (
-                <button className="btn btn-ghost btn-sm" disabled={busyId === detail.id}
+                <Button variant="ghost" size="sm" disabled={busyId === detail.id}
                   onClick={async () => { await promote(detail, "session"); setDetail(null); }}>
                   降级为会话记忆
-                </button>
+                </Button>
               )}
-              <button className="btn btn-danger-ghost btn-sm" onClick={() => { setConfirmTarget(detail); setDetail(null); }}>
-                <IconTrash size={12} /> 删除
-              </button>
+              <Button variant="danger-ghost" size="sm" icon={<IconTrash size={12} />} onClick={() => { setConfirmTarget(detail); setDetail(null); }}>
+                删除
+              </Button>
             </div>
           </div>
         )}

@@ -3,7 +3,7 @@
 内置 Explore（只读搜索代理）与 general（全量工具），
 用户可在设置页增删改，spawn_subagent 通过 profile 指定类型。
 """
-from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, Integer, String
+from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.database import Base
@@ -19,7 +19,10 @@ class SubagentProfile(Base):
     tools_whitelist: Mapped[list | None] = mapped_column(JSON)
     # 模型覆盖（None = 跟随会话/主代理模型）
     model_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("models.id"))
-    system_prompt: Mapped[str | None] = mapped_column(String(4000))
+    system_prompt: Mapped[str | None] = mapped_column(Text)
     # plan-330-1648 M2: 思考深度档位覆盖（None = 跟随会话本轮档位，再回落全局默认）
     reasoning_effort: Mapped[str | None] = mapped_column(String(20))
+    display_name: Mapped[str | None] = mapped_column(String(60))
+    execution_mode: Mapped[str | None] = mapped_column(String(16))
+    revision: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

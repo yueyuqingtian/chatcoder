@@ -19,7 +19,8 @@ const review: TurnFileReview = { turnId: 7, extraTurnIds: [8], index: 0, mode: "
 ] };
 const state = () => usePanelStore.getState();
 state().setActiveSession(101);
-usePanelStore.setState({ expanded: true });
+// 本用例只验证异步文件预览，真实展开行为由 resource-preview.test.ts 覆盖。
+usePanelStore.setState({ openPanel: () => {} });
 const a = state().openTurnFile(review, 0, "diff");
 const b = state().openTurnFile(review, 1, "diff");
 assert(fullRequested, "审查必须请求完整上下文");

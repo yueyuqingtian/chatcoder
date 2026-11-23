@@ -9,6 +9,18 @@ const KIND_MAP: Record<string, ParsedRef["kind"]> = {
   "引用文件": "file", "引用文件夹": "dir", "使用技能": "skill", "使用连接器": "mcp", "使用插件": "plugin",
 };
 
+const REF_LINE_RE = /^(引用文件|引用文件夹|引用会话|使用技能|使用连接器|使用插件|使用微应用|已选交互方案)：/;
+
+/** 剥离发送时拼在正文里的引用行，避免消息气泡与定位浮窗重复/截断展示原始路径。 */
+export function stripRefLines(text: string, hasRefs: boolean): string {
+  if (!hasRefs || !text) return text;
+  return text
+    .split("\n")
+    .filter((ln) => !REF_LINE_RE.test(ln.trim()))
+    .join("\n")
+    .trim();
+}
+
 /** 把正文拆成「纯正文」与「结构化 refs」；没有引用行时 refs 为空、text 仅规整空行 */
 export function parseRefLines(rawText: string): { text: string; refs: ParsedRef[] } {
   const refs: ParsedRef[] = [];

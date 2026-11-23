@@ -104,6 +104,7 @@ export const OPTICAL_SCALE: Record<GlyphKey, number> = {
   plus: 1.111,
   profile: 1,
   pushpin: 1.064,
+  star: 1.08,
   questionCircle: 0.95,
   read: 0.95,
   reload: 0.952,

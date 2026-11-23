@@ -285,11 +285,16 @@ class Settings(BaseSettings):
     # 任务完成系统通知档位（设置 → 常规）：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭。
     # 只影响桌面端（Electron Notification）的弹窗行为，与后端任务本身无关。
     task_notify_mode: str = "unfocused"
+    # plan-20261120-queue-message-mode：任务执行中用户新发送消息的默认处理方式：
+    # queue 排队入列（默认，当前任务结束后自动发送）/ immediate 直接发送（立即注入运行中的回合）。
+    queue_message_mode: str = "queue"
     # plan-156-619 S4d：子会话默认模型 / 思考深度（0 / 空 = 跟随主代理）
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理开关（类型级开关已从 UI 移除，由它统一控制）
     subagent_enabled: bool = True
+    subagent_explore_enabled: bool = True
+    subagent_execute_enabled: bool = True
     # plan-549-2281：subsession_enabled 已删除——子会话创建能力下线，无工具可门控。
     # plan-20261018-operator-boost：GUI 操作（电脑操控 / 内置浏览器的多步操作）交给「操控子会话」执行。
     # 操作本身不需要深度推理，却是延迟大户（每步一次模型往返）；交给低思考档的子会话，
@@ -502,6 +507,41 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
         "TRAE-SOLO-CN/0.1.51 Chrome/124.0.0.0 Electron/31.0.0 Safari/537.36"
     )
+
+    # antigravity（Google Antigravity）供应商 —— 方案 docs/plan-antigravity-provider-integration.md
+    # 逆向通道随时可能变更，端点/客户端凭据/枚举统一收敛到这里，不散落在业务代码里。
+    antigravity_gateway_endpoint: str = "https://daily-cloudcode-pa.googleapis.com"
+    antigravity_token_endpoint: str = "https://oauth2.googleapis.com/token"
+    antigravity_authorize_endpoint: str = "https://accounts.google.com/o/oauth2/auth"
+    # 实测生效的一组（二进制内共 3 组，另两组分别 invalid_client / unauthorized_client）
+    antigravity_client_id: str = ""
+    antigravity_client_secret: str = ""
+    # 授权 scope：与客户端登录态一致；实际以刷新响应返回的 scope 为准
+    antigravity_scope: str = (
+        "https://www.googleapis.com/auth/cloud-platform "
+        "https://www.googleapis.com/auth/userinfo.email "
+        "https://www.googleapis.com/auth/userinfo.profile openid"
+    )
+    # 客户端版本号 / User-Agent 参数。
+    #
+    # 实测根因（plan-antigravity-provider-integration §11.8）：Google 只向「足够新」的
+    # 客户端版本下发 Gemini 4 系列模型（neon/argon/hydrogen），且 UA 格式必须是
+    # 语言服务器真身的形式：
+    #   antigravity/hub/2.32.1 (aidev_client; os_type=windows; arch=amd64; cl=1021296516)
+    # 旧实现发 `antigravity/2.34.0 windows/amd64`（格式与 cl 参数都不对），所以只能拿到
+    # 22 个模型且 gemini-4 仅 hydrogen-sonar。cl 是版本对应的 changelist，两者需成对调整。
+    antigravity_client_version: str = "2.32.1"
+    antigravity_client_changelist: str = "1021296516"
+    antigravity_os_type: str = "windows"
+    antigravity_arch: str = "amd64"
+    # ClientMetadata 枚举（见方案 §1.5）；platform 必须是 WINDOWS_AMD64 这类带架构的值
+    antigravity_ide_type: str = "ANTIGRAVITY"
+    antigravity_platform: str = "WINDOWS_AMD64"
+    antigravity_plugin_type: str = "GEMINI"
+    # 免费档的 cloudaicompanionProject；登录时会被 loadCodeAssist 返回值覆盖
+    antigravity_default_project: str = "aicode-consumers"
+    # API Key 通道（OAuth 不可用时的第二条认证方式，仅覆盖 Gemini 系）
+    antigravity_api_key_base_url: str = "https://generativelanguage.googleapis.com"
 
     @field_validator("cors_origins")
     @classmethod

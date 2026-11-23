@@ -1,0 +1,597 @@
+/* 设置 → 智能体（plan-20261123-agent-panel-ui） */
+.agent-team-settings {
+  container: agent-team / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.agent-team-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-main);
+  color: var(--color-destructive);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── 顶部策略区：折叠子项与并发步进器 ────────────────────────── */
+.agent-team-row-enable.ui-card-row {
+  border-bottom: none;
+}
+
+.agent-team-policy-body {
+  border-top: 1px solid var(--border-light, var(--border));
+}
+
+.agent-team-policy-body > .ui-card-row:last-child {
+  border-bottom: none;
+}
+
+.agent-team-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agent-team-stepper-input {
+  width: 84px;
+}
+
+.agent-team-stepper-input .ui-input {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+}
+
+.agent-team-stepper-input .ui-input::-webkit-inner-spin-button,
+.agent-team-stepper-input .ui-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ── 一体化双栏成员工作区 ──────────────────────────────────── */
+/* plan-20261123-ux-fixes：参考模型管理页，左右两栏统一使用纯净卡片底色（--color-card），
+   与页面外部灰底形成清晰层次；选中项改用无边框柔和中性底色（零深灰 hover 框），
+   角色采用低饱和冰雾蓝 / 清雅青碧。 */
+.agent-team-workspace {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 540px;
+  background: var(--color-card);
+}
+
+.agent-team-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border-light, var(--border));
+  background: var(--color-card);
+}
+
+.agent-team-search {
+  padding: var(--sp-4) var(--sp-3) var(--sp-2);
+}
+
+.agent-team-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.agent-team-group-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-team-group-label {
+  padding: 2px var(--sp-2) var(--sp-1);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+
+/* 成员列表项：纯白底上用轻柔无边框色块表达悬停与选中（禁用左侧装饰竖条与硬灰框） */
+.agent-team-list .ui-list-row.agent-team-member {
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 10px 10px;
+  border-bottom: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  box-shadow: none;
+  transition: background var(--dur-2) var(--ease-standard);
+}
+
+.agent-team-list .ui-list-row.agent-team-member:hover,
+.agent-team-list .ui-list-row.agent-team-member:focus-visible {
+  background: color-mix(in oklab, var(--text-1) 3.5%, transparent);
+}
+
+.agent-team-list .ui-list-row.agent-team-member.is-selected {
+  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+}
+
+.agent-team-list .ui-list-row.agent-team-member.is-selected:hover,
+.agent-team-list .ui-list-row.agent-team-member.is-selected:focus-visible {
+  background: color-mix(in oklab, var(--text-1) 7.5%, transparent);
+}
+
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member:hover,
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member:focus-visible {
+  background: color-mix(in oklab, var(--color-white) 5%, transparent);
+}
+
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member.is-selected {
+  background: var(--bg-active);
+}
+
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member.is-selected:hover,
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member.is-selected:focus-visible {
+  background: color-mix(in oklab, var(--color-white) 12%, transparent);
+}
+
+/* 角色图标块与清透徽标：冰雾蓝（只读探索） × 清雅青碧（执行智能体） */
+.agent-team-list .ui-list-row.agent-team-member .ui-list-row-icon {
+  width: 30px;
+  height: 30px;
+  margin-top: 1px;
+  border-radius: var(--r-md);
+  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
+}
+
+.agent-team-list .ui-list-row.agent-team-member.mode-readonly .ui-list-row-icon,
+.agent-team-detail-avatar.mode-readonly {
+  background: color-mix(in oklab, var(--color-sky-500) 11%, var(--color-card));
+  color: var(--color-sky-600);
+}
+
+.agent-team-list .ui-list-row.agent-team-member.mode-agent .ui-list-row-icon,
+.agent-team-detail-avatar.mode-agent {
+  background: color-mix(in oklab, var(--color-teal-600) 11%, var(--color-card));
+  color: var(--color-teal-600);
+}
+
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member.mode-readonly .ui-list-row-icon,
+:root[data-theme="dark"] .agent-team-detail-avatar.mode-readonly {
+  background: color-mix(in oklab, var(--color-sky-400) 16%, transparent);
+  color: var(--color-sky-300);
+}
+
+:root[data-theme="dark"] .agent-team-list .ui-list-row.agent-team-member.mode-agent .ui-list-row-icon,
+:root[data-theme="dark"] .agent-team-detail-avatar.mode-agent {
+  background: color-mix(in oklab, var(--color-teal-400) 16%, transparent);
+  color: var(--color-teal-400);
+}
+
+.ui-badge.agent-team-role-pill.mode-readonly {
+  background: color-mix(in oklab, var(--color-sky-500) 10%, transparent);
+  color: var(--color-sky-700);
+}
+
+.ui-badge.agent-team-role-pill.mode-agent {
+  background: color-mix(in oklab, var(--color-teal-600) 10%, transparent);
+  color: var(--color-teal-600);
+}
+
+:root[data-theme="dark"] .ui-badge.agent-team-role-pill.mode-readonly {
+  background: color-mix(in oklab, var(--color-sky-400) 15%, transparent);
+  color: var(--color-sky-300);
+}
+
+:root[data-theme="dark"] .ui-badge.agent-team-role-pill.mode-agent {
+  background: color-mix(in oklab, var(--color-teal-400) 15%, transparent);
+  color: var(--color-teal-400);
+}
+
+.agent-team-list .ui-list-row.agent-team-member .ui-list-row-name {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-team-list .ui-list-row.agent-team-member.is-selected .ui-list-row-name {
+  font-weight: 600;
+}
+
+.agent-team-list .ui-list-row.agent-team-member .ui-list-row-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-team-list .ui-list-row.agent-team-member .ui-list-row-meta {
+  margin-top: 6px;
+  gap: var(--sp-1);
+}
+
+/* ── 右侧成员详情工作台 ──────────────────────────────────── */
+.agent-team-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--color-card);
+}
+
+.agent-team-detail-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+}
+
+.agent-team-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: 14px var(--sp-5);
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+
+.agent-team-detail-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-team-detail-identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.agent-team-detail-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-1);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-team-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.4;
+}
+
+.agent-team-meta-sep {
+  font-size: 11px;
+  color: var(--text-3);
+  opacity: 0.6;
+}
+
+.agent-team-meta-text {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+
+.agent-team-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+/* 固定槽位保存态：避免文案与图标切换时横向跳动 */
+.agent-team-save-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+  min-width: 82px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-team-save-state.is-saving {
+  color: var(--text-2);
+}
+
+.agent-team-save-state.is-error {
+  color: var(--color-destructive);
+}
+
+.agent-team-save-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.agent-team-detail-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-team-section-pad {
+  padding: var(--sp-5);
+}
+
+.agent-team-fields {
+  display: grid;
+  gap: var(--sp-4);
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+
+.agent-team-rows {
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+
+.agent-team-rows > .ui-card-row:last-child {
+  border-bottom: none;
+}
+
+.agent-team-control-slot {
+  width: 220px;
+  max-width: 100%;
+}
+
+.agent-team-effort-select {
+  width: 100%;
+}
+
+/* ── 角色提示词工作台 ────────────────────────────────────── */
+.agent-team-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.agent-team-prompt-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.agent-team-prompt-title-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ui-badge.agent-team-prompt-badge.is-custom {
+  background: color-mix(in oklab, var(--color-sky-500) 10%, transparent);
+  color: var(--color-sky-700);
+}
+
+:root[data-theme="dark"] .ui-badge.agent-team-prompt-badge.is-custom {
+  background: color-mix(in oklab, var(--color-sky-400) 15%, transparent);
+  color: var(--color-sky-300);
+}
+
+.agent-team-prompt-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-1);
+  line-height: 1.45;
+}
+
+.agent-team-prompt-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agent-team-prompt-subbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-light, var(--border));
+  border-radius: var(--r-md);
+  background: var(--color-sidebar);
+}
+
+:root[data-theme="dark"] .agent-team-prompt-subbar {
+  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+}
+
+.agent-team-prompt-subbar-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.agent-team-prompt-subbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agent-team-prompt textarea {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+  overflow-wrap: anywhere;
+}
+
+.agent-team-prompt textarea.is-readonly {
+  background: var(--bg-panel);
+  color: var(--text-2);
+}
+
+.agent-team-prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+.agent-team-prompt-count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 固定运行规则折叠区 ──────────────────────────────────── */
+.agent-team-rules-box {
+  border: 1px solid var(--border-light, var(--border));
+  border-radius: var(--r-md);
+  background: var(--color-sidebar);
+  overflow: hidden;
+}
+
+:root[data-theme="dark"] .agent-team-rules-box {
+  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+}
+
+.agent-team-rules-trigger.btn {
+  height: auto;
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  justify-content: flex-start;
+  border-radius: 0;
+  gap: var(--sp-2);
+  font-weight: 500;
+}
+
+.agent-team-rules-title {
+  font-size: 12px;
+  color: var(--text-1);
+  line-height: 1.45;
+  flex-shrink: 0;
+}
+
+.agent-team-rules-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.45;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-team-rules-state {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.agent-team-runtime-rules {
+  margin: 0;
+  padding: var(--sp-3);
+  border-top: 1px solid var(--border);
+  background: var(--bg-main);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── 反馈与弹窗表单 ──────────────────────────────────────── */
+.agent-team-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-3) var(--sp-5) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  color: var(--color-destructive);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-team-detail-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-7);
+}
+
+.agent-team-dialog-form {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.agent-team-dialog-error {
+  margin: var(--sp-2) 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-destructive);
+  overflow-wrap: anywhere;
+}
+
+.agent-team-back.btn {
+  display: none;
+}
+
+/* ── 窄容器响应式：切换为单栏主从视图 ─────────────────────── */
+@container agent-team (max-width: 620px) {
+  .agent-team-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .agent-team-sidebar {
+    border-right: none;
+  }
+
+  .agent-team-workspace .agent-team-detail,
+  .agent-team-workspace.show-detail .agent-team-sidebar {
+    display: none;
+  }
+
+  .agent-team-workspace.show-detail .agent-team-detail {
+    display: flex;
+  }
+
+  .agent-team-back.btn {
+    display: inline-flex;
+  }
+
+  .agent-team-control-slot {
+    width: 100%;
+  }
+}

@@ -18,6 +18,8 @@ import { usePanelStore } from "../../store/panel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type MutableRefObject, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { api, resolveFileUrl, type AttachmentInfo } from "../../api/client";
 import { useChatStore, useCurrentSession } from "../../store/chat";
+import { useUiStore } from "../../store/ui";
+import { resolveEnterDelivery, resolveSendButtonState, type MessageDelivery } from "../composer/queueDelivery";
 import { useDraftsStore, normalizeDraftMode } from "../../store/drafts";
 import { useMergedStreamText } from "../../store/streamMerged";
 import { openGallery } from "../../store/gallery";
@@ -340,7 +342,9 @@ export function MiniChat() {
     openGallery(imgs.map((a) => ({ url: resolveFileUrl(a.url), name: a.filename, size: a.size })), Math.max(0, imgs.indexOf(list[idx])));
   };
 
-  const send = () => {
+  const queueMessageMode = useUiStore((s) => s.queueMessageMode);
+
+  const send = (deliveryOverride?: MessageDelivery) => {
     const text = input.trim();
     if (!text && atts.length === 0) return;
     const st = useChatStore.getState();
@@ -350,8 +354,9 @@ export function MiniChat() {
       ?? useDraftsStore.getState().getDraft(`s${currentSessionId}`)?.reasoningEffort
       ?? st.lastReasoningEffort ?? undefined;
     sticky.stick();
-    // 与主输入框同口径：agent 透传 null（引擎默认全量工具），其余模式名原样透传；运行中由 sendTurn 自动排队
-    void st.sendTurn(text, atts as unknown as Record<string, unknown>[], effort, mode === "agent" ? null : mode, session?.model_id ?? st.lastModelId ?? null, []);
+    // 与主输入框同口径：agent 透传 null（引擎默认全量工具），其余模式名原样透传；运行中按队列消息设置决定入队或立即注入
+    const delivery: MessageDelivery = deliveryOverride ?? queueMessageMode;
+    void st.sendTurn(text, atts as unknown as Record<string, unknown>[], effort, mode === "agent" ? null : mode, session?.model_id ?? st.lastModelId ?? null, [], delivery);
     setInput("");
     setAtts([]);
   };
@@ -361,7 +366,14 @@ export function MiniChat() {
     void st.stopSessionExecution();
   };
   const canSend = input.trim().length > 0 || atts.length > 0;
-  const sendMode: "send" | "stop" | "queue" = canSend ? (isRunning ? "queue" : "send") : (isRunning ? "stop" : "send");
+  const sendMode = resolveSendButtonState({
+    isHome: false,
+    busy: isRunning,
+    isTurnRunning: isRunning,
+    hasContent: canSend,
+    uploading,
+    queueMode: queueMessageMode,
+  });
 
   /** 运行态文案：优先用后端给出的状态，其次按实时工具数，最后才是泛化的等待 */
   const liveLine = turnStatus
@@ -540,19 +552,44 @@ export function MiniChat() {
           className="mini-chat-input"
           rows={1}
           value={input}
-          placeholder={isRunning ? "补充要求，当前这轮结束后发送" : "继续对话，Enter 发送"}
+          placeholder={
+            isRunning
+              ? (queueMessageMode === "immediate"
+                  ? "任务运行中，Enter 直接发送 · Alt+Enter 排队"
+                  : "任务运行中，Enter 排队 · Alt+Enter 直接发送")
+              : "继续对话，Enter 发送"
+          }
           aria-label="对话小窗输入框"
           onChange={(e) => setInput(e.target.value)}
           onPaste={onPaste}
           onKeyDown={(e) => {
-            // 与主输入框一致：Enter 发送、Shift+Enter 换行，输入法组字中不发送
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+            // 与主输入框一致：Enter/Alt+Enter 遵循队列消息设置、Shift+Enter 换行，输入法组字中不发送
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            const delivery = resolveEnterDelivery({
+              key: e.key,
+              altKey: e.altKey,
+              shiftKey: e.shiftKey,
+              ctrlKey: e.ctrlKey,
+              metaKey: e.metaKey,
+              queueMode: queueMessageMode,
+              isTurnRunning: isRunning,
+            });
+            if (delivery != null) {
               e.preventDefault();
-              if (canSend) send();
+              if (canSend) send(delivery);
             }
           }}
         />
-        <Tooltip content={sendMode === "stop" ? "停止" : sendMode === "queue" ? "排队发送（Enter）" : "发送（Enter）"} side="top">
+        <Tooltip
+          content={
+            sendMode === "stop"
+              ? "停止"
+              : isRunning
+              ? (queueMessageMode === "immediate" ? "直接发送（Enter）· 排队（Alt+Enter）" : "排队（Enter）· 直接发送（Alt+Enter）")
+              : "发送（Enter）"
+          }
+          side="top"
+        >
           <button
             type="submit"
             className={"cc-send" + (sendMode === "queue" ? " is-queue" : "")}

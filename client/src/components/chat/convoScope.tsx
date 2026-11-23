@@ -42,17 +42,15 @@ function sideActions(sid: number): Record<string, unknown> {
   if (!cached) {
     const side = () => useSideChatStore.getState();
     cached = {
-      sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) => {
-        void side().sendSide(sid, {
+      sendTurn: (content: string, attachments?: Record<string, unknown>[], reasoningEffort?: string, mode?: string | null, modelId?: number | null, refs?: ComposerRefOut[]) =>
+        side().sendSide(sid, {
           content,
           attachments,
           reasoningEffort,
           mode,
           modelId,
           refs,
-        });
-        return Promise.resolve(null);
-      },
+        }),
       stopSessionExecution: () => { void side().stopSide(sid); },
       cancelTurn: () => { void side().stopSide(sid); },
       clearComposerBrowserRefs: NOOP,

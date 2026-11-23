@@ -163,7 +163,12 @@ async def test_real_dispatch_ignores_legacy_profile_whitelist(tool_setup, monkey
     assert call["subagent_mode"] == mode
     assert call["context_snapshot"]["approval_mode"] == "full"
     available = names(call["tool_schemas"])
-    assert {"desktop_screenshot", "browser_snapshot", "mcp_test_addon_query", "skill_view", "report_to_leader"} <= available
+    inspection = {"desktop_screenshot", "browser_snapshot", "mcp_test_addon_query", "skill_view"}
+    if mode == "readonly":
+        assert {"fs_read", "fs_grep", "report_to_leader"} <= available
+        assert not inspection & available
+    else:
+        assert inspection | {"report_to_leader"} <= available
     assert not available & subagent_tools.SUBAGENT_FORBIDDEN
     interactive = {"desktop_recipe", "desktop_click", "browser_click", "terminal_exec", "mcp_test_addon_update"}
     if mode == "agent":

@@ -45,6 +45,8 @@ export interface BrowserTabState {
   url: string;
   title: string;
   favicon?: string;
+  pinned?: boolean;
+  loginProtected?: boolean;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -85,6 +87,7 @@ export interface PageDialog {
 export interface SessionBrowserState {
   tabs: BrowserTabState[];
   activeTabId: string;
+  closedTabs: Array<{ url: string; title: string; pinned?: boolean }>;
   tabView: BrowserTabView;
   domSnapshot: string;
   selecting: boolean;
@@ -122,6 +125,7 @@ export const createInitialSessionState = (): SessionBrowserState => {
   return {
     tabs: [tab],
     activeTabId: tab.id,
+    closedTabs: [],
     tabView: "preview",
     domSnapshot: "",
     selecting: false,
@@ -134,6 +138,39 @@ export const createInitialSessionState = (): SessionBrowserState => {
 
 // 模块级稳定默认实例：会话缺失时复用同一引用，避免选择器反复返回新对象导致重渲染
 const DEFAULT_SESSION_STATE = createInitialSessionState();
+
+const BROWSER_TABS_KEY = "chatcoder.browser.tabs.v1";
+const CLOSED_TAB_LIMIT = 12;
+function safeStoredUrl(value: unknown): value is string {
+  if (value === "") return true;
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    const privateState = [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()]
+      .some((key) => /password|token|secret|credential|authorization|^code$/i.test(key));
+    return ["http:", "https:", "file:"].includes(url.protocol) && !url.username && !url.password && !privateState;
+  } catch { return false; }
+}
+
+function restoreBrowserSessions(): Record<string, SessionBrowserState> {
+  try {
+    const raw: Record<string, { tabs?: BrowserTabState[]; activeTabId?: string; closedTabs?: SessionBrowserState["closedTabs"] }> =
+      JSON.parse(localStorage.getItem(BROWSER_TABS_KEY) || "{}");
+    return Object.fromEntries(Object.entries(raw).flatMap(([key, value]) => {
+      if (!/^(default|\d+)$/.test(key) || !Array.isArray(value?.tabs)) return [];
+      const initial = createInitialSessionState();
+      const tabs = value.tabs.filter((tab) => tab && safeStoredUrl(tab.url) && typeof tab.id === "string").map((tab) => ({
+        ...makeTab(tab.url), id: tab.id, title: typeof tab.title === "string" ? tab.title : "", pinned: tab.pinned === true,
+      }));
+      const closedTabs = Array.isArray(value.closedTabs)
+        ? value.closedTabs.filter((tab) => tab && safeStoredUrl(tab.url) && typeof tab.title === "string").slice(0, CLOSED_TAB_LIMIT) : [];
+      return [[key, {
+        ...initial, tabs: tabs.length ? tabs : initial.tabs, closedTabs,
+        activeTabId: tabs.find((tab) => tab.id === value.activeTabId)?.id ?? tabs[0]?.id ?? initial.activeTabId,
+      }]];
+    }));
+  } catch { return {}; }
+}
 
 /** 与服务端 driver.normalize_url 同口径：本地地址补 http://，其余补 https://。 */
 export function normalizeUrl(raw: string): string {
@@ -162,6 +199,8 @@ interface BrowserStore {
   ) => void;
   newTab: (sid: string | number | null | undefined, initialUrl?: string, opts?: { owner?: TabOwner; activate?: boolean }) => string;
   closeTab: (sid: string | number | null | undefined, tabId: string) => void;
+  restoreClosedTab: (sid: string | number | null | undefined) => void;
+  goHome: (sid: string | number | null | undefined, tabId: string) => void;
   setActiveTab: (sid: string | number | null | undefined, tabId: string) => void;
   updateTab: (
     sid: string | number | null | undefined,
@@ -199,7 +238,7 @@ export const useBrowserStore = create<BrowserStore>((set, get) => {
     tabId || get().getSessionState(sid).activeTabId;
 
   return {
-    sessions: {},
+    sessions: restoreBrowserSessions(),
 
     getSessionState: (sid) => {
       const existing = get().sessions[sessionKey(sid)];
@@ -225,17 +264,38 @@ export const useBrowserStore = create<BrowserStore>((set, get) => {
     },
 
     closeTab: (sid, tabId) => writeSession(sid, (cur) => {
+      const closing = cur.tabs.find((t) => t.id === tabId);
+      if (!closing) return {};
+      const closedTabs = closing.owner === "user" && !closing.loginProtected && closing.url && safeStoredUrl(closing.url)
+        ? [{ url: closing.url, title: closing.title, pinned: closing.pinned }, ...cur.closedTabs].slice(0, CLOSED_TAB_LIMIT)
+        : cur.closedTabs;
       const next = cur.tabs.filter((t) => t.id !== tabId);
       if (next.length === 0) {
         const fallback = makeTab();
-        return { tabs: [fallback], activeTabId: fallback.id, agentElsewhere: null };
+        return { tabs: [fallback], activeTabId: fallback.id, agentElsewhere: null, selecting: false, tabView: "preview", closedTabs };
       }
       let active = cur.activeTabId;
       if (active === tabId) {
         const idx = cur.tabs.findIndex((t) => t.id === tabId);
         active = next[Math.min(idx, next.length - 1)].id;
       }
-      return { tabs: next, activeTabId: active, agentElsewhere: cur.agentElsewhere === tabId ? null : cur.agentElsewhere };
+      return { tabs: next, activeTabId: active, agentElsewhere: cur.agentElsewhere === tabId ? null : cur.agentElsewhere,
+        selecting: active === cur.activeTabId && cur.selecting, closedTabs };
+    }),
+
+    restoreClosedTab: (sid) => writeSession(sid, (cur) => {
+      const [closed, ...closedTabs] = cur.closedTabs;
+      if (!closed) return {};
+      const tab = { ...makeTab(closed.url), title: closed.title, pinned: closed.pinned };
+      const tabs = cur.tabs.filter((entry) => entry.url || entry.src || entry.id !== cur.activeTabId);
+      return { tabs: [...tabs, tab], activeTabId: tab.id, closedTabs, tabView: "preview", selecting: false };
+    }),
+
+    goHome: (sid, tabId) => writeSession(sid, (cur) => {
+      const current = cur.tabs.find((tab) => tab.id === tabId);
+      if (!current) return {};
+      const home = { ...makeTab(), pinned: current.pinned };
+      return { tabs: cur.tabs.map((tab) => tab.id === tabId ? home : tab), activeTabId: home.id, selecting: false, tabView: "preview" };
     }),
 
     setActiveTab: (sid, tabId) => writeSession(sid, (cur) => ({
@@ -324,3 +384,29 @@ export const useBrowserStore = create<BrowserStore>((set, get) => {
     resetSession: (sid) => set((state) => ({ sessions: { ...state.sessions, [sessionKey(sid)]: createInitialSessionState() } })),
   };
 });
+
+// plan-771-3177：持久化用户自己的标签及关闭栈，网页加载态、AI 标签与运行反馈仍由当前进程维护。
+if (typeof window !== "undefined") {
+  let timer = 0;
+  const persist = () => {
+    window.clearTimeout(timer);
+    try {
+      const sessions = Object.fromEntries(Object.entries(useBrowserStore.getState().sessions).map(([key, state]) => [key, {
+        tabs: state.tabs.filter((tab) => tab.owner === "user" && !tab.loginProtected && safeStoredUrl(tab.url))
+          .map(({ id, url, title, pinned }) => ({ id, url, title, pinned })),
+        activeTabId: state.activeTabId,
+        closedTabs: state.closedTabs,
+      }]));
+      localStorage.setItem(BROWSER_TABS_KEY, JSON.stringify(sessions));
+    } catch { /* 本地存储不可用时保留本次会话状态。 */ }
+  };
+  useBrowserStore.subscribe((next, prev) => {
+    if (!Object.entries(next.sessions).some(([key, state]) => {
+      const before = prev.sessions[key];
+      return !before || state.tabs !== before.tabs || state.activeTabId !== before.activeTabId || state.closedTabs !== before.closedTabs;
+    })) return;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(persist, 350);
+  });
+  window.addEventListener("pagehide", persist);
+}

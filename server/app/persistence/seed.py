@@ -143,24 +143,32 @@ async def _seed_subagent_profiles(db: AsyncSession) -> None:
     from app.persistence.models.subagent_profile import SubagentProfile
 
     # plan-20261107-subagent-mode-tools：设置已取消工具白名单，初始化不能重新植入隐藏限制。
-    presets = [
-        {
-            "name": "explore",
-            "description": "只读探索代理：查看与调研，不执行写入操作",
-            "system_prompt": "你是只读探索代理，请使用提供的工具进行调研并给出结论，不要修改文件或操作界面。",
-        },
-        {
-            "name": "general",
-            "description": "通用代理：按智能体模式使用已启用工具",
-            "system_prompt": None,
-        },
-    ]
-    for preset in presets:
-        res = await db.execute(
-            select(SubagentProfile).where(SubagentProfile.name == preset["name"])
-        )
-        if res.scalars().first() is None:
-            db.add(SubagentProfile(**preset))
+    from app.orchestration.agent_team import BUILTINS
+    from app.gateway.routers.settings import _load_config
+    from app.persistence.models.model_reg import Model
+
+    config = _load_config()
+    old_model = config.get("subagent_model_id", settings.subagent_model_id)
+    old_model = await db.get(Model, old_model) if isinstance(old_model, int) and old_model > 0 else None
+    old_effort = config.get("subagent_reasoning_effort", settings.subagent_reasoning_effort)
+    for key, (name, description, mode) in BUILTINS.items():
+        row = (await db.execute(
+            select(SubagentProfile).where(SubagentProfile.name == key)
+        )).scalars().first()
+        if row is None:
+            row = SubagentProfile(name=key, description=description)
+            db.add(row)
+        if row.execution_mode is None:
+            row.execution_mode = mode
+            row.display_name = row.display_name or name
+            if key == "explore" and row.system_prompt == (
+                "你是只读探索代理，请使用提供的工具进行调研并给出结论，不要修改文件或操作界面。"
+            ):
+                row.system_prompt = None
+            if old_model is not None and old_model.is_active:
+                row.model_id = old_model.id
+            if old_effort:
+                row.reasoning_effort = old_effort
     await db.flush()
 
 
@@ -310,6 +318,15 @@ async def _seed_builtin_skills(db: AsyncSession) -> int:
             "trigger": "需要可视化界面、结构图、看板，或要反复调整某个可视化结果时",
             "tools": ["microapp_call", "microapp_list", "microapp_validate"],
             "tags": ["microapp", "ui"],
+        },
+        {
+            "name": "interactive-ui",
+            "display_name": "交互界面设计",
+            "description": "在消息流内生成可交互 HTML 组件、数据图表、原型页或多版式比选卡（零写盘，只读/计划模式可用）",
+            "file": "interactive-ui.md",
+            "trigger": "用户要求设计/对比多个版式或界面原型、生成交互式图表/模拟器/可视化组件、或勾选版式后再继续实现时",
+            "tools": ["present_ui"],
+            "tags": ["ui", "chart", "diagram", "interactive"],
         },
     ]
     created = 0

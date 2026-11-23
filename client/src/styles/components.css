@@ -430,6 +430,9 @@
 .ui-list-row-name { font-size: 13px; font-weight: 500; color: var(--text-1); }
 .ui-list-row-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; word-break: break-word; }
 .ui-list-row-actions { display: flex; align-items: center; gap: var(--sp-3); flex-shrink: 0; }
+/* plan-20261121-file-tree-settings：工具条与列表行对齐，复选框独占一列。 */
+.ui-list-toolbar { border-bottom: 1px solid var(--border-light); }
+.ui-list-row-leading { display: flex; align-items: center; flex-shrink: 0; }
 /* plan-114-450：资源行统一形态——图标块 + 名称/描述/标签三层 + 右侧控件；悬停才显示次要操作（.ui-row-hover） */
 .ui-list-row-icon {
   display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border-radius: var(--r-md);
@@ -966,3 +969,16 @@
 
 /* plan-20261103-fork-ui：不可回滚仍保留操作槽位，与普通会话保持同样布局。 */
 .msg-action:disabled, .msg-action:disabled:hover { opacity: 0.35; cursor: not-allowed; color: var(--text-3); background: transparent; }
+/* plan-771-3177：右键菜单跟随窗口坐标，脱离虚拟行的裁切区域。 */
+.point-menu-anchor { position: fixed; z-index: 800; width: 0; height: 0; }
+.point-menu-anchor .point-menu {
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  min-width: 160px;
+  max-height: min(70vh, 360px);
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg-elevated);
+}
+.point-menu .btn { justify-content: flex-start; }

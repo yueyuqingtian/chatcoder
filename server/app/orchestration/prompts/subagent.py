@@ -74,16 +74,41 @@ fresh context. Everything above applies to you unchanged — the following only 
   one wins. Mention any change of direction in your final report.
 
 ### Report back (required)
-When finished (or blocked), reply with a STRUCTURED report using exactly the section headings
+When finished (or blocked), reply with a clean, scannable report using the matching section headings
 listed in the `## Report Back (required)` block of your context
-(Result / Files Touched / Key Findings / Verification / Acceptance / Risks / Open Questions).
+(Result / Key Findings / Files Touched / Verification / Acceptance / Risks / Open Questions).
+- Omit empty optional sections instead of padding with `None`.
+- Keep each bullet to 1–2 concise sentences (avoid semicolon-chained walls of text) and format paths cleanly.
 Your FINAL REPLY is the report — never call a tool that does not exist to "report back".
 State what you verified and how; never invent results you did not check.
 """
 
 
+# plan-20261123-agent-team：角色模板可替换，边界说明始终由运行时补足。
+def default_member_prompt(mode: str) -> str:
+    role = (
+        "你是探索智能体。查阅工作区代码，带回可核查的文件和符号位置、结论与未决项。"
+        if mode == "readonly" else
+        "你是执行智能体。在派给你的范围内完成改动和验证，汇报结果、变更文件和验证证据。"
+    )
+    return f"{role}\n\n{SUBAGENT_SYSTEM_PROMPT}"
+
+
+def member_runtime_rules(mode: str) -> str:
+    tools = (
+        "仅可读取、搜索和分析工作区代码。不得写入、执行命令，也不能查看浏览器或桌面内容，不能调用拓展工具（含 MCP）。"
+        if mode == "readonly" else
+        "可以使用会话授权的工具，遵守分配范围与工作流写入限制。"
+    )
+    return (
+        f"## 运行边界\n系统执行模式：{mode}。{tools}\n"
+        "审批由主会话控制。不要尝试修改权限、绕过审批、创建下级成员或启动工作流。"
+        "需要澄清时通过 report_to_leader 联系主代理。"
+    )
+
+
 def build_subagent_system_prompt(task_title: str = "", acceptance_criteria: str = "",
-                                language: str = "auto", language_source: str = "user") -> str:
+                                language: str = "auto", language_source: str = "user", member=None) -> str:
     """构建子代理系统提示词（plan-330-1648 M3；plan-549-2281 补执行模式与审批口径）。
 
     主体**复用主代理提示词**（与「新建会话」完全同口径：工作方法论、工具指引、规则遵循、
@@ -105,8 +130,11 @@ def build_subagent_system_prompt(task_title: str = "", acceptance_criteria: str 
             language=language,
             language_source=language_source,
         ),
-        SUBAGENT_SYSTEM_PROMPT,
+        ((member.prompt if member.prompt is not None else default_member_prompt(member.mode))
+         if member else SUBAGENT_SYSTEM_PROMPT),
     ]
+    if member is not None:
+        parts.append(member_runtime_rules(member.mode))
     if task_title:
         parts.append(f"\n## Assigned Task\n{task_title}")
     if acceptance_criteria:

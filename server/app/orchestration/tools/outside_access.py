@@ -31,6 +31,9 @@ def resolve_outside_target(ctx, raw_path: str) -> tuple[Path | None, str]:
     注意：这里只做纯路径解析，不做任何授权判断——工具的职责是"解析并执行"，
     是否该问用户由审批策略决定。
     """
+    if getattr(ctx, "workspace_read_only", False):
+        return None, "探索智能体只能读取工作区内的代码。"
+
     from app.orchestration.tools.safe_path import resolve_loose
 
     try:

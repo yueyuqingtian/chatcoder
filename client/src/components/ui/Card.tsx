@@ -6,7 +6,7 @@
  *    行内控件换行时不会再外溢（这是旧负 margin 方案"割裂/异常换行"的根源）；
  *  - ListRow 用于资源列表（增删项），与 Card 区分：Card 是分组容器，ListRow 是列表项。
  */
-import type { ReactNode } from "react";
+import type { KeyboardEventHandler, ReactNode } from "react";
 
 export function Card({ className = "", children }: { className?: string; children: ReactNode }) {
   return <div className={`ui-card ${className}`.trim()}>{children}</div>;
@@ -48,21 +48,37 @@ interface ListRowProps {
   actions?: ReactNode;
   /** plan-114-450：行首图标块（32px 圆角方块），资源列表（子代理 / 规则来源 / 工作树）共用 */
   icon?: ReactNode;
+  /** 行首独立控件（如复选），不跟随整行触发详情。 */
+  leading?: ReactNode;
   /** plan-114-450：描述下方的元信息行（标签 / 路径） */
   meta?: ReactNode;
   /** 停用态：名称与描述变淡，控件仍可操作 */
   muted?: boolean;
+  /** plan-20261123-ux-fixes：选中态（双栏主从列表共用），附带 is-selected 与 aria-selected */
+  selected?: boolean;
+  role?: string;
+  tabIndex?: number;
   className?: string;
   /** 整行点击（如打开详情/编辑弹窗）——传入后整行呈现可点击态 */
   onClick?: () => void;
+  onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
 }
 
-export function ListRow({ name, desc, actions, icon, meta, muted = false, className = "", onClick }: ListRowProps) {
+export function ListRow({
+  name, desc, actions, icon, leading, meta, muted = false, selected = false,
+  role, tabIndex, className = "", onClick, onKeyDown,
+}: ListRowProps) {
   return (
     <div
-      className={`ui-list-row${onClick ? " is-clickable" : ""}${muted ? " is-muted" : ""} ${className}`.trim()}
+      className={`ui-list-row${onClick ? " is-clickable" : ""}${muted ? " is-muted" : ""}${selected ? " is-selected" : ""} ${className}`.trim()}
+      role={role}
+      tabIndex={tabIndex}
+      aria-selected={role === "option" ? selected : undefined}
+      aria-current={role !== "option" && selected ? "true" : undefined}
       onClick={onClick}
+      onKeyDown={onKeyDown}
     >
+      {leading != null && <div className="ui-list-row-leading" onClick={(event) => event.stopPropagation()}>{leading}</div>}
       {icon ? <span className="ui-list-row-icon" aria-hidden>{icon}</span> : null}
       <div className="ui-list-row-info">
         <div className="ui-list-row-name">{name}</div>
@@ -79,6 +95,9 @@ export function Tag({ children, mono = false }: { children: ReactNode; mono?: bo
   return <span className={"ui-tag" + (mono ? " is-mono" : "")}>{children}</span>;
 }
 
-export function List({ children }: { children: ReactNode }) {
-  return <div className="ui-list">{children}</div>;
+export function List({ children, toolbar }: { children: ReactNode; toolbar?: ReactNode }) {
+  return <div className="ui-list">
+    {toolbar != null && <div className="ui-list-toolbar">{toolbar}</div>}
+    {children}
+  </div>;
 }

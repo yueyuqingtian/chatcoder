@@ -1,7 +1,7 @@
-/** 文件 / 文件夹类型图标（plan-20261009-ui U3/U8）。
+/** 文件 / 文件夹类型图标（plan-20261009-ui U3/U8，plan-771-3177 扩充）。
  *
  * 取代此前两套并行口径：文件树的文字徽标（TS/JS…）与 chat/FileBadge 的字母色块。
- * 解析顺序：完整文件名 → 文件名前缀（tsconfig.* / vite.config.* …）→ `.d.ts` → 扩展名 → 兜底文件。
+ * 解析顺序：完整文件名 → 文件名前缀（tsconfig.* / vite.config.* …）→ 复合后缀（.d.ts / .test.ts / .spec.tsx / .config.ts / .module.css …）→ 单扩展名 → 兜底文件。
  * 文件夹：按名称映射专用文件夹图标，展开态自动取 `-open` 版本，未知名称用通用文件夹。
  * 路径数据为静态内置子集（见 fileIconData.ts），以 innerHTML 注入是安全的。 */
 import { memo } from "react";
@@ -16,6 +16,36 @@ export function baseName(path: string): string {
   return i < 0 ? clean : clean.slice(i + 1);
 }
 
+/** 复合后缀 → 图标 key（优先精确匹配 .d.ts / 测试 / 配置 / CSS Module 等常见复合后缀） */
+const COMPOUND_SUFFIX_MAP: Array<[string, string]> = [
+  [".d.ts", "typescript-def"],
+  [".d.mts", "typescript-def"],
+  [".d.cts", "typescript-def"],
+  [".test.tsx", "test-ts"],
+  [".spec.tsx", "test-ts"],
+  [".test.ts", "test-ts"],
+  [".spec.ts", "test-ts"],
+  [".test.jsx", "test-js"],
+  [".spec.jsx", "test-js"],
+  [".test.js", "test-js"],
+  [".spec.js", "test-js"],
+  [".test.mjs", "test-js"],
+  [".spec.mjs", "test-js"],
+  [".test.cjs", "test-js"],
+  [".spec.cjs", "test-js"],
+  [".module.scss", "sass"],
+  [".module.sass", "sass"],
+  [".module.less", "less"],
+  [".module.css", "css"],
+  [".config.ts", "settings"],
+  [".config.mts", "settings"],
+  [".config.cts", "settings"],
+  [".config.js", "settings"],
+  [".config.mjs", "settings"],
+  [".config.cjs", "settings"],
+  [".config.json", "settings"],
+];
+
 export function fileIconKey(nameOrPath: string): string {
   const name = baseName(nameOrPath).toLowerCase();
   const exact = FILE_NAME_MAP[name];
@@ -23,10 +53,13 @@ export function fileIconKey(nameOrPath: string): string {
   for (const [prefix, key] of FILE_PREFIX_MAP) {
     if (name.startsWith(prefix)) return key;
   }
-  if (name.endsWith(".d.ts")) return "typescript-def";
+  for (const [suffix, key] of COMPOUND_SUFFIX_MAP) {
+    if (name.endsWith(suffix)) return key;
+  }
   const dot = name.lastIndexOf(".");
-  if (dot > 0) {
-    const byExt = FILE_EXT_MAP[name.slice(dot + 1)];
+  if (dot >= 0) {
+    const ext = name.slice(dot + 1);
+    const byExt = FILE_EXT_MAP[ext];
     if (byExt) return byExt;
   }
   return "file";

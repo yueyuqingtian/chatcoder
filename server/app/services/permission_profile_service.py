@@ -65,6 +65,8 @@ _READ_CORE = [
     "git",
     # 记忆写入与目标完成：两者都不改项目文件，审批策略按「读」裁决
     "memory_write", "goal_complete",
+    # plan-interactive-ui：消息流内嵌交互界面（纯展示无写盘，只读/计划模式可用）
+    "present_ui",
     # 下一步建议卡只在智能体 / 工作流模式提供（且需在设置 → 常规开启），
     # 只读 / 计划模式的白名单里不放 suggest_next_task
 ]

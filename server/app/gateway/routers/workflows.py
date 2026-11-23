@@ -9,7 +9,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.orchestration.workflow import presets, service, store
-from app.orchestration.workflow.graph import parse_plan, validate_plan
 from app.orchestration.workflow.runtime import (
     WorkflowLocalChangesError,
     WorkflowModelUnavailableError,
@@ -147,13 +146,6 @@ class TemplatePatch(BaseModel):
     plan: dict | None = None
 
 
-def _diagnostics(items) -> list[dict]:
-    return [
-        {"code": d.code, "path": d.path, "message": d.message, "suggestion": d.suggestion}
-        for d in items
-    ]
-
-
 @router.get("/templates")
 async def list_templates() -> list[dict]:
     """模板清单：内置预设（只读）在前，用户模板在后。"""
@@ -175,12 +167,9 @@ async def copy_preset(key: str) -> dict:
 async def patch_template(key: str, body: TemplatePatch) -> dict:
     plan: dict | None = None
     if body.plan is not None:
-        spec, diags = parse_plan(body.plan)
-        if spec is None:
-            raise HTTPException(422, detail={"errors": _diagnostics(diags)})
-        result = validate_plan(spec)
-        if not result.ok:
-            raise HTTPException(422, detail={"errors": _diagnostics(result.errors)})
+        _, errors = await validate_plan_for_run(body.plan)
+        if errors:
+            raise HTTPException(422, detail={"errors": errors})
         plan = body.plan
     row = await store.update_user_template(
         key,

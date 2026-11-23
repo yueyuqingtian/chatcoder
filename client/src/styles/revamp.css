@@ -29,18 +29,18 @@
 /* ── 消息流 ── */
 .turn-user-bubble {
   /* plan-114-447：用户气泡中性化，强调色只留给可操作的主元素 */
-  /* plan-633-2604：气泡收紧——内距 10px 16px → 8px 12px，圆角收敛到 --r-lg（16px 在窄面板里显得笨重）。
-   *  行高也在此收敛：气泡正文改 1.75（原来继承 --chat-line-height 的 2.2 = 13×2.2 ≈ 28.6px/行，
-   *  三行正文的留白比内容还多）。--ub-line-height 同时被折叠高度（global.css 的 .is-collapsed）读取，
-   *  两处必须同源，否则「6 行折叠」会显示成 7~8 行。 */
-  --ub-line-height: 1.75;
+  /* plan-20261121-flow-typography：气泡收敛——line-height 1.58，补 1px 极淡边界与微影，
+     使白色气泡在 #f8f8f8 舞台上边界清晰而不笨重；与 global.css .is-collapsed 同源。 */
+  --ub-line-height: 1.58;
   background: var(--bubble-user); border-radius: var(--r-lg);
-  padding: 8px 12px; line-height: var(--ub-line-height);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-xs);
+  padding: 9px 14px; line-height: var(--ub-line-height);
   animation: mo-pop-in var(--dur-3) var(--ease-out-quart) both; --pop-dy: 6px;
 }
 .md-body-stream > :last-child { animation: stream-in var(--dur-4) var(--ease-emphasized-decel) both; }
 @keyframes stream-in { from { opacity: 0; filter: blur(4px); transform: translateY(3px); } to { opacity: 1; filter: none; transform: none; } }
-.md-body h1, .md-body h2, .md-body h3 { margin: 1.1em 0 0.5em; letter-spacing: -0.01em; }
+.md-body h1, .md-body h2, .md-body h3 { letter-spacing: -0.015em; }
 .md-body pre { border-radius: var(--r-lg); }
 
 /* ── 设置：账号卡片（替换「标签 + 小按钮挤成一行」） ── */
@@ -63,9 +63,6 @@
 /* 设置卡片与控件统一（plan-121-482 补：.ui-card 是设置页另一套卡壳，视觉必须与 .settings-card 完全一致） */
 .settings-card,
 .ui-card { border-radius: var(--r-lg); border: 1px solid var(--border-light); }
-.settings-pill { border-radius: var(--r-md); transition: background var(--dur-2) var(--ease-standard), transform var(--dur-spring) var(--spring-bouncy); }
-.settings-pill:active { transform: scale(0.95); }
-.settings-pill.active { background: var(--text-1); color: var(--bg-main); }
 
 /* 色调选择器 */
 .tone-swatch {
@@ -132,8 +129,9 @@
    空卡片壳（已修，见 BrowserDownloadDirRow），与这层投影无关。 */
 .settings-card,
 .ui-card { background: var(--bg-main); border-color: var(--border-light); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03); }
-.settings-row { border-bottom-color: var(--border-light); min-height: 60px; }
+.settings-row { border-bottom-color: var(--border-light); min-height: 60px; padding: 14px var(--sp-5); }
 .settings-row:last-child { border-bottom: none; }
+.settings-row-title { font-size: 13.5px; }
 .settings-card-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
 .settings-resource-tag { border-radius: 999px; padding: 2px 10px; }
 
@@ -146,7 +144,7 @@
 input[type="checkbox"] { accent-color: var(--accent); }
 
 /* ── 消息流细节 ── */
-.turn-agent-text { line-height: var(--chat-line-height, 1.75); }
+.turn-agent-text { line-height: var(--chat-line-height, 1.62); }
 .tc-row.tc-write .tc-add { color: var(--success); font-variant-numeric: tabular-nums; }
 .tc-row.tc-write .tc-del { color: var(--error); font-variant-numeric: tabular-nums; }
 .tc-row.tc-write.expanded { padding-bottom: 6px; }

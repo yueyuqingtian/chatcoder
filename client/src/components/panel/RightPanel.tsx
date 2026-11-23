@@ -53,14 +53,14 @@ const PanelContent = memo(function PanelContent({ tab, sessionId, visible }: { t
     );
     case "files": return (
       <Suspense fallback={<LazyPanelFallback />}>
-        <FileTreePanel visible={visible} sessionId={sessionId} />
+        <FileTreePanel key={`files-${sessionId ?? "home"}`} visible={visible} sessionId={sessionId} />
       </Suspense>
     );
     case "subagent": return <SubagentPanel threadId={tab.meta?.threadId} agentName={tab.meta?.agentName} visible={visible} />;
     case "debug": return <DebugPanel sessionId={sessionId} />;
     case "workflow": return <WorkflowPanel sessionId={sessionId} visible={visible} />;
     case "side": return <SidePanel visible={visible} />;
-    case "git": return <GitPanel visible={visible} />;
+    case "git": return <GitPanel key={`git-${sessionId ?? "home"}`} sessionId={sessionId} visible={visible} />;
     case "microapp": return (
       <MicroAppPanel
         appId={tab.meta?.appId ?? ""}

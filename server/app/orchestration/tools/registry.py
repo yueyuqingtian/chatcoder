@@ -22,6 +22,7 @@ from app.orchestration.tools.memory_search import MemorySearchTool
 from app.orchestration.tools.memory_write import MemoryWriteTool
 from app.orchestration.tools.microapp import ALL_MICROAPP_TOOLS
 from app.orchestration.tools.multi_edit import MultiFileEditTool
+from app.orchestration.tools.present_ui import PresentUiTool
 from app.orchestration.tools.read_attachment import ReadAttachmentTool
 from app.orchestration.tools.read_session_context import ReadSessionContextTool
 from app.orchestration.tools.skill_view import SkillViewTool
@@ -143,6 +144,8 @@ def _build_default_registry() -> ToolRegistry:
         # 与浏览器、桌面同类「驱动外部界面」的能力，注册在相邻位置便于对照；
         # ta3 通道与只读子代理白名单都从这里取同一份定义。
         *ALL_MICROAPP_TOOLS,
+        # plan-interactive-ui：消息流内嵌可交互界面/多版式比选（零写盘副作用，只读/计划模式可用）
+        PresentUiTool,
     ):
         reg.register(tool_cls())
     return reg

@@ -3,7 +3,7 @@
  *  两个用户诉求驱动本次改造：
  *  ① 折叠再展开不能丢状态：右面板容器改为常驻挂载（见 App.tsx），终端/浏览器实例不再因
  *     折叠被卸载重建；
- *  ② 每个会话独立：tabs / activeKey / closedStack / 预览状态按会话分桶存储，切换会话只
+ *  ② 每个会话独立：展开 / 全屏 / 标签 / 预览状态按会话分桶存储，切换会话只
  *     切换投影，不再出现「A 会话的子代理标签出现在 B 会话」。
  *
  *  为什么顶层仍保留同名字段：ToolTree / ComposerCapsule / FileTreePanel 等调用点都按
@@ -69,8 +69,11 @@ export interface TurnFileReview {
   error?: string;
 }
 
-/** 单个会话（或无会话的 home）持有的面板内容状态。 */
+/** 单个会话（或无会话的 home）持有的面板状态。 */
 export interface PanelBucket {
+  /** plan-20261122-right-panel：切回会话时恢复该会话自己的布局，避免从其他会话继承全屏或展开。 */
+  expanded: boolean;
+  fullscreen: boolean;
   tabs: PanelTab[];
   activeKey: string | null;
   /** v2.2 (对齐 zcode 3.3.3): 最近关闭标签（上限 10），供加号菜单恢复 */
@@ -106,11 +109,13 @@ export function bucketSessionId(key: string): number | null {
 }
 
 function emptyBucket(): PanelBucket {
-  return { tabs: [], activeKey: null, closedStack: [], previewRequestId: 0, previewTarget: null, previewPath: null, previewLine: null, diffPreview: null, turnFileReview: null, planCollapsePending: false };
+  return { expanded: false, fullscreen: false, tabs: [], activeKey: null, closedStack: [], previewRequestId: 0, previewTarget: null, previewPath: null, previewLine: null, diffPreview: null, turnFileReview: null, planCollapsePending: false };
 }
 /** 桶 → 顶层投影（当前桶字段镜像）。 */
 function projectionOf(b: PanelBucket) {
   return {
+    expanded: b.expanded,
+    fullscreen: b.fullscreen,
     tabs: b.tabs,
     activeKey: b.activeKey,
     closedStack: b.closedStack,
@@ -167,12 +172,10 @@ function loadState(): { width: number } {
 function saveWidth(width: number) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ width })); } catch {} }
 
 interface PanelState extends PanelBucket {
-  expanded: boolean;
   /** plan-20261015-browser-agent：右面板此刻是否真的显示在屏幕上（展开且不在设置/拓展等页面态）。
    *  由 App 按 rightShown 同步；浏览器面板据此决定 webview 是正常显示还是“停泊”在后台继续运行。 */
   onScreen: boolean;
   width: number;
-  fullscreen: boolean;
   /** v10: 主窗口顶部任务卡显隐开关（TitleBar 折叠按钮控制） */
   taskCardVisible: boolean;
   /** 按会话分桶的面板内容（key = bucketKeyOf(sessionId)） */
@@ -186,6 +189,7 @@ interface PanelState extends PanelBucket {
   openPanel: () => void;
   closePanel: () => void;
   togglePanel: () => void;
+  setFullscreen: (fullscreen: boolean) => void;
   toggleFullscreen: () => void;
   toggleTaskCard: () => void;
   setWidth: (w: number) => void;
@@ -232,10 +236,8 @@ interface PanelState extends PanelBucket {
 
 const initial = loadState();
 export const usePanelStore = create<PanelState>((set, get) => ({
-  expanded: false,
   onScreen: false,
   width: initial.width,
-  fullscreen: false,
   taskCardVisible: false, // v13: 对齐 zcode——待办在消息流内嵌展示，底部浮窗默认关闭（标题栏可再开）
   buckets: {},
   activeBucket: HOME_BUCKET,
@@ -261,26 +263,29 @@ export const usePanelStore = create<PanelState>((set, get) => ({
       const buckets = { ...s.buckets };
       delete buckets[key];
       if (s.activeBucket !== key) return { buckets };
-      return { buckets, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) };
+      return { buckets, activeBucket: HOME_BUCKET, ...projectionOf(buckets[HOME_BUCKET] ?? emptyBucket()) };
     });
   },
 
-  openPanel: () => {
-    if (get().expanded) return;
-    // plan-31-152 S5-1：展开是一次几何变更——交 applyPaneUpdate 统一收尾（CSS 过渡 + 收敛序列）
-    applyPaneUpdate(() => set({ expanded: true }));
-  },
+  openPanel: () => revealBucket(get().activeBucket),
   closePanel: () => {
-    if (!get().expanded) return;
+    const { activeBucket, expanded } = get();
+    if (!expanded) return;
     // 关闭面板同时清掉当前会话的 diff 预览（预览是「变更审核」的一次性临时态）
-    const key = get().activeBucket;
-    applyPaneUpdate(() => {
-      set({ expanded: false, fullscreen: false });
-      writeBucket(key, (b) => ({ ...b, diffPreview: null, turnFileReview: null }));
-    });
+    applyPaneUpdate(() => writeBucket(activeBucket, (b) => ({
+      ...b, expanded: false, fullscreen: false, diffPreview: null, turnFileReview: null,
+    })));
   },
-  togglePanel: () => applyPaneUpdate(() => set((s) => ({ expanded: !s.expanded }))),
-  toggleFullscreen: () => applyPaneUpdate(() => set((s) => ({ fullscreen: !s.fullscreen }))),
+  togglePanel: () => {
+    const { activeBucket } = get();
+    applyPaneUpdate(() => writeBucket(activeBucket, (b) => ({ ...b, expanded: !b.expanded, fullscreen: false })));
+  },
+  setFullscreen: (fullscreen) => {
+    const state = get();
+    if (fullscreen === state.fullscreen) return;
+    applyPaneUpdate(() => writeBucket(state.activeBucket, (b) => ({ ...b, fullscreen, expanded: fullscreen || b.expanded })));
+  },
+  toggleFullscreen: () => get().setFullscreen(!get().fullscreen),
   toggleTaskCard: () => set((s) => ({ taskCardVisible: !s.taskCardVisible })),
   setWidth: (w) => {
     const clamped = Math.max(200, Math.min(MAX_WIDTH, Math.round(w)));
@@ -318,9 +323,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const key = get().activeBucket;
     const b = get().buckets[key] ?? emptyBucket();
     const tab: PanelTab = { id, instance: nextInstance(b.tabs, id), uid: nextUid(id) };
-    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
-    if (!get().expanded) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
-    apply();
+    revealBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
   },
 
   gitFocus: null,
@@ -336,11 +339,8 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const b = get().buckets[key] ?? emptyBucket();
     // 同线程已开则激活，否则新开实例
     const existing = b.tabs.find((t) => t.id === "subagent" && t.meta?.threadId === threadId);
-    const needExpand = !get().expanded;
     if (existing) {
-      const activate = () => writeBucket(key, (cur) => ({ ...cur, activeKey: panelTabKey(existing) }));
-      if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); activate(); }); return; }
-      activate();
+      revealBucket(key, (cur) => ({ ...cur, activeKey: panelTabKey(existing) }));
       return;
     }
     const tab: PanelTab = {
@@ -349,9 +349,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
       uid: nextUid("subagent"),
       meta: { threadId, agentName },
     };
-    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
-    if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
-    apply();
+    revealBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
   },
 
   openMicroApp: (appId, version, entry, externalUrl) => {
@@ -359,14 +357,12 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     const b = get().buckets[key] ?? emptyBucket();
     // 同 appId 已开则激活：升级后 meta.version 变化，但用户视角还是同一个应用，不该再堆一个标签
     const existing = b.tabs.find((t) => t.id === "microapp" && t.meta?.appId === appId);
-    const needExpand = !get().expanded;
     if (existing) {
-      writeBucket(key, (cur) => ({
+      revealBucket(key, (cur) => ({
         ...cur,
         tabs: cur.tabs.map((t) => (panelTabKey(t) === panelTabKey(existing) ? { ...t, meta: { ...t.meta, version, entry, externalUrl } } : t)),
         activeKey: panelTabKey(existing),
       }));
-      if (needExpand) applyPaneUpdate(() => set({ expanded: true }));
       return;
     }
     // uid 由 store 统一分配（跨桶单调递增），是宿主桥的实例标识来源（协议 §6）：
@@ -374,9 +370,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     // 所以**每一条**创建微应用标签的路径都必须写入顶层的 uid，并在 meta 里留一份镜像。
     const uid = nextUid("microapp");
     const tab: PanelTab = { id: "microapp", instance: nextInstance(b.tabs, "microapp"), uid, meta: { appId, version, entry, uid, externalUrl } };
-    const apply = () => writeBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
-    if (needExpand) { applyPaneUpdate(() => { set({ expanded: true }); apply(); }); return; }
-    apply();
+    revealBucket(key, (cur) => ({ ...cur, tabs: [...cur.tabs, tab], activeKey: panelTabKey(tab) }));
   },
 
   /** plan-693-2868 回归修复：AI 调用 `microapp_call` 前由宿主侧调用它。
@@ -385,8 +379,8 @@ export const usePanelStore = create<PanelState>((set, get) => ({
    *  此前只「找」不「造」——用户没手动打开界面时调用必然报「没有找到 xxx 的界面」。
    *
    *  三条约束：
-   *  ① 绝不 `set({ expanded: true })`：面板的打开权只在用户手上（docs/app1/README.md 四条界面约定），
-   *     `openMicroApp` 里的 needExpand 逻辑不能复用；容器常驻挂载（App.tsx），折叠状态下 webview 照样加载。
+   *  ① 保持所属会话的展开状态：面板的打开权只在用户手上（docs/app1/README.md 四条界面约定），
+   *     容器常驻挂载（App.tsx），折叠状态下 webview 照样加载。
    *  ② 桶 key 取 `bucketKeyOf(sessionId)` 而不是 `activeBucket`：AI 可能在后一个会话里调用，
    *     标签必须落在**发起调用的那个会话**，不能塞进用户此刻正在看的会话。
    *  ③ 用户正在看这个桶的面板时不抢 activeKey（不打断），否则设为当前标签——用户一展开就停在这个应用上
@@ -540,11 +534,20 @@ export const usePanelStore = create<PanelState>((set, get) => ({
     }
   },
 
-  reset: () => set({ expanded: false, fullscreen: false, buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),
+  reset: () => set({ buckets: {}, activeBucket: HOME_BUCKET, ...projectionOf(emptyBucket()) }),
 }));
 
+/** plan-20261122-right-panel：标签和展开状态一次提交，避免打开时先显示该会话的旧标签。 */
+function revealBucket(key: string, update?: (bucket: PanelBucket) => PanelBucket) {
+  if (usePanelStore.getState().buckets[key]?.expanded) {
+    if (update) writeBucket(key, update);
+    return;
+  }
+  applyPaneUpdate(() => writeBucket(key, (b) => ({ ...(update ? update(b) : b), expanded: true })));
+}
+
 /** 对指定桶做一次不可变更新，并同步顶层投影（仅当该桶是当前桶）。
- *  所有内容写入都经这里落库，保证「buckets 是唯一数据源、顶层字段是镜像」。 */
+ *  面板布局与内容都经这里落库，保证「buckets 是唯一数据源、顶层字段是镜像」。 */
 function writeBucket(key: string, fn: (b: PanelBucket) => PanelBucket) {
   usePanelStore.setState((s) => {
     // 所有写入都过一遍归一化：重复 key 与悬空 activeKey 在落库前就被修正，

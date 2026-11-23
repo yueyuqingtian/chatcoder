@@ -229,6 +229,7 @@ def validate_plan(
     spec: PlanSpec,
     *,
     role_exists: Callable[[str], bool] = lambda _name: True,
+    role_matches: Callable[[str, str], bool] = lambda _role, _kind: True,
     readonly_only: bool = False,
     hot_patterns: Iterable[str] = (),
     command_note: CommandNote = default_command_note,
@@ -314,6 +315,7 @@ def validate_plan(
                 flow.nodes,
                 index,
                 role_exists,
+                role_matches,
                 readonly_only,
                 command_note,
             )
@@ -404,6 +406,7 @@ def _check_node(
     nodes: Sequence[NodeSpec],
     index: Mapping[str, int],
     role_exists: Callable[[str], bool],
+    role_matches: Callable[[str, str], bool],
     readonly_only: bool,
     command_note: CommandNote = default_command_note,
 ) -> None:
@@ -433,6 +436,10 @@ def _check_node(
             f"角色『{role}』不存在或已停用",
             "使用启用的子代理类型名称，或内置角色 explorer / implementer / reviewer",
         )
+    elif kind in LLM_KINDS and role is not None and not role_matches(role, kind):
+        _error(res, "role_mode_mismatch", f"{path}.role",
+               f"角色『{role}』的执行模式与节点职责不匹配",
+               "探索与审阅需要只读成员，执行需要智能体成员")
     for inp in node.inputs:
         if inp not in index:
             _error(res, "unknown_input", f"{path}.inputs", f"输入节点『{inp}』不在同一子工作流内")

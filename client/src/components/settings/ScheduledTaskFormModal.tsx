@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CronValidateOut, ScheduledMissedPolicy, ScheduledTaskOut } from "@chatcoder/shared";
 import { api } from "../../api/client";
 import { useChatStore } from "../../store/chat";
-import { FormDialog, Input, Select, Textarea } from "../ui";
+import { Button, FormDialog, Input, Segmented, Select, Textarea } from "../ui";
 
 /* ── 可视化频率模型 ── */
 
@@ -316,29 +316,17 @@ export function ScheduledTaskFormModal({
 
       <div className="settings-form-field">
         <label className="settings-field-label">触发频率</label>
-        <div className="settings-chips">
-          {FREQ_OPTS.map((o) => (
-            <button key={o.value} type="button"
-              className={"settings-chip" + (form.freq === o.value ? " on" : "")}
-              onClick={() => setForm((p) => ({ ...p, freq: o.value }))}>
-              {o.label}
-            </button>
-          ))}
-        </div>
+        <Select value={form.freq} aria-label="触发频率" options={FREQ_OPTS}
+          onChange={(value) => setForm((old) => ({ ...old, freq: value as FreqMode }))} />
       </div>
 
       {form.freq === "interval" && (
         <div className="settings-form-field">
           <label className="settings-field-label">每隔多少分钟</label>
-          <div className="settings-chips">
-            {INTERVAL_OPTS.map((n) => (
-              <button key={n} type="button"
-                className={"settings-chip" + (form.intervalMinutes === n ? " on" : "")}
-                onClick={() => setForm((p) => ({ ...p, intervalMinutes: n }))}>
-                {n} 分钟
-              </button>
-            ))}
-          </div>
+          <Select value={String(form.intervalMinutes)} aria-label="触发间隔"
+            options={Array.from(new Set([form.intervalMinutes, ...INTERVAL_OPTS])).sort((a, b) => a - b)
+              .map((minutes) => ({ value: String(minutes), label: `${minutes} 分钟` }))}
+            onChange={(value) => setForm((old) => ({ ...old, intervalMinutes: Number(value) }))} />
         </div>
       )}
 
@@ -365,13 +353,13 @@ export function ScheduledTaskFormModal({
       {form.freq === "weekly" && (
         <div className="settings-form-field">
           <label className="settings-field-label">在星期几触发（可多选）</label>
-          <div className="settings-chips">
+          <div className="ui-toolbar" role="group" aria-label="每周触发日">
             {WEEKDAY_ORDER.map((d) => (
-              <button key={d} type="button"
-                className={"settings-chip" + (form.weekdays.includes(d) ? " on" : "")}
+              <Button key={d} size="sm" variant={form.weekdays.includes(d) ? "secondary" : "ghost"}
+                aria-pressed={form.weekdays.includes(d)}
                 onClick={() => toggleWeekday(d)}>
                 {WEEKDAY_LABELS[d]}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
@@ -411,15 +399,8 @@ export function ScheduledTaskFormModal({
       </div>
       <div className="settings-form-field">
         <label className="settings-field-label">错过策略</label>
-        <div className="settings-chips">
-          {MISSED_OPTS.map((o) => (
-            <button key={o.value} type="button"
-              className={"settings-chip" + (form.missed_policy === o.value ? " on" : "")}
-              onClick={() => setForm((p) => ({ ...p, missed_policy: o.value }))} title={o.desc}>
-              {o.label}
-            </button>
-          ))}
-        </div>
+        <Segmented size="sm" value={form.missed_policy} aria-label="错过策略" options={MISSED_OPTS}
+          onChange={(value) => setForm((old) => ({ ...old, missed_policy: value }))} />
         <div className="sched-field-desc">{MISSED_OPTS.find((o) => o.value === form.missed_policy)?.desc}</div>
       </div>
     </FormDialog>

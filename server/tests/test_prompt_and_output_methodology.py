@@ -170,6 +170,16 @@ def test_static_prompt_has_methodology_sections():
         assert heading in MAIN_SYSTEM_PROMPT
 
 
+def test_prompt_output_style_is_adaptive_and_scannable():
+    """plan-20261121-flow-typography：输出风格应按任务自适应（不定死），且约束单条密度避免文字墙。"""
+    assert "## Final report & adaptive output format" in MAIN_SYSTEM_PROMPT
+    assert "Adaptive structure (guide, not a rigid cage)" in MAIN_SYSTEM_PROMPT
+    assert "One idea per bullet (no walls of text)" in MAIN_SYSTEM_PROMPT
+    assert "skip report headings entirely" in MAIN_SYSTEM_PROMPT
+    assert "## Progress Communication (natural, not mechanical)" in MAIN_SYSTEM_PROMPT
+    assert "every few tool iterations" not in MAIN_SYSTEM_PROMPT
+
+
 def test_prompt_verifies_by_risk_and_volume_not_per_step():
     """验证时机：按风险与改动量自行判断，不固定在每步/每批，交付前整体验证。"""
     text = build_main_system_prompt(execution_mode="agent", available_tools={"fs_read"})

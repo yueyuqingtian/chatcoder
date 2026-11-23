@@ -11,13 +11,14 @@
  * - 思考内容（thinking）不进入主消息流文本，由 ThinkingBlock 独立消费
  */
 import { normalizeToolName } from "./toolLabels";
-import type { AttachmentInfo, MessageOut } from "../../api/client";
+import type { AttachmentInfo, MessageOut, OutlineAttachment, OutlineRef } from "../../api/client";
 import type { ToolImage } from "../../store/chat";
 import { MsgType, SenderType } from "@chatcoder/shared";
 import type { TurnOut } from "@chatcoder/shared";
 import { recordDerivation } from "../../perf/metrics";
 import { isMessageAppend } from "../../utils/messageChanges";
 import { formatBgElapsed } from "../../utils/bgFormat";
+import { stripRefLines } from "../../utils/refLines";
 import {
   SUBSESSION_QUESTION_TOOL, SUBSESSION_REPORT_TOOL, SUBSESSION_RESULT_TOOL,
   SUBAGENT_QUESTION_TOOL, SUBAGENT_REPORT_TOOL, SUBAGENT_COMPLETION_TOOL,
@@ -98,7 +99,9 @@ export type TurnItem =
   | { kind: "workflow"; programId: number; turnId: number | null; firstId?: number }
   /** plan-20261015-browser-agent：截图卡——截图类工具调用之后的截图预览，固定在该次调用的时间线位置，
    *  随所在的「工作过程」一起折叠（汇报之后的截图仍常显）；firstId 为该次调用消息 id */
-  | { kind: "shot"; leaf: ToolLeaf; firstId?: number };
+  | { kind: "shot"; leaf: ToolLeaf; firstId?: number }
+  /** plan-interactive-ui：消息流内嵌可交互界面 / 多版式比选卡片（原位常显，不随过程折叠） */
+  | { kind: "interactive-ui"; callKey: string; msg: MessageOut; result?: MessageOut; firstId?: number };
 
 export type TimelineEntry =
   /** turnIds：并入续跑轮后的全部轮 id（首个即 turnId）；未并入时缺省，见 createRoundMerger */
@@ -118,7 +121,8 @@ export const SYSTEM_CONTINUATION_KINDS: ReadonlySet<string> = new Set([
  *  任务完成后随工作过程一起折叠；此前常显的卡片会在汇报上方留下一大块，与其它过程信息的层次不一致。 */
 export function isOutsideProcess(item: TurnItem): boolean {
   // plan-20261116-subagent-collapse：派发/续跑也是执行过程，常显会让收起后的卡片残留在汇报顶部。
-  return item.kind === "workflow" || item.kind === "workflow-wakeup";
+  // plan-interactive-ui：交付给用户看/选的交互界面必须常显在原位，不收进折叠区。
+  return item.kind === "workflow" || item.kind === "workflow-wakeup" || item.kind === "interactive-ui";
 }
 
 /** 执行段的切分结果（见 splitFlowSegments）。 */
@@ -224,7 +228,9 @@ export function matchSubagentDispatches<T extends WorkflowNodeCard & { name: str
 
 /** 条目的起始消息 id，即创建先后的依据：消息类条目取其消息 id；工具簇与工作流卡取其首条工具调用的 id。 */
 export function firstIdOf(item: TurnItem): number | null {
-  if (item.kind === "tools" || item.kind === "workflow" || item.kind === "shot") return item.firstId ?? null;
+  if (item.kind === "tools" || item.kind === "workflow" || item.kind === "shot" || item.kind === "interactive-ui") {
+    return item.firstId ?? ("msg" in item && item.msg ? Number(item.msg.id) : null);
+  }
   return "msg" in item && item.msg ? Number(item.msg.id) : null;
 }
 
@@ -881,6 +887,11 @@ function workflowProgramsOf(calls: MessageOut[], resultsByKey: Map<string, Messa
 /** 建议工具：调用只为生成「下一步建议」卡，消息流不展示其调用行与随后的思考（只展示建议卡本身）。
  *  同时兼容真实名与 ta3 伪装名。 */
 const SUGGESTION_TOOLS = new Set(["suggest_next_task", "SuggestNextTask"]);
+const INTERACTIVE_UI_TOOLS = new Set(["present_ui", "PresentUi"]);
+function isInteractiveUiTool(rawName: string): boolean {
+  const norm = normalizeToolName(rawName);
+  return INTERACTIVE_UI_TOOLS.has(norm) || norm.endsWith("__present_ui");
+}
 
 /** plan-474-2105：系统消息的 mailbox.kind（子会话治理的事件类型都挂在这里）。 */
 function mailboxKindOf(c: Record<string, unknown>): string {
@@ -1075,6 +1086,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   // plan-20261022-subagent-dispatch-fail：子代理调用结果单独索引——它不进 ToolTree，
   // 但卡片要靠它区分「真的在跑」与「派发已被后端拒绝」。
   const spawnResultsByKey = new Map<string, MessageOut>();
+  // plan-interactive-ui：present_ui 的结果单独索引（不进 ToolTree），按 call_key 关联到交互卡片
+  const interactiveUiResultsByKey = new Map<string, MessageOut>();
   // plan-20261021-subq-row：工具结果先整体索引一遍，再按时间序归类。
   // 子会话提问 / 后台命令通知等系统消息会落在某个长命令的「调用」与「结果」之间（提问打断前台命令时，
   // 结果要等命令转后台之后才写入）。遇到它们要先 flush 待处理的调用；若结果边走边收，
@@ -1082,11 +1095,16 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   for (const m of msgs) {
     if (m.msg_type !== MsgType.ToolResult) continue;
     const rc = m.content as Record<string, unknown>;
-    const tool = normalizeToolName(String(rc.tool ?? ""));
+    const rawTool = String(rc.tool ?? "");
+    const tool = normalizeToolName(rawTool);
     // 子代理结果由 SubagentCard 展示、不进 ToolTree；卡片用它区分「在跑」与「派发被拒」。
     // plan-568-2333：resume_subagent 的结果同样单独索引——续跑也要按时间线入条。
     if (tool === "spawn_subagent" || tool === "resume_subagent") {
       spawnResultsByKey.set(String(rc.call_key ?? ""), m);
+      continue;
+    }
+    if (isInteractiveUiTool(rawTool)) {
+      interactiveUiResultsByKey.set(String(rc.call_key ?? ""), m);
       continue;
     }
     // 与下方归类口径一致：建议工具不进时间线
@@ -1195,7 +1213,8 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
       // 动作本身的时间线锚点——后端在工具执行前就已落库 TOOL_CALL，位置精确。此前只认
       // spawn_subagent，续跑调用被当成普通工具节点混进 ToolTree，卡片只能走 TurnGroup 的
       // 未落位兜底槽位，表现为「子代理卡片始终停在消息流底部」。
-      const tool = normalizeToolName(String(c.tool ?? ""));
+      const rawTool = String(c.tool ?? "");
+      const tool = normalizeToolName(rawTool);
       if (tool === "spawn_subagent" || tool === "resume_subagent") {
         // v22: spawn_subagent 工具调用独立作为时间线条目，按时间轴精准穿插在消息流中
         // （此前被当成普通工具节点混入 ToolTree，且 SubagentCard 全部堆在用户消息下方）
@@ -1205,6 +1224,17 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
         items.push({
           kind: "subagent", msg: m,
           result: spawnResultsByKey.get(String(c.call_key || m.id)),
+        });
+      } else if (isInteractiveUiTool(rawTool)) {
+        // plan-interactive-ui：present_ui 独立渲染为消息流交互卡片（常显，不进入 ToolTree）
+        flushTools();
+        const callKey = String(c.call_key || m.id);
+        items.push({
+          kind: "interactive-ui",
+          callKey,
+          msg: m,
+          result: interactiveUiResultsByKey.get(callKey),
+          firstId: Number(m.id),
         });
       } else {
         pendingTools.push(m);
@@ -1260,16 +1290,58 @@ function buildTurnItems(msgs: MessageOut[]): TurnItem[] {
   return items;
 }
 
-/** 获取 turn 的首条用户消息摘要（供 JumpDots 浮窗）。 */
+export interface UserMessagePreview {
+  text: string;
+  attachments: OutlineAttachment[];
+  refs: OutlineRef[];
+}
+
+/** 从单条用户消息提取纯净摘要、附件与引用（供 JumpDots 浮窗使用，plan-20261121-jumpdots-v2）。 */
+export function userMessagePreview(msg: MessageOut): UserMessagePreview {
+  const content = (msg.content ?? {}) as Record<string, unknown>;
+  const rawRefs = Array.isArray(content.refs) ? content.refs : [];
+  const refs: OutlineRef[] = [];
+  for (const r of rawRefs) {
+    if (!r || typeof r !== "object") continue;
+    const rec = r as Record<string, unknown>;
+    if (typeof rec.kind !== "string" || typeof rec.value !== "string") continue;
+    refs.push({
+      kind: rec.kind as OutlineRef["kind"],
+      value: rec.value,
+      label: String(rec.label || rec.value),
+      ...(typeof rec.project_label === "string" && rec.project_label ? { project_label: rec.project_label } : {}),
+    });
+  }
+  const rawAtts = Array.isArray(content.attachments) ? content.attachments : [];
+  const attachments: OutlineAttachment[] = [];
+  for (const a of rawAtts) {
+    if (!a || typeof a !== "object") continue;
+    const rec = a as Record<string, unknown>;
+    const url = String(rec.url ?? "");
+    const filename = String(rec.filename ?? "");
+    if (!url && !filename) continue;
+    attachments.push({
+      file_id: String(rec.file_id ?? ""),
+      filename,
+      url,
+      size: Number(rec.size ?? 0) || 0,
+      mime_type: String(rec.mime_type ?? ""),
+      type: String(rec.type ?? ""),
+    });
+  }
+  const cleanText = stripRefLines(msgText(content), refs.length > 0).trim();
+  const text = cleanText.length > 200 ? `${cleanText.slice(0, 200)}…` : cleanText;
+  return { text, attachments, refs };
+}
+
+/** 获取 turn 的首条用户消息摘要（供兼容调用）。 */
 export function turnPreview(turn: TimelineEntry & { kind: "turn" }): string {
   const user = turn.items.find((it) => it.kind === "user");
   if (!user || user.kind !== "user") return "";
-  const text = msgText(user.msg.content).trim();
+  const { text, attachments } = userMessagePreview(user.msg);
   if (text) return text.length > 40 ? `${text.slice(0, 40)}…` : text;
-  // v14: 仅附件无文字的消息，摘要显示附件名
-  const atts = (user.msg.content as Record<string, unknown>).attachments;
-  if (Array.isArray(atts) && atts.length > 0) {
-    const names = atts.map((a) => String((a as Record<string, unknown>).filename ?? "")).filter(Boolean);
+  if (attachments.length > 0) {
+    const names = attachments.map((a) => a.filename).filter(Boolean);
     const joined = `📎 ${names.join(", ")}`;
     return joined.length > 40 ? `${joined.slice(0, 40)}…` : joined;
   }

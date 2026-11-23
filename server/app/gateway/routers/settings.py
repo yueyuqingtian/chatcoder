@@ -106,6 +106,16 @@ def _notify_mode(value) -> str:
     return text if text in _NOTIFY_MODES else "unfocused"
 
 
+# plan-20261120-queue-message-mode：任务执行中队列消息的默认行为
+_QUEUE_MESSAGE_MODES = ("queue", "immediate")
+
+
+def _queue_message_mode(value) -> str:
+    """队列消息模式：只认 queue（排队入列）/ immediate（直接发送），其余一律回落 queue。"""
+    text = str(value or "").strip().lower()
+    return text if text in _QUEUE_MESSAGE_MODES else "queue"
+
+
 # ── 工作目录 ──
 
 class WorkspaceOut(BaseModel):
@@ -203,6 +213,9 @@ def load_persisted_workspace() -> None:
     # 任务完成系统通知档位：与 PUT 同口径夹紧，否则重启后回落为默认档
     if "task_notify_mode" in data:
         settings.task_notify_mode = _notify_mode(data["task_notify_mode"])
+    # plan-20261120-queue-message-mode：启动恢复队列消息默认模式
+    if "queue_message_mode" in data:
+        settings.queue_message_mode = _queue_message_mode(data["queue_message_mode"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
     # 采样温度与最大输出：与 PUT 同口径夹紧，启动即生效（否则重启后回落到环境变量或默认值）
@@ -320,6 +333,10 @@ def load_persisted_workspace() -> None:
             pass
     if "subagent_reasoning_effort" in data:
         settings.subagent_reasoning_effort = str(data["subagent_reasoning_effort"] or "")[:20]
+    if "subagent_explore_enabled" in data:
+        settings.subagent_explore_enabled = bool(data["subagent_explore_enabled"])
+    if "subagent_execute_enabled" in data:
+        settings.subagent_execute_enabled = bool(data["subagent_execute_enabled"])
     if "subagent_enabled" in data:
         settings.subagent_enabled = bool(data["subagent_enabled"])
     # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除；
@@ -425,6 +442,8 @@ class GlobalSettingsOut(BaseModel):
     show_message_search: bool = False
     # 任务完成系统通知（仅桌面版）：always 始终开启 / unfocused 仅窗口未聚焦时（默认）/ off 关闭
     task_notify_mode: str = "unfocused"
+    # plan-20261120-queue-message-mode：任务执行中新消息处理方式（queue 排队入列 / immediate 直接发送）
+    queue_message_mode: str = "queue"
     # v3.0 (plan-88): 计划模式允许访问工作区外路径
     plan_mode_allow_outside_access: bool = False
     # v32 (plan-89): 沙箱模式（三态：workspace-write / read-only / danger-full-access）
@@ -468,6 +487,8 @@ class GlobalSettingsOut(BaseModel):
     subagent_model_id: int = 0
     subagent_reasoning_effort: str = ""
     # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
+    subagent_explore_enabled: bool = True
+    subagent_execute_enabled: bool = True
     subagent_enabled: bool = True
     # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除——子会话下线，
     # GUI 操作改由子代理承担。
@@ -554,6 +575,8 @@ class GlobalSettingsIn(BaseModel):
     show_message_search: bool | None = None
     # 任务完成系统通知档位（always / unfocused / off）
     task_notify_mode: str | None = None
+    # plan-20261120-queue-message-mode：队列消息处理方式（queue / immediate）
+    queue_message_mode: str | None = None
     plan_mode_allow_outside_access: bool | None = None
     sandbox_mode: str | None = None
     # v36 (plan-321-1600 R2): 工作目录外读取自动审批
@@ -587,6 +610,8 @@ class GlobalSettingsIn(BaseModel):
     subagent_model_id: int | None = None
     subagent_reasoning_effort: str | None = None
     # plan-156-619 S4e：子代理开关（plan-20261020-subsession-switch 起只管子代理）
+    subagent_explore_enabled: bool | None = None
+    subagent_execute_enabled: bool | None = None
     subagent_enabled: bool | None = None
     # plan-549-2281：subsession_enabled / operator_subsession_enabled 已删除；
     # 操控思考深度改名 operator_subagent_effort。
@@ -648,6 +673,8 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         show_message_search=data.get("show_message_search", False),
         # 任务完成系统通知档位（夹紧，缺省回落运行时值；默认 unfocused）
         task_notify_mode=_notify_mode(data.get("task_notify_mode", settings.task_notify_mode)),
+        # plan-20261120-queue-message-mode：队列消息模式（夹紧，缺省回落 queue）
+        queue_message_mode=_queue_message_mode(data.get("queue_message_mode", settings.queue_message_mode)),
         plan_mode_allow_outside_access=data.get("plan_mode_allow_outside_access", False),
         sandbox_mode=data.get("sandbox_mode", settings.sandbox_mode),
         # v36 (plan-321-1600 R2/R3): 两项自动审批/自动额度开关（回填持久化值）
@@ -698,6 +725,8 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         # plan-156-619 S4d：子会话默认模型 / 思考深度
         subagent_model_id=data.get("subagent_model_id", settings.subagent_model_id),
         subagent_reasoning_effort=data.get("subagent_reasoning_effort", settings.subagent_reasoning_effort),
+        subagent_explore_enabled=bool(data.get("subagent_explore_enabled", settings.subagent_explore_enabled)),
+        subagent_execute_enabled=bool(data.get("subagent_execute_enabled", settings.subagent_execute_enabled)),
         subagent_enabled=bool(data.get("subagent_enabled", settings.subagent_enabled)),
         # plan-549-2281：subsession_enabled / operator_subsession_enabled 已从响应体移除；
         # 操控思考深度按「新键优先、旧键回落」读取，保证升级用户的旧设置不丢。
@@ -846,6 +875,10 @@ def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         _nm = _notify_mode(body.task_notify_mode)
         data["task_notify_mode"] = _nm
         updates["task_notify_mode"] = _nm
+    if body.queue_message_mode is not None:
+        _qm = _queue_message_mode(body.queue_message_mode)
+        data["queue_message_mode"] = _qm
+        updates["queue_message_mode"] = _qm
     if body.plan_mode_allow_outside_access is not None:
         data["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
         updates["plan_mode_allow_outside_access"] = body.plan_mode_allow_outside_access
@@ -950,6 +983,10 @@ def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         data["subagent_reasoning_effort"] = _se
         updates["subagent_reasoning_effort"] = _se
     # plan-549-2281：子代理开关保存；子会话开关已删除。
+    if body.subagent_explore_enabled is not None:
+        data["subagent_explore_enabled"] = updates["subagent_explore_enabled"] = body.subagent_explore_enabled
+    if body.subagent_execute_enabled is not None:
+        data["subagent_execute_enabled"] = updates["subagent_execute_enabled"] = body.subagent_execute_enabled
     if body.subagent_enabled is not None:
         data["subagent_enabled"] = bool(body.subagent_enabled)
         updates["subagent_enabled"] = bool(body.subagent_enabled)

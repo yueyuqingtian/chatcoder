@@ -14,6 +14,7 @@ import { registerReconcileTask, runReconcile, isReconcilePending, RECONCILE_ORDE
 import { recordComponentRender, recordDerivation } from "../../perf/metrics";
 import { TurnGroup } from "./TurnGroup";
 import { JumpDots } from "./JumpDots";
+import type { JumpDotItem } from "./jumpDotsModel";
 import { DebugCard } from "./DebugCard";
 import { StreamingTail } from "./StreamingTail";
 import { StreamingText } from "./StreamingText";
@@ -30,7 +31,7 @@ import { refreshMessageWindow, olderMessages, aroundMessages, aroundTurnMessages
 import { useUiStore } from "../../store/ui";
 import { useScoped, useScopedGetter, ConvoScopeContext } from "./convoScope";
 import { latestWorkflowEndMs, selectSessionWorkflowBusy, useWorkflowStore } from "../../store/workflow";
-import { api } from "../../api/client";
+import { api, type SessionOutlineItem } from "../../api/client";
 import { Button, Empty, Tooltip } from "../ui";
 import { StickyBottom } from "./stickyBottom";
 import { parseUtc } from "../../utils/time";
@@ -460,6 +461,12 @@ function MessageFlowCore({
   const jumpRafRef = useRef(0);
   const jumpTtlRef = useRef(0);
   const jumpCleanupRef = useRef<(() => void) | null>(null);
+  // plan-20261121-jumpdots-v2：跨分页轻量用户消息大纲 + 未加载跳页定位状态
+  const [outline, setOutline] = useState<SessionOutlineItem[] | null>(null);
+  const [outlineRevision, setOutlineRevision] = useState<number | null>(null);
+  const [pendingJumpDot, setPendingJumpDot] = useState<{ messageId: number; turnId: number | null; loaded?: boolean } | null>(null);
+  const [loadingJumpMsgId, setLoadingJumpMsgId] = useState<number | null>(null);
+  const [scrollReleaseSignal, setScrollReleaseSignal] = useState(0);
 
   const hasStreaming = Boolean(running && streamingNode);
   const hasTrailing = Boolean(trailingNode);
@@ -863,10 +870,27 @@ function MessageFlowCore({
    *   ③ 判定条件成立的那一刻根本没有 scroll 事件（滚动已到头）。
    * 现在：滚动事件、解除跟随、以及冷却到期三条路径都汇到这里；判定条件本身不变
    * （近顶 + 非跟随 + 400ms 冷却），因此不会退回 plan-630-2590 修掉的「自持加载回路」。 */
+  /** 判断滚轮向上时是否被内嵌可滚动子容器（代码块 / 工具输出等）消费 */
+  const innerCanScrollUp = useCallback((root: HTMLElement, target: EventTarget | null): boolean => {
+    let node = target instanceof Element ? target : null;
+    while (node && node !== root) {
+      if (node instanceof HTMLElement && node.scrollHeight > node.clientHeight + 1 && node.scrollTop > 0.5) {
+        const oy = getComputedStyle(node).overflowY;
+        if (oy === "auto" || oy === "scroll" || oy === "overlay") return true;
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }, []);
+
   const maybeLoadOlder = useCallback(() => {
     const el = parentRef.current;
-    if (!el || !positioned || sticky.isFollowing()) return;
-    const nearTopPx = Math.min(200, el.clientHeight * 0.3);
+    if (!el || !positioned || !history.hasBefore || sticky.isFollowing() || spyLockRef.current != null) return;
+    // plan-20261123-ux-fixes：改由 messageHistory 精确标记跳页断层（disjointBefore），
+    // 修复旧逻辑拿 firstLoadedMsgId < history.before 判断时，被后端分页 page.context 中
+    // 跨页 tool_call / 续跑系统消息永久误判成断层、导致往上滚动永不自动加载历史的问题。
+    if (history.disjointBefore) return;
+    const nearTopPx = historyThreadId == null ? Math.min(320, el.clientHeight * 0.35) : Math.min(200, el.clientHeight * 0.3);
     if (el.scrollTop >= nearTopPx) return;
     const wait = lastOlderAtRef.current + 400 - performance.now();
     if (wait > 0) {
@@ -879,7 +903,7 @@ function MessageFlowCore({
       return;
     }
     void loadOlder();
-  }, [positioned, sticky, loadOlder]);
+  }, [positioned, sticky, loadOlder, history.hasBefore, history.disjointBefore, historyThreadId]);
   olderCheckRef.current = maybeLoadOlder;
 
   useLayoutEffect(() => {
@@ -1684,6 +1708,96 @@ function MessageFlowCore({
     clearScrollTarget?.();
   }, [scrollTarget, entries, jumpToIndex, clearScrollTarget, historySessionId, historyThreadId]);
 
+  // plan-20261121-jumpdots-v2：全会话用户消息轻量大纲同步 + 未加载分页按需定位
+  const maxLoadedUserMsgId = useMemo(() => {
+    let maxId = 0;
+    for (const entry of entries) {
+      if (entry.kind !== "turn") continue;
+      for (const it of entry.items) {
+        if (it.kind !== "user") continue;
+        const id = Number(it.msg.id) || 0;
+        if (id > maxId && id < 1e12) maxId = id;
+      }
+    }
+    return maxId;
+  }, [entries]);
+
+  const missingOutlineCount = useMemo(() => {
+    if (!outline || history.before == null || !loadedMessageIds) return 0;
+    let count = 0;
+    for (const item of outline) {
+      if (item.message_id >= history.before && !loadedMessageIds.has(item.message_id)) count++;
+    }
+    return count;
+  }, [outline, history.before, loadedMessageIds]);
+
+  const outlineFetchKeyRef = useRef("");
+  const maxOutlineMsgId = outline && outline.length > 0 ? outline[outline.length - 1].message_id : 0;
+  const needsOutlineFetch = outline == null
+    || (history.revision >= 0 && outlineRevision != null && history.revision !== outlineRevision)
+    || maxLoadedUserMsgId > maxOutlineMsgId
+    || missingOutlineCount > 0;
+
+  useEffect(() => {
+    if (!jumpDots || historySessionId == null || !needsOutlineFetch) return;
+    const reqKey = `${historySessionId}:${historyThreadId ?? "main"}:${history.revision}:${maxLoadedUserMsgId}:${missingOutlineCount}`;
+    if (outlineFetchKeyRef.current === reqKey) return;
+    outlineFetchKeyRef.current = reqKey;
+    const controller = new AbortController();
+    void api.sessionOutline(historySessionId, historyThreadId, controller.signal).then((res) => {
+      if (controller.signal.aborted) return;
+      setOutline(res.items);
+      setOutlineRevision(res.revision);
+    }).catch(() => {});
+    return () => { controller.abort(); };
+  }, [jumpDots, historySessionId, historyThreadId, needsOutlineFetch, history.revision, maxLoadedUserMsgId, missingOutlineCount]);
+
+  useEffect(() => {
+    if (!pendingJumpDot || historySessionId == null) return;
+    const idx = entries.findIndex((entry) => (
+      entry.kind === "turn"
+      && entry.items.some((it) => it.kind === "user" && Number(it.msg.id) === pendingJumpDot.messageId)
+    ));
+    if (idx >= 0) {
+      jumpToIndex(idx, "start", pendingJumpDot.messageId);
+      setPendingJumpDot(null);
+      setLoadingJumpMsgId(null);
+      return;
+    }
+    if (pendingJumpDot.loaded) {
+      setPendingJumpDot(null);
+      setLoadingJumpMsgId(null);
+      return;
+    }
+    let cancelled = false;
+    const req = pendingJumpDot.turnId != null
+      ? aroundTurnMessages(historySessionId, pendingJumpDot.turnId, historyThreadId)
+      : aroundMessages(historySessionId, pendingJumpDot.messageId, historyThreadId);
+    void req.then((messages) => {
+      if (cancelled) return;
+      mergeHistoryIntoChat(historySessionId, messages, historyThreadId);
+      setPendingJumpDot((cur) => (cur ? { ...cur, loaded: true } : null));
+    }).catch(() => {
+      if (!cancelled) {
+        setPendingJumpDot(null);
+        setLoadingJumpMsgId(null);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [pendingJumpDot, entries, historySessionId, historyThreadId, jumpToIndex]);
+
+  const handleJumpDot = useCallback((item: JumpDotItem) => {
+    if (item.entryIndex >= 0) {
+      setPendingJumpDot(null);
+      setLoadingJumpMsgId(null);
+      jumpToIndex(item.entryIndex, "start", item.messageId);
+      return;
+    }
+    if (historySessionId == null) return;
+    setLoadingJumpMsgId(item.messageId);
+    setPendingJumpDot({ messageId: item.messageId, turnId: item.turnId });
+  }, [historySessionId, jumpToIndex]);
+
   /* 当前高亮项：远端命中可能还没被拉进已加载窗口（返回 -1）。
    * 旧实现 -1 会让「当前项」永远匹配不上——一个高亮都不亮，计数却照旧显示。
    * 本地分支下 activeMatchIndex 越界时回退到最后一处命中，避免同样的「全不高亮」。 */
@@ -1790,7 +1904,16 @@ function MessageFlowCore({
         </div>
       )}
 
-      {jumpDots && <JumpDots entries={entries} activeIndex={activeEntryIndex} onJump={(entry) => jumpToIndex(entries.indexOf(entry), "start")} />}
+      {jumpDots && (
+        <JumpDots
+          entries={entries}
+          outline={outline}
+          activeIndex={activeEntryIndex}
+          loadingMessageId={loadingJumpMsgId}
+          scrollReleaseSignal={scrollReleaseSignal}
+          onJump={handleJumpDot}
+        />
+      )}
 
       {/* plan-282-1434（B6）：首次填充贴底完成前隐藏内容，避免看到"从顶部滚下来"的过程 */}
       <div
@@ -1799,6 +1922,19 @@ function MessageFlowCore({
         aria-label={historyThreadId != null ? "子代理消息流" : "消息流"}
         className={"message-flow" + (positioned || totalCount === 0 ? "" : " is-positioning")}
         onScroll={onScroll}
+        onWheel={(e) => {
+          setScrollReleaseSignal((n) => n + 1);
+          // plan-20261123-ux-fixes：已在顶部（scrollTop=0）或当前已加载消息不足一屏时，
+          // 向上滚轮不会产生 scroll 事件，需在 wheel 上主动触发历史加载。
+          const el = parentRef.current;
+          if (!el || e.deltaY >= 0 || !history.hasBefore) return;
+          if (innerCanScrollUp(el, e.target)) return;
+          const nearTopPx = historyThreadId == null ? Math.min(320, el.clientHeight * 0.35) : Math.min(200, el.clientHeight * 0.3);
+          if (el.scrollTop > nearTopPx) return;
+          if (sticky.isFollowing() && el.scrollHeight <= el.clientHeight + 2) sticky.release();
+          maybeLoadOlder();
+        }}
+        onPointerDown={() => setScrollReleaseSignal((n) => n + 1)}
       >
         {totalCount === 0 ? (
           /* plan-621-2572：会话消息为空时补充温和的操作引导副标题 */
@@ -1886,6 +2022,7 @@ function MainMessageFlow({
   className,
   emptyText,
   suggestionCard,
+  jumpDots = true,
 }: {
   visible?: boolean;
   actions?: "full" | "copy-only" | "none";
@@ -1895,6 +2032,7 @@ function MainMessageFlow({
   emptyText?: string;
   /** plan-156-621：false 时不渲染主会话的后续任务建议卡（侧边对话场景） */
   suggestionCard?: boolean;
+  jumpDots?: boolean;
 }) {
   const getScoped = useScopedGetter();
   const messages = useScoped("messages");
@@ -1960,6 +2098,9 @@ function MainMessageFlow({
         startedAt: string | null;
         endedAt: string | null;
         workflowKind: string | null;
+        subagentMode: string | null;
+        subagentRole: string | null;
+        subagentProfileName: string | null;
       }>
     >();
     for (const [aid, m] of Object.entries(subagentMeta)) {
@@ -1976,6 +2117,9 @@ function MainMessageFlow({
         startedAt: m.startedAt ?? null,
         endedAt: m.endedAt ?? null,
         workflowKind: m.workflow?.kind ?? null,
+        subagentMode: m.subagentMode ?? null,
+        subagentRole: m.subagentRole ?? null,
+        subagentProfileName: m.subagentProfileName ?? null,
       });
       map.set(m.turnId, list);
     }
@@ -2204,7 +2348,7 @@ function MainMessageFlow({
       forceBottomKey={userMsgSeq}
       sessionKey={currentSessionId ?? 0}
       onFlowReady={setFlowReady}
-      jumpDots
+      jumpDots={jumpDots}
       search
       scrollTarget={resolvedScrollTarget}
       clearScrollTarget={effectiveClearScrollTarget}
@@ -2401,6 +2545,7 @@ export function MessageFlow(props: MessageStreamProps) {
       visible={props.visible !== false}
       actions={props.features?.actions ?? "full"}
       suggestionCard={props.features?.suggestionCard ?? true}
+      jumpDots={props.features?.jumpDots ?? true}
       /* plan-549-2281（第7项）：这里**不要**无条件把 props.scrollTarget 传下去。
        *  props 上没传时它是 undefined，而不是 null——传给 MainMessageFlow 会盖掉
        *  「props 未指定就回落到 store」的语义（见那边的 effectiveScrollTarget）。

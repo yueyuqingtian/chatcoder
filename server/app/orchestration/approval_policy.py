@@ -197,6 +197,8 @@ _READ_TOOLS = frozenset({
     # 只往应用自身的 .chatcoder 缓存落文件（与 codebase_search 的索引缓存同口径），
     # 不触碰用户文件；符号索引的开启同样只是建应用侧索引。
     "feature_lookup", "symbol_index_enable",
+    # plan-interactive-ui：消息流内嵌可交互界面纯展示、不写磁盘不联网，归入只读工具
+    "present_ui",
 })
 
 # 记忆写工具（plan-537-2256）：memory_write 会往记忆库落新行，属改变状态，
@@ -660,6 +662,10 @@ def decide(
     approval_mode = normalize_approval_mode(getattr(ctx, "approval_mode", None))
 
     info = classify(tool_name, args, ctx, risk_level=risk_level)
+    if info.action == ACTION_READ_OUTSIDE and getattr(ctx, "workspace_read_only", False):
+        return Decision(VERDICT_DENY, info.action, label=info.label,
+                        reason="探索智能体只能读取工作区内的代码。")
+
 
     # 1. 执行模式硬边界
     # plan-560-2311 C1：边界判定改用按 kind 归一的判定档。此前直接拿模式名做等值比较，

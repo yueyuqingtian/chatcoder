@@ -27,7 +27,7 @@ async def extract_and_persist_artifacts(
     ids: list[int] = []
 
     # 代码块
-    for i, m in enumerate(_CODE_BLOCK_RE.finditer(text), start=1):
+    for i, m in enumerate(_CODE_BLOCK_RE.finditer(text or ""), start=1):
         lang = m.group(1) or "text"
         code = m.group(2)
         first_line = code.strip().split("\n", 1)[0][:80]
@@ -42,15 +42,15 @@ async def extract_and_persist_artifacts(
         )
         ids.append(art_id)
 
-    # 文件写入产物
-    for p in write_paths or []:
+    # 文件写入产物（按路径去重保序，覆盖工具写盘与非工具生成文件）
+    for p in dict.fromkeys(str(x) for x in (write_paths or []) if x):
         art_id = await task_service.create_artifact(
             db,
             task_id=task_id,
             type="file",
             title=f"文件:{p}",
             storage_ref=f"workspace://{p}",
-            summary=f"由 fs.write 产出 {p}",
+            summary=f"本轮产出文件 {p}",
             files=[p],
         )
         ids.append(art_id)

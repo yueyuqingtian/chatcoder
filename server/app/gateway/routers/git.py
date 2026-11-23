@@ -3,6 +3,7 @@
 
 plan-20261019-git-multirepo：同一项目目录下可能有多个独立仓库（如前端 + 后端），接口统一增加可选的
 `repo`（相对项目根的子目录，空 = 根仓库）；`session_id` 指定时以该会话的工作树目录为准。"""
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +17,15 @@ from app.services.git_service import GitError
 from app.services.project_service import get_project
 
 router = APIRouter(prefix="/git", tags=["git"])
+_sync_progress: dict[str, dict] = {}
+_SYNC_STAGES = {
+    "enumerating objects": "counting",
+    "counting objects": "counting",
+    "compressing objects": "compressing",
+    "receiving objects": "receiving",
+    "writing objects": "writing",
+    "resolving deltas": "resolving",
+}
 
 
 async def _workspace(db: AsyncSession, project_id: int, session_id: int | None = None) -> str:
@@ -63,6 +73,7 @@ class PathsBody(_Target):
 
 class DiscardBody(PathsBody):
     untracked: list[str] = Field(default_factory=list, max_length=500)
+    preserve_index: bool = False
 
 
 class CommitBody(_Target):
@@ -72,6 +83,25 @@ class CommitBody(_Target):
 
 class SyncBody(_Target):
     action: Literal["fetch", "pull", "push"]
+    op_id: str | None = Field(default=None, max_length=80)
+
+
+class SyncCancelBody(BaseModel):
+    op_id: str = Field(min_length=1, max_length=80)
+
+
+class StashPushBody(_Target):
+    message: str = Field(default="", max_length=500)
+    include_untracked: bool = True
+    paths: list[str] | None = Field(default=None, max_length=500)
+
+
+class StashIndexBody(_Target):
+    index: int = Field(default=0, ge=0)
+
+
+class HunkBody(_Target):
+    patch: str = Field(min_length=1, max_length=250_000)
 
 
 class BranchBody(_Target):
@@ -174,7 +204,9 @@ async def unstage(body: PathsBody, db: AsyncSession = Depends(get_db)):
 
 @router.post("/discard")
 async def discard(body: DiscardBody, db: AsyncSession = Depends(get_db)):
-    await _call(git_service.discard(await _body_path(db, body), body.paths, body.untracked))
+    await _call(git_service.discard(
+        await _body_path(db, body), body.paths, body.untracked, preserve_index=body.preserve_index,
+    ))
     return {"ok": True}
 
 
@@ -187,7 +219,98 @@ async def commit(body: CommitBody, db: AsyncSession = Depends(get_db)):
 @router.post("/sync")
 async def sync(body: SyncBody, db: AsyncSession = Depends(get_db)):
     # 拉取冲突不是错误：结果带着 conflict / conflicts / state，界面直接进入冲突处理
-    return {"ok": True, **(await _call(git_service.sync(await _body_path(db, body), body.action)))}
+    op_id = body.op_id
+    if op_id and op_id in _sync_progress:
+        raise HTTPException(409, "此同步操作已在执行")
+    if op_id:
+        _sync_progress[op_id] = {"phase": "connecting", "percent": None}
+
+    async def on_progress(line: str) -> None:
+        if not op_id:
+            return
+        stage, _, message = line.removeprefix("remote:").strip().partition(":")
+        phase = _SYNC_STAGES.get(stage.lower())
+        if phase:
+            percent = re.search(r"(\d{1,3})%", message)
+            _sync_progress[op_id] = {"phase": phase, "percent": min(100, int(percent[1])) if percent else None}
+
+    try:
+        workspace = await _body_path(db, body)
+        if op_id and _sync_progress[op_id]["phase"] == "cancelled":
+            return {"ok": True, "cancelled": True}
+        result = await _call(git_service.sync(
+            workspace, body.action, op_id=op_id, on_progress=on_progress if op_id else None,
+        ))
+        return {"ok": True, **result}
+    finally:
+        if op_id:
+            _sync_progress.pop(op_id, None)
+
+
+@router.get("/sync/progress")
+async def sync_progress(op_id: str = Query(..., min_length=1, max_length=80)):
+    return _sync_progress.get(op_id, {"phase": None, "percent": None})
+
+
+@router.post("/sync/cancel")
+async def sync_cancel(body: SyncCancelBody):
+    cancelled = await git_service.cancel_sync(body.op_id)
+    if not cancelled and body.op_id in _sync_progress:
+        _sync_progress[body.op_id] = {"phase": "cancelled", "percent": None}
+        cancelled = True
+    return {"ok": True, "cancelled": cancelled}
+
+
+@router.post("/reset-soft")
+async def reset_soft(body: ProjectBody, db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.reset_soft_last(await _body_path(db, body)))
+
+
+@router.post("/stage-hunk")
+async def stage_hunk(body: HunkBody, db: AsyncSession = Depends(get_db)):
+    await _call(git_service.apply_patch_to_index(await _body_path(db, body), body.patch, reverse=False))
+    return {"ok": True}
+
+
+@router.post("/unstage-hunk")
+async def unstage_hunk(body: HunkBody, db: AsyncSession = Depends(get_db)):
+    await _call(git_service.apply_patch_to_index(await _body_path(db, body), body.patch, reverse=True))
+    return {"ok": True}
+
+
+@router.get("/stashes")
+async def stashes(project_id: int = Query(...), repo: str | None = _REPO_Q,
+                  session_id: int | None = Query(None), db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_list(await _project_path(db, project_id, repo, session_id)))
+
+
+@router.get("/stash/show")
+async def stash_show(project_id: int = Query(...), index: int = Query(0, ge=0),
+                     repo: str | None = _REPO_Q, session_id: int | None = Query(None),
+                     db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_show(await _project_path(db, project_id, repo, session_id), index))
+
+
+@router.post("/stash/push")
+async def stash_push(body: StashPushBody, db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_push(
+        await _body_path(db, body), body.message, body.include_untracked, body.paths,
+    ))
+
+
+@router.post("/stash/apply")
+async def stash_apply(body: StashIndexBody, db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_apply(await _body_path(db, body), body.index))
+
+
+@router.post("/stash/pop")
+async def stash_pop(body: StashIndexBody, db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_pop(await _body_path(db, body), body.index))
+
+
+@router.post("/stash/drop")
+async def stash_drop(body: StashIndexBody, db: AsyncSession = Depends(get_db)):
+    return await _call(git_service.stash_drop(await _body_path(db, body), body.index))
 
 
 @router.post("/branch")

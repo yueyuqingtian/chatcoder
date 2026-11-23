@@ -7,7 +7,8 @@ const pending = new Map<number, (lines: string[] | null) => void>();
 const cache = new Map<string, { lines: string[]; chars: number }>();
 let cacheChars = 0;
 
-function highlight(source: string, language: string, done: (lines: string[] | null) => void): () => void {
+/** 借助共享 Highlight Worker 异步按行高亮代码，命中缓存时同步回调。 */
+export function highlightCodeLines(source: string, language: string, done: (lines: string[] | null) => void): () => void {
   const key = language + "\0" + source;
   const hit = cache.get(key);
   if (hit) { cache.delete(key); cache.set(key, hit); done(hit.lines); return () => {}; }
@@ -44,7 +45,7 @@ function highlight(source: string, language: string, done: (lines: string[] | nu
 /** plan-20261101-performance：只挂载附近的代码行，复制按钮仍取完整原文。 */
 export const LongCode = memo(function LongCode({ source, language, live = false }: { source: string; language: string; live?: boolean }) {
   const [highlighted, setHighlighted] = useState<{ source: string; lines: string[] } | null>(null);
-  useEffect(() => live ? undefined : highlight(source, language, (lines) => {
+  useEffect(() => live ? undefined : highlightCodeLines(source, language, (lines) => {
     if (lines) setHighlighted({ source, lines });
   }), [source, language, live]);
   const chunks = useMemo(() => {

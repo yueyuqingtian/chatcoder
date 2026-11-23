@@ -96,6 +96,8 @@ _EXTENSION_REAL_NAMES: tuple[str, ...] = (
     # 微应用（plan-693-2868 §7 P0 第 1 条：ta3 通道先行验证——三名缺任一，
     # ta3 会话下模型看不到也调不动，且 disguise_tools 会静默剔除，无任何报错）
     "microapp_list", "microapp_call", "microapp_validate",
+    # plan-interactive-ui：消息流内嵌交互界面与多版式比选工具
+    "present_ui",
 )
 
 TO_TA3_EXTENSION: dict[str, str] = {
@@ -370,10 +372,13 @@ def _restore_get_memory(args: dict) -> dict:
 
 
 def _restore_subagent(raw: dict, args: dict) -> dict:
+    for key in ("profile_id", "write_scope", "validation_resources"):
+        if key in raw:
+            args[key] = raw[key]
     if "inherit_context" in args:
         args["inherit_context"] = _as_bool(args["inherit_context"], False)
     # 官方 Explore（只读研究）/ Plan（只读出计划）→ 本项目只读子代理；其余缺省为可写
-    if (str(raw.get("mode") or "").strip().lower() not in {"readonly", "agent"}
+    if ("profile_id" not in raw and str(raw.get("mode") or "").strip().lower() not in {"readonly", "agent"}
             and str(raw.get("subagent_type") or "").strip().lower() in _READONLY_SUBAGENT_TYPES):
         args["explore"] = True
         args["mode"] = "readonly"
@@ -412,7 +417,10 @@ def _execution_props(alias: str) -> set[str] | None:
     d = schema["function"] if schema else None
     if d is None:
         return None
-    return set((d.get("parameters") or {}).get("properties") or {})
+    props = set((d.get("parameters") or {}).get("properties") or {})
+    if alias == "SubAgent":
+        props.update({"profile_id", "write_scope", "validation_resources"})
+    return props
 
 
 def _disguise_ask_user(args: dict) -> dict:

@@ -60,7 +60,14 @@ async def _reset_shared_test_db():
                                    ("ta3_auth", "oauth_client_id", "VARCHAR(80)"),
                                    ("ta3_auth", "issued_at", "VARCHAR(40)"),
                                    ("ta3_auth", "access_expires_at", "VARCHAR(40)"),
-                                   ("ta3_auth", "session_generation", "INTEGER DEFAULT 0 NOT NULL")):
+                                   ("ta3_auth", "session_generation", "INTEGER DEFAULT 0 NOT NULL"),
+                                   ("agents", "subagent_mode", "VARCHAR(20)"),
+                                   ("agents", "subagent_role", "VARCHAR(20)"),
+                                   ("agents", "subagent_profile_id", "BIGINT"),
+                                   ("agents", "subagent_profile_name", "VARCHAR(60)"),
+                                   ("subagent_profiles", "display_name", "VARCHAR(60)"),
+                                   ("subagent_profiles", "execution_mode", "VARCHAR(16)"),
+                                   ("subagent_profiles", "revision", "INTEGER DEFAULT 0 NOT NULL")):
             existing = (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).all()
             if not any(row[1] == column for row in existing):
                 await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")

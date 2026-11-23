@@ -214,7 +214,7 @@ const MICROAPP_CSP =
 const MICROAPP_PARTITION = "persist:microapp";
 
 // 宿主桥 preload 的绝对路径（plan-693-2868 · docs/app1/11-host-bridge-protocol.md §3）。
-// **只**注入给 src 以 app://microapp/ 开头的 webview，其余 webview 一律没有 preload；
+// **只**注入给 src 以 app://microapp/ 开头的 webview，普通网页使用独立的登录监听脚本。
 // 见 createWindow 里 will-attach-webview 的条件注入与那里的越权警告注释。
 const MICROAPP_PRELOAD_PATH = path.join(__dirname, "microapp-preload.cjs");
 
@@ -225,8 +225,8 @@ const MICROAPP_PRELOAD_PATH = path.join(__dirname, "microapp-preload.cjs");
  *  （AI 调 microapp_call 会报 bridge-missing），同时它也绕过了 sandbox / 不注入 preload 的收敛。
  *  两条路径必须逐字同一份规则，所以只能有一处实现。
  */
-function hardenWebviewAttach(_event, webPreferences, params) {
-  // plan-693-2868 · docs/app1/11-host-bridge-protocol.md §9-1：宿主桥 preload **只**给微应用注入。
+function hardenWebviewAttach(event, webPreferences, params) {
+  // plan-693-2868：微应用桥只按受信来源注入，渲染层传入的 preload 始终丢弃。
   // 顺序是先无条件 delete、再按来源决定是否注入——这样 <webview preload="..."> 属性
   // （渲染层/页面都可控）在任何情况下都不会生效。
   delete webPreferences.preload;
@@ -236,7 +236,7 @@ function hardenWebviewAttach(_event, webPreferences, params) {
   webPreferences.backgroundThrottling = false;
   // plan-693-2868 §6.2 / §7 P0-4 / D24：webview 一律进 Chromium 渲染器沙箱。
   // 微应用是无审核来源的第三方页面（§4 D22），除 CSP 断网外还需要进程级隔离兜底；
-  // 浏览器面板本来就没有 preload、没有 Node 能力，加 sandbox 不改变它的功能面。
+  // 普通网页没有 Node 能力，登录监听脚本在沙箱内的隔离世界运行。
   webPreferences.sandbox = true;
 
   // ⚠ 高危判定（写错即越权，务必保持原样）：
@@ -246,14 +246,14 @@ function hardenWebviewAttach(_event, webPreferences, params) {
   //   src = "APP://MICROAPP/x"（忽略大小写命中）
   // 这类普通网页也会走到下面的注入分支，浏览器面板里的任意 http 站点就直接拿到
   // window.microapp（exec / 读文件全通），宿主通道等于对公网开放。
-  // 空 src、app://vendor/、http(s)://、file://、about:blank 全部走「不注入」分支
-  // （即上面那行 delete 生效，与改动前行为完全一致）。
   if (String((params && params.src) || "").startsWith("app://microapp/")) {
     // 微应用：注入只暴露 window.microapp 四项能力的 preload（electron/microapp-preload.cjs）。
     // 上面已设置的 sandbox / contextIsolation / nodeIntegration 全部保留，注入不放宽任何一条。
     webPreferences.preload = MICROAPP_PRELOAD_PATH;
+  } else if (event.sender === mainWindow?.webContents && /^https?:\/\//i.test(String(params?.src || ""))) {
+    // plan-771-3177：固定的登录监听脚本没有 contextBridge，也不接受网页调用。
+    webPreferences.preload = path.join(__dirname, "browser-login-preload.cjs");
   }
-  // 非微应用：不做额外拦截（浏览器面板要能加载任意 http(s)），preload 已被删除
 }
 
 /** 扩展名 → Content-Type（方案 §7 P0-3 列举的 12 类，其余按二进制下发）。 */
@@ -2450,16 +2450,30 @@ ipcMain.on("pty:kill", (_event, id) => {
   }
 });
 
-// ── 内置浏览器 · AI 驱动（plan-20261015-browser-agent）──
-// 面板 webview 的后台节流、CDP 网络/弹窗接管、隐藏态截图与新窗口转标签，详见 browser-agent.cjs。
+// ── 内置浏览器 · 本地加密凭据库与 AI 驱动（plan-771-3177 / plan-20261015-browser-agent）──
+// safeStorage 加密凭据仅服务用户侧 IPC，不暴露给后端或 AI 工具；同时向 browser-agent 提供右键菜单自动填充能力。
+const browserVaultApi = require("./browser-vault.cjs")({ getMainWindow: () => mainWindow, logErr });
+browserVaultApi.registerIpc();
+
+// 面板 webview 的后台节流、CDP 网络/弹窗接管、隐藏态截图、原生右键菜单与新窗口转标签，详见 browser-agent.cjs。
 // plan-693-2868 · docs/app1/11-host-bridge-protocol.md：微应用宿主桥（uid 映射 / 上行转发 /
 // 下行推送）也在同一模块里，建窗时通过返回的 hookMainWindow 挂上。
-browserAgentApi = require("./browser-agent.cjs")({ getMainWindow: () => mainWindow, log, logErr });
+browserAgentApi = require("./browser-agent.cjs")({
+  getMainWindow: () => mainWindow,
+  browserVault: browserVaultApi,
+  log,
+  logErr,
+});
 
-// ── IPC:webview 元素标注与开发者工具 ──
-ipcMain.on("webview:annotate", (_event, payload) => {
-  // 转发给渲染进程（主窗口），由前端写入 Composer 草稿
-  if (mainWindow) mainWindow.webContents.send("browser:annotation", payload);
+// ── IPC:浏览器工作台 ──
+ipcMain.handle("browser:writeImage", (event, data) => {
+  if (event.sender !== mainWindow?.webContents || typeof data !== "string" || data.length > 40_000_000
+      || !data.startsWith("data:image/png;base64,")) return false;
+  const { clipboard, nativeImage } = require("electron");
+  const image = nativeImage.createFromDataURL(data);
+  if (image.isEmpty()) return false;
+  clipboard.writeImage(image);
+  return true;
 });
 
 ipcMain.handle("browser:openDevTools", (_event, targetWebContentsId) => {

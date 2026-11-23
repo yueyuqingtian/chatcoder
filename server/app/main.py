@@ -12,8 +12,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.gateway.routers import (
+    antigravity_auth,
     archive,
     approvals,
+    browser_data,
     community,
     debug,
     desktop,
@@ -403,6 +405,8 @@ def create_app() -> FastAPI:
     app.include_router(debug.db_router, prefix="/api", tags=["db"])
     # plan-334-1661：电脑操控（操作路线管理 + 内核状态）
     app.include_router(desktop.router, prefix="/api", tags=["desktop"])
+    # plan-771-3177：内置浏览器书签与历史（跨会话全局共享）
+    app.include_router(browser_data.router, prefix="/api", tags=["browser"])
     app.include_router(skills_mcp.router, prefix="/api", tags=["skills-mcp"])
     app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
     app.include_router(usage.router, prefix="/api", tags=["usage"])
@@ -417,6 +421,7 @@ def create_app() -> FastAPI:
     app.include_router(workbuddy_auth.router, prefix="/api", tags=["workbuddy"])
     app.include_router(trae_auth.router, prefix="/api", tags=["trae"])
     app.include_router(kiro_auth.router, prefix="/api", tags=["kiro"])
+    app.include_router(antigravity_auth.router, prefix="/api", tags=["antigravity"])
     app.include_router(upload.router, prefix="/api", tags=["upload"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     # plan-248-1258 M3.2: 代码符号索引管理（索引库页面）

@@ -347,7 +347,7 @@ export function WorkflowSettingsPanel() {
             size="xs"
             onClick={() => window.dispatchEvent(new CustomEvent("chatcoder:open-settings-tab", { detail: { tab: "subagents" } }))}
           >
-            前往子智能体设置
+            前往智能体设置
           </Button>
         </CardRow>
         <CardRow

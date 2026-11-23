@@ -169,8 +169,8 @@
 .cc-send:active:not(:disabled) { transform: scale(0.92); }
 .cc-send:disabled { background: var(--bg-active); color: var(--text-3); cursor: not-allowed; }
 
-/* ── 输入卡下方：工作区胶囊 ─────────────────────────────── */
-.cc-under { display: flex; align-items: center; gap: var(--sp-3); min-height: 26px; margin-top: 6px; padding: 0 2px; }
+/* ── 输入卡下方：工作区胶囊 ───────────────── */
+.cc-under { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); min-height: 26px; margin-top: 6px; padding: 0 2px; container-type: inline-size; }
 .cc-ws {
   display: inline-flex;
   align-items: center;

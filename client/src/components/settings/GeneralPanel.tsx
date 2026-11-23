@@ -8,8 +8,8 @@ import { useUiStore } from "../../store/ui";
 import { useChatStore } from "../../store/chat";
 import { useI18n } from "../../store/i18n";
 import { isFontInstalled } from "../../utils/fontProbe";
-import { Button, Input, Select, Slider, TagInput, type SelectOption } from "../ui";
-import { Row, Sw } from "./shared";
+import { normalizeQueueMessageMode, type QueueMessageMode } from "../composer/queueDelivery";
+import { Button, CardRow, Input, Section, Segmented, Select, Slider, Switch, TagInput, type SelectOption } from "../ui";
 
 /** 终端 Shell 兜底列表（后端探测结果未返回时使用，此时全部视为可用） */
 const TERMINAL_SHELLS: Array<{ value: string; label: string }> = [
@@ -65,6 +65,8 @@ export function GeneralPanel() {
     suggestion_enabled: false,
     // 任务完成系统通知档位（仅桌面版）：always / unfocused / off
     task_notify_mode: "unfocused" as "always" | "unfocused" | "off",
+    // plan-20261120-queue-message-mode：任务执行中新消息处理方式（queue 排队入列 / immediate 直接发送）
+    queue_message_mode: "queue" as QueueMessageMode,
     agent_retry_intervals: "10,20,30",
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
@@ -175,6 +177,7 @@ export function GeneralPanel() {
         task_notify_mode: g.task_notify_mode === "always" || g.task_notify_mode === "off"
           ? g.task_notify_mode
           : "unfocused",
+        queue_message_mode: normalizeQueueMessageMode(g.queue_message_mode),
         agent_retry_intervals: typeof g.agent_retry_intervals === "string" ? g.agent_retry_intervals : "10,20,30",
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
@@ -211,56 +214,57 @@ export function GeneralPanel() {
       style={loaded ? undefined : { pointerEvents: "none", opacity: loadError ? 0.5 : 1 }}
     >
       {loadError && (
-        <div
-          className="settings-card"
-          role="alert"
-          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)", padding: "var(--sp-3) var(--sp-4)" }}
-        >
-          <span style={{ color: "var(--warning)" }}>
-            设置加载失败，当前显示的是默认值；为避免覆盖已保存的配置，修改已暂停保存。
-          </span>
-          <Button size="sm" variant="secondary" onClick={() => void load()}>重试</Button>
-        </div>
+        <Section>
+          <div
+            role="alert"
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-3)" }}
+          >
+            <span style={{ color: "var(--warning)" }}>
+              设置加载失败，当前显示的是默认值；为避免覆盖已保存的配置，修改已暂停保存。
+            </span>
+            <Button size="sm" variant="secondary" onClick={() => void load()}>重试</Button>
+          </div>
+        </Section>
       )}
-      <div className="settings-card">
-        <Row title={t("gp.language")} desc={t("gp.language_desc")}>
+      <Section>
+        <CardRow title={t("gp.language")} desc={t("gp.language_desc")}>
           <Select
             value={ui.language}
             onChange={(v) => ui.setLanguage(v as "zh" | "en")}
             options={[{ value: "zh", label: "中文" }, { value: "en", label: "English" }]}
             aria-label={t("gp.language")}
           />
-        </Row>
-        <Row title={t("gp.http_proxy")} desc={t("gp.http_proxy_desc")}>
+        </CardRow>
+        <CardRow title={t("gp.http_proxy")} desc={t("gp.http_proxy_desc")}>
           <Input placeholder="如 http://127.0.0.1:7890" value={cfg.http_proxy} onChange={(e) => patch({ http_proxy: e.target.value })} style={{ minWidth: 220 }} />
-        </Row>
-        <Row
+        </CardRow>
+        <CardRow
           title={t("gp.terminal_shell")}
           desc={shellMissing ? `${t("gp.terminal_shell_desc")} 当前所选 Shell 未安装，已回退为平台默认。` : t("gp.terminal_shell_desc")}
         >
           <Select value={cfg.terminal_shell} onChange={(v) => patch({ terminal_shell: v })} options={shellOptions} style={{ minWidth: 220 }} aria-label={t("gp.terminal_shell")} />
-        </Row>
-        <Row title={t("gp.terminal_font")} desc={t("gp.terminal_font_desc")}>
+        </CardRow>
+        <CardRow title={t("gp.terminal_font")} desc={t("gp.terminal_font_desc")}>
           <Select value={cfg.terminal_font} onChange={(v) => patch({ terminal_font: v })} options={fontOptions} style={{ minWidth: 220 }} aria-label={t("gp.terminal_font")} />
-        </Row>
-      </div>
+        </CardRow>
+      </Section>
 
-      <div className="settings-card">
-        <Row title={t("gp.enhanced_search")} desc={rgDesc}>
-          <Sw checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
-        </Row>
+      <Section>
+        <CardRow title={t("gp.enhanced_search")} desc={rgDesc}>
+          <Switch checked={cfg.enhanced_search} onChange={(v) => patch({ enhanced_search: v })} />
+        </CardRow>
         {/* plan-156-619 S2：消息区搜索入口开关。默认关闭——入口按钮此前常驻右上角，
             与综合工具卡抢位；关闭只隐藏按钮，Ctrl+F 仍可唤起搜索条。 */}
-        <Row title={t("gp.message_search")} desc={t("gp.message_search_desc")}>
-          <Sw checked={cfg.show_message_search} onChange={(v) => patch({ show_message_search: v })} />
-        </Row>
-        <Row title={t("gp.suggestion")} desc={t("gp.suggestion_desc")}>
-          <Sw checked={cfg.suggestion_enabled} onChange={(v) => patch({ suggestion_enabled: v })} />
-        </Row>
+        <CardRow title={t("gp.message_search")} desc={t("gp.message_search_desc")}>
+          <Switch checked={cfg.show_message_search} onChange={(v) => patch({ show_message_search: v })} />
+        </CardRow>
+        <CardRow title={t("gp.suggestion")} desc={t("gp.suggestion_desc")}>
+          <Switch checked={cfg.suggestion_enabled} onChange={(v) => patch({ suggestion_enabled: v })} />
+        </CardRow>
         {/* R4：任务完成系统通知（三档）。仅桌面版可见——网页版没有 Electron 通知能力，
             选项会恒不生效，因此直接不展示这一行。 */}
         {hasDesktopApi && (
-          <Row title={t("gp.task_notify")} desc={t("gp.task_notify_desc")}>
+          <CardRow title={t("gp.task_notify")} desc={t("gp.task_notify_desc")}>
             <Select
               value={cfg.task_notify_mode}
               onChange={(v) => patch({ task_notify_mode: v as "always" | "unfocused" | "off" })}
@@ -272,10 +276,54 @@ export function GeneralPanel() {
               style={{ minWidth: 200 }}
               aria-label={t("gp.task_notify")}
             />
-          </Row>
+          </CardRow>
         )}
+        {/* plan-20261120-queue-message-mode：任务执行中队列消息的默认处理方式与快捷键对照 */}
+        <CardRow
+          title={t("gp.queue_message")}
+          desc={(
+            <span className="gp-queue-desc">
+              <span>{t("gp.queue_message_desc")}</span>
+              <span className="gp-queue-shortcuts">
+                <span className="gp-queue-shortcut">
+                  <kbd className="gp-kbd">Enter</kbd>
+                  <span>
+                    {cfg.queue_message_mode === "immediate"
+                      ? t("gp.queue_mode_immediate")
+                      : t("gp.queue_mode_queue")}
+                  </span>
+                </span>
+                <span className="gp-queue-sep" aria-hidden>·</span>
+                <span className="gp-queue-shortcut">
+                  <kbd className="gp-kbd">Alt</kbd>
+                  <span className="gp-kbd-plus">+</span>
+                  <kbd className="gp-kbd">Enter</kbd>
+                  <span>
+                    {cfg.queue_message_mode === "immediate"
+                      ? t("gp.queue_mode_queue")
+                      : t("gp.queue_mode_immediate")}
+                  </span>
+                </span>
+              </span>
+            </span>
+          )}
+        >
+          <Segmented<QueueMessageMode>
+            size="sm"
+            value={cfg.queue_message_mode}
+            onChange={(v) => {
+              patch({ queue_message_mode: v });
+              useUiStore.setState({ queueMessageMode: v });
+            }}
+            options={[
+              { value: "queue", label: t("gp.queue_mode_queue") },
+              { value: "immediate", label: t("gp.queue_mode_immediate") },
+            ]}
+            aria-label={t("gp.queue_message")}
+          />
+        </CardRow>
         {/* 采样温度与单次最大输出：修改即保存。部分模型（Claude 系、思考模式）由适配器固定，不受此项影响 */}
-        <Row title="工具轮温度" desc="工具调用轮次的采样温度（0–2）。数值越低输出越稳定，代码修改类任务通常偏低。">
+        <CardRow title="工具轮温度" desc="工具调用轮次的采样温度（0–2）。数值越低输出越稳定，代码修改类任务通常偏低。">
           <Slider
             min={0}
             max={2}
@@ -285,8 +333,8 @@ export function GeneralPanel() {
             format={(v) => v.toFixed(2)}
             aria-label="工具轮温度"
           />
-        </Row>
-        <Row title="文本轮温度" desc="不调用工具时（回答、解释等）的采样温度（0–2）。">
+        </CardRow>
+        <CardRow title="文本轮温度" desc="不调用工具时（回答、解释等）的采样温度（0–2）。">
           <Slider
             min={0}
             max={2}
@@ -296,8 +344,8 @@ export function GeneralPanel() {
             format={(v) => v.toFixed(2)}
             aria-label="文本轮温度"
           />
-        </Row>
-        <Row title="单次最大输出" desc="限制单次回复的最大长度。选择“模型默认”时，官方直连按 128K 兜底。">
+        </CardRow>
+        <CardRow title="单次最大输出" desc="限制单次回复的最大长度。选择“模型默认”时，官方直连按 128K 兜底。">
           <Select
             style={{ minWidth: 160 }}
             value={String(cfg.agent_max_output_tokens)}
@@ -310,9 +358,9 @@ export function GeneralPanel() {
             ]}
             aria-label="单次最大输出"
           />
-        </Row>
+        </CardRow>
         {/* plan-278-1391: 上下文压缩触发阈值——占模型上下文窗口比例，达阈值即自动压缩 */}
-        <Row title={t("gp.compact_threshold")} desc={t("gp.compact_threshold_desc")}>
+        <CardRow title={t("gp.compact_threshold")} desc={t("gp.compact_threshold_desc")}>
           <Slider
             min={50}
             max={95}
@@ -322,9 +370,9 @@ export function GeneralPanel() {
             format={(v) => `${v}%`}
             aria-label={t("gp.compact_threshold")}
           />
-        </Row>
+        </CardRow>
         {/* v45: 异常自动重试——标签即一次重试，个数即次数；全部用完仍失败才停止并显示报错 */}
-        <Row title={t("gp.retry_intervals")} desc={t("gp.retry_intervals_desc")}>
+        <CardRow title={t("gp.retry_intervals")} desc={t("gp.retry_intervals_desc")}>
           <TagInput
             values={parseRetryIntervals(cfg.agent_retry_intervals)}
             onChange={(vals) => patch({ agent_retry_intervals: vals.join(",") })}
@@ -335,8 +383,8 @@ export function GeneralPanel() {
             width={260}
             aria-label={t("gp.retry_intervals")}
           />
-        </Row>
-      </div>
+        </CardRow>
+      </Section>
 
       <BrowserDownloadDirRow />
     </div>
@@ -381,8 +429,8 @@ function BrowserDownloadDirRow() {
 
   const where = info ? info.dir + (info.custom ? "" : t("gp.download_dir_default_tag")) : "…";
   return (
-    <div className="settings-card">
-      <Row
+    <Section>
+      <CardRow
         title={t("gp.download_dir")}
         desc={`${t("gp.download_dir_desc")}${where}${info?.fallback ? t("gp.download_dir_fallback") : ""}`}
       >
@@ -400,7 +448,7 @@ function BrowserDownloadDirRow() {
             </Button>
           )}
         </div>
-      </Row>
-    </div>
+      </CardRow>
+    </Section>
   );
 }

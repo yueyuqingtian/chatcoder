@@ -570,20 +570,23 @@ async def sync_ta3_models(db: AsyncSession, provider, api_base: str) -> list[dic
         updated_local = 0
         for name, entry in entries.items():
             m = by_name_local.get(name)
-            if m is None:
+            is_new = m is None
+            if is_new:
                 m = Model(tenant_id=1, name=name, provider_id=provider.id, source_type="byok")
                 s.add(m)
                 by_name_local[name] = m
                 created_local += 1
             m.api_key = entry.get("api_key") or None
             m.base_url = entry.get("base_url") or None
-            m.context_window = entry.get("context_window") or 200000
-            # plan-147-674: 用户手动设置过多模态标记（meta.multimodal_override）时
-            # 目录同步不覆盖，避免每次登录同步冲掉 UI 上的手动修正
-            meta = dict(m.ta3_meta or {})
-            if not meta.get("multimodal_override"):
-                m.is_multimodal = bool(entry.get("is_multimodal"))
             m.api_format = "ta3"
+            # plan-20261123-ux-fixes：已有模型保留用户已配置的上下文窗口、思考深度与多模态；
+            # 新同步的模型默认开启多模态。
+            if is_new:
+                m.context_window = entry.get("context_window") or 200000
+                m.is_multimodal = True
+            elif not m.context_window:
+                m.context_window = entry.get("context_window") or 200000
+            meta = dict(m.ta3_meta or {})
             meta.update(entry_meta(entry, name))
             m.ta3_meta = meta
             updated_local += 1

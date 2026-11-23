@@ -15,8 +15,7 @@ import { useChatStore } from "../../store/chat";
 import { IconAnchor, IconPencil, IconPlus, IconRefresh, IconX } from "../icons";
 import { Modal } from "../Modal";
 import { ConfirmDialog } from "../ConfirmDialog";
-import { Empty, Input, Textarea, Tooltip } from "../ui";
-import { Sw } from "./shared";
+import { Button, Empty, IconButton, Input, PageActions, Section, Segmented, Switch, Tag, Textarea, Tooltip } from "../ui";
 
 /** 事件中文名与说明（列表与新建弹窗共用） */
 const HOOK_EVENTS: Array<{ value: string; label: string; desc: string }> = [
@@ -42,55 +41,56 @@ export function HooksPanel() {
   useEffect(() => { void load(); }, [load]);
 
   return (
-    <div>
-      <div className="rules-head">
-        <span className="rules-head-hint">
-          在任务执行期间按事件触发动作：向 AI 注入提示词，或执行外部命令（载荷经 stdin 以 JSON 传入）。
-        </span>
-        <div className="rules-head-actions">
-          <button className="btn btn-ghost btn-sm" onClick={() => void load()}><IconRefresh size={13} /> 刷新</button>
-          <button className="btn btn-primary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}>
-            <IconPlus size={13} /> 新建钩子
-          </button>
-        </div>
+    <div className="sc-page">
+      <PageActions>
+        <Button variant="secondary" size="sm" icon={<IconRefresh size={13} />} onClick={() => void load()}>刷新</Button>
+        <Button variant="primary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditing(null); setShowForm(true); }}>新建钩子</Button>
+      </PageActions>
+
+      <div className="sched-note">
+        在任务执行期间按事件触发动作：向 AI 注入提示词，或执行外部命令（载荷经 stdin 以 JSON 传入）。
       </div>
 
-      <div className="settings-resource-list">
-        {items.map((h) => (
-          <div key={h.id} className={"settings-resource-item sb-item" + (h.enabled ? "" : " is-off")}>
-            <span className="sb-tile" aria-hidden><IconAnchor size={16} /></span>
-            <div className="settings-resource-info">
-              <div className="settings-resource-name">
-                {/* plan-91-393：事件以徽标呈现，类型次级标签 */}
-                <span className="sb-badge accent">{eventLabel(h.event)}</span>
-                <span className="hook-type-tag">{h.hook_type === "command" ? "执行命令" : "注入提示词"}</span>
-              </div>
-              <div className="settings-resource-desc">
-                {h.matcher && <span className="settings-resource-tag">匹配 <code className="sb-mono">{h.matcher}</code></span>}
-              </div>
-              <Tooltip content={h.hook_type === "command" ? h.command : (h.prompt || "")}>
-                <div className={"sb-preview" + (h.hook_type === "command" ? " sb-mono" : "")}>
-                  {h.hook_type === "command" ? h.command : (h.prompt || "")}
+      <Section title={items.length > 0 ? `已配置钩子（${items.length}）` : undefined} bare>
+        <div className="settings-resource-list">
+          {items.map((h) => (
+            <div key={h.id} className={"settings-resource-item sb-item" + (h.enabled ? "" : " is-off")}>
+              <span className="sb-tile" aria-hidden><IconAnchor size={16} /></span>
+              <div className="settings-resource-info">
+                <div className="settings-resource-name">
+                  {/* plan-91-393：事件以徽标呈现，类型次级标签 */}
+                  <span className="sb-badge accent">{eventLabel(h.event)}</span>
+                  <span className="hook-type-tag">{h.hook_type === "command" ? "执行命令" : "注入提示词"}</span>
                 </div>
-              </Tooltip>
+                {h.matcher && (
+                  <div className="settings-resource-desc">
+                    <Tag>匹配 <code className="sb-mono">{h.matcher}</code></Tag>
+                  </div>
+                )}
+                <Tooltip content={h.hook_type === "command" ? h.command : (h.prompt || "")}>
+                  <div className={"sb-preview" + (h.hook_type === "command" ? " sb-mono" : "")}>
+                    {h.hook_type === "command" ? h.command : (h.prompt || "")}
+                  </div>
+                </Tooltip>
+              </div>
+              <div className="settings-resource-actions">
+                <Switch checked={h.enabled} aria-label={`启用钩子 ${eventLabel(h.event)}`} onChange={async (v) => {
+                  try { await api.updateHook(h.id, { enabled: v }); await load(); }
+                  catch (e) { notify("更新失败：" + String(e)); }
+                }} />
+                <span className="sb-hover-actions">
+                  <IconButton size="xs" title="编辑" aria-label="编辑" icon={<IconPencil size={12} />} onClick={() => { setEditing(h); setShowForm(true); }} />
+                  <IconButton size="xs" tone="danger" title="删除" aria-label="删除" icon={<IconX size={12} />} onClick={() => setConfirmTarget(h)} />
+                </span>
+              </div>
             </div>
-            <div className="settings-resource-actions">
-              <Sw checked={h.enabled} onChange={async (v) => {
-                try { await api.updateHook(h.id, { enabled: v }); await load(); }
-                catch (e) { notify("更新失败：" + String(e)); }
-              }} />
-              <span className="sb-hover-actions">
-                <Tooltip content="编辑"><button className="btn btn-ghost btn-xs" aria-label="编辑" onClick={() => { setEditing(h); setShowForm(true); }}><IconPencil size={12} /></button></Tooltip>
-                <Tooltip content="删除"><button className="btn btn-ghost btn-xs" aria-label="删除" onClick={() => setConfirmTarget(h)}><IconX size={12} /></button></Tooltip>
-              </span>
-            </div>
-          </div>
-        ))}
-        {items.length === 0 && (
-          <Empty title="暂无钩子" desc="例如在调用终端前注入一段路径约定提示词"
-            action={<button className="btn btn-secondary btn-sm" onClick={() => { setEditing(null); setShowForm(true); }}><IconPlus size={13} /> 新建钩子</button>} />
-        )}
-      </div>
+          ))}
+          {items.length === 0 && (
+            <Empty title="暂无钩子" desc="例如在调用终端前注入一段路径约定提示词"
+              action={<Button variant="secondary" size="sm" icon={<IconPlus size={13} />} onClick={() => { setEditing(null); setShowForm(true); }}>新建钩子</Button>} />
+          )}
+        </div>
+      </Section>
 
       <HookFormModal open={showForm} editing={editing} onClose={() => setShowForm(false)} onSaved={load} />
 
@@ -171,24 +171,23 @@ function HookFormModal({ open, editing, onClose, onSaved }: {
       width={620}
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>取消</button>
-          <button className="btn btn-primary btn-sm" disabled={!valid} onClick={() => void handleSave()}>
+          <Button variant="secondary" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="primary" size="sm" disabled={!valid} onClick={() => void handleSave()}>
             {editing ? "保存" : "创建"}
-          </button>
+          </Button>
         </>
       }
     >
       <div className="settings-modal-form" style={{ padding: 18 }}>
         <div className="settings-modal-form-row">
           <label>触发事件</label>
-          <div className="settings-chips">
-            {HOOK_EVENTS.map((e) => (
-              <button key={e.value} type="button"
-                className={"settings-chip" + (form.event === e.value ? " on" : "")}
-                title={e.desc}
-                onClick={() => setForm((p) => ({ ...p, event: e.value }))}>{e.label}</button>
-            ))}
-          </div>
+          <Segmented<string>
+            size="sm"
+            value={form.event}
+            onChange={(v) => setForm((p) => ({ ...p, event: v }))}
+            aria-label="触发事件"
+            options={HOOK_EVENTS.map((e) => ({ value: e.value, label: e.label }))}
+          />
           <div className="ui-field-hint">{evDesc}</div>
         </div>
         <div className="settings-modal-form-row">
@@ -201,12 +200,16 @@ function HookFormModal({ open, editing, onClose, onSaved }: {
         </div>
         <div className="settings-modal-form-row">
           <label>动作类型</label>
-          <div className="settings-chips">
-            <button type="button" className={"settings-chip" + (form.hook_type === "prompt" ? " on" : "")}
-              onClick={() => setForm((p) => ({ ...p, hook_type: "prompt" }))}>注入提示词</button>
-            <button type="button" className={"settings-chip" + (form.hook_type === "command" ? " on" : "")}
-              onClick={() => setForm((p) => ({ ...p, hook_type: "command" }))}>执行命令</button>
-          </div>
+          <Segmented<"prompt" | "command">
+            size="sm"
+            value={form.hook_type}
+            onChange={(v) => setForm((p) => ({ ...p, hook_type: v }))}
+            aria-label="动作类型"
+            options={[
+              { value: "prompt", label: "注入提示词" },
+              { value: "command", label: "执行命令" },
+            ]}
+          />
         </div>
         {form.hook_type === "prompt" ? (
           <div className="settings-modal-form-row">
@@ -232,7 +235,7 @@ function HookFormModal({ open, editing, onClose, onSaved }: {
         )}
         <div className="settings-modal-form-row">
           <label>启用状态</label>
-          <Sw checked={form.enabled} onChange={(v) => setForm((p) => ({ ...p, enabled: v }))} />
+          <Switch checked={form.enabled} onChange={(v) => setForm((p) => ({ ...p, enabled: v }))} />
         </div>
       </div>
     </Modal>

@@ -223,8 +223,9 @@ export function WorkflowTemplateEditor({
   const roleOptions: SelectOption[] = [
     ...BUILTIN_ROLES,
     ...profiles
-      .filter((p) => (p as { is_active?: boolean }).is_active !== false)
-      .map((p) => ({ value: p.name, label: p.name })),
+      .filter((p) => (p.builtin || p.is_active) && p.name !== "general"
+        && (node?.kind === "execute" ? p.execution_mode === "agent" : p.execution_mode === "readonly"))
+      .map((p) => ({ value: p.name, label: p.display_name })),
   ];
 
   /** 对计划做一次修改（深拷贝后交给 mutate，避免直接改动旧状态） */

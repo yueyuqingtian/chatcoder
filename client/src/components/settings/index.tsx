@@ -24,7 +24,7 @@ const PetsPanel = lazy(() => import("./PetsPanel").then((module) => ({ default: 
 // plan-334-1661：电脑操控专用设置页（内核常驻，不作为 MCP 注册，故不进连接器页）
 const DesktopPanel = lazy(() => import("./DesktopPanel").then((module) => ({ default: module.DesktopPanel })));
 import { IconAlertCircle, IconArrowDown, IconCheck, IconCopy, IconRefresh, IconSpinner } from "../icons";
-import { Button, Card, Collapse, PageShell, PageTransition, Switch, Tooltip } from "../ui";
+import { Button, CardRow, Collapse, PageShell, PageTransition, Section, Switch, Tooltip } from "../ui";
 import { AppLogo } from "../AppLogo";
 import { ReleaseNotesView, UpdateProgress, countReleaseItems } from "../update/ReleaseNotes";
 const PlaygroundPanel = lazy(() => import("./PlaygroundPanel").then((module) => ({ default: module.PlaygroundPanel })));
@@ -63,7 +63,7 @@ export const SETTINGS_INDEX: SettingsIndexItem[] = [
   { key: "memory", label: "记忆", group: "agent", keywords: "记忆 召回 entries", icon: <SettingsGlyph name="memory" /> },
   // plan-282-1441（#6）：插件 / 技能 / MCP 三个独立页收拢为一个「拓展」页（子标签分区）
   { key: "extensions", label: "拓展", group: "agent", keywords: "插件 市场 skill 技能 技能仓库 git 导入 mcp 连接器 外部工具 slot", icon: <SettingsGlyph name="extensions" /> },
-  { key: "subagents", label: "子代理", group: "agent", keywords: "子代理 profile 工具白名单 并发 上限 操控", icon: <SettingsGlyph name="subagents" /> },
+  { key: "subagents", label: "智能体", group: "agent", keywords: "子代理 探索 执行 成员 模型 提示词 并发 操控", icon: <SettingsGlyph name="subagents" /> },
   { key: "workflows", label: "工作流", group: "agent", keywords: "工作流 并发 上限 子代理 返工 预算 步骤 运行时", icon: <SettingsGlyph name="workflows" /> },
   { key: "rules", label: "AI 规则", group: "agent", keywords: "全局规则 项目规则 扫描 命令", icon: <SettingsGlyph name="rules" /> },
   { key: "hooks", label: "钩子", group: "agent", keywords: "hook 事件 回调", icon: <SettingsGlyph name="hooks" /> },
@@ -138,7 +138,7 @@ function formatAgo(testedAt: number, now: number): string {
   return `${Math.round(hour / 24)} 天前`;
 }
 
-function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
+function UpdateChannelCard({ channels, downloading }: { channels: ChannelSnapshot; downloading: boolean }) {
   const measureChannels = useUpdaterStore((s) => s.measureChannels);
   const setChannel = useUpdaterStore((s) => s.setChannel);
   const { report, preferred, effective, mode, measuring, labels } = channels;
@@ -172,7 +172,7 @@ function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
         </Button>
       </div>
 
-      <div className="about-ch-grid" role="radiogroup" aria-label="下载通道">
+      <div className="about-ch-grid" role="group" aria-label="下载通道">
         {UPDATE_CHANNEL_IDS.map((id) => {
           const on = effective === id;
           const probe = report?.channels?.[id];
@@ -181,11 +181,12 @@ function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
             + (measuring || !probe ? " is-wait" : !probe.ok ? " is-err" : "");
           return (
             <Tooltip key={id} content={probe && !probe.ok && probe.reason ? probe.reason : null}>
-              <button
+              <Button
                 type="button"
-                role="radio"
-                aria-checked={on}
-                className={"about-ch-item" + (on ? " is-on" : "")}
+                variant={on ? "secondary" : "outline"}
+                size="sm"
+                aria-pressed={on}
+                className="about-ch-choice"
                 onClick={() => { if (mode !== id) void setChannel(id); }}
               >
                 <span className="about-ch-top">
@@ -197,7 +198,7 @@ function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
                 <span className={metaClass}>
                   {measuring ? "测速中…" : channelMetaText(probe)}
                 </span>
-              </button>
+              </Button>
             </Tooltip>
           );
         })}
@@ -214,16 +215,13 @@ function UpdateChannelCard({ channels }: { channels: ChannelSnapshot }) {
       </Collapse>
 
       <div className="about-ch-foot">
-        {report != null && report.testedAt > 0 && (
-          <span>上次测速 {formatAgo(report.testedAt, now)}</span>
-        )}
+        <span>{report != null && report.testedAt > 0 ? `上次测速 ${formatAgo(report.testedAt, now)}` : "尚未测速"}</span>
         {/* 手动指定后必须留一条回到「按测速自动选」的路，否则一旦点过就再也回不去 */}
-        {mode !== "auto" ? (
-          <button type="button" className="about-ch-auto" onClick={() => void setChannel("auto")}>
+        {downloading && <span>下载中切换通道会重新开始</span>}
+        {mode !== "auto" && (
+          <Button type="button" variant="ghost" size="xs" onClick={() => void setChannel("auto")}>
             恢复自动优选
-          </button>
-        ) : (
-          <span>下载中切换会重新开始</span>
+          </Button>
         )}
       </div>
     </div>
@@ -292,7 +290,7 @@ function AboutPanel() {
 
   return (
     <div className="settings-card-stack about-stack">
-      <div className="settings-card about-card">
+      <Section className="about-card" flush>
         <div className="about-hero">
           <AppLogo size={64} className="about-logo" />
           <div className="about-hero-text">
@@ -353,35 +351,22 @@ function AboutPanel() {
             )}
           </div>
         )}
+      </Section>
 
-        {/* plan-20261024-update-channel：下载通道独立成卡，放在自动下载开关上方
-            （先选线路、再决定要不要自动下） */}
-        {supported && channels && <UpdateChannelCard channels={channels} />}
-
-        {/* 修改即保存（项目约定）：开关一拨就写入主进程设置；打开时若已发现新版本会立刻开始下载 */}
-        {supported && (
-          <div className="settings-row about-auto-row">
-            <div className="settings-row-info">
-              <div className="settings-row-title">发现新版本时自动下载</div>
-              <div className="settings-row-desc">启动时或定时检查到新版本后，在后台静默下载，完成后在侧栏提示重启更新。网络中断会自动续传，不会从头再来。</div>
-            </div>
-            <div className="settings-row-control">
-              <Switch checked={autoDownload} onChange={(v) => { void setAutoDownload(v); }} aria-label="发现新版本时自动下载" />
-            </div>
-          </div>
-        )}
-      </div>
+      {/* plan-20261121-file-tree-settings：下载来源和自动下载属于同一组设置，使用同层卡片。 */}
+      {supported && <Section flush className="about-download">
+        {channels && <UpdateChannelCard channels={channels} downloading={status.state === "downloading"} />}
+        <CardRow title="发现新版本时自动下载"
+          desc="检查到新版本后自动下载，完成后在侧栏提示重启更新。网络中断时会从已下载的位置继续。">
+          <Switch checked={autoDownload} onChange={(v) => { void setAutoDownload(v); }} aria-label="发现新版本时自动下载" />
+        </CardRow>
+      </Section>}
 
       {supported && (
-        <div className="settings-card about-history-card">
-          <div className="about-history-head">
-            <div className="about-history-title">更新历史</div>
-            <div className="about-history-desc">
-              {releaseSource === "local" ? "离线模式，显示本地更新日志" :
+        <Section title="更新历史" className="about-history-card" flush
+          desc={releaseSource === "local" ? "离线模式，显示本地更新日志" :
                releaseSource === "none" ? "暂时无法获取更新历史" :
-               releaseHistory.length > 0 ? `共 ${releaseHistory.length} 个版本` : ""}
-            </div>
-          </div>
+               releaseHistory.length > 0 ? `共 ${releaseHistory.length} 个版本` : ""}>
           <div className="about-history">
             {releaseHistory.length === 0 && <div className="about-history-empty">暂无更新历史</div>}
             {releaseHistory.slice(0, historyLimit).map((r, i) => {
@@ -391,7 +376,7 @@ function AboutPanel() {
               const count = countReleaseItems(r.notes);
               return (
                 <div key={key} className={"about-rel" + (expanded ? " open" : "")}>
-                  <button type="button" className="about-rel-head" aria-expanded={expanded} onClick={() => toggleVersion(key)}>
+                  <Button variant="ghost" size="sm" className="about-rel-head" aria-expanded={expanded} onClick={() => toggleVersion(key)}>
                     <span className="about-rel-ver">{r.version ? `v${r.version}` : (r.name || "更新日志")}</span>
                     {isCurrent && <span className="about-rel-cur">当前</span>}
                     <span className="about-rel-meta">
@@ -399,7 +384,7 @@ function AboutPanel() {
                       {count > 0 && <span>{count} 项</span>}
                     </span>
                     <IconChevronDown size={14} className={"about-rel-caret" + (expanded ? " open" : "")} />
-                  </button>
+                  </Button>
                   <Collapse open={expanded}>
                     <div className="about-rel-body"><ReleaseNotesView notes={r.notes} /></div>
                   </Collapse>
@@ -407,12 +392,12 @@ function AboutPanel() {
               );
             })}
             {releaseHistory.length > historyLimit && (
-              <button type="button" className="about-history-more" onClick={() => setHistoryLimit((n) => n + 10)}>
+              <Button variant="ghost" size="sm" className="about-history-more" onClick={() => setHistoryLimit((n) => n + 10)}>
                 显示更早的版本（{releaseHistory.length - historyLimit}）
-              </button>
+              </Button>
             )}
           </div>
-        </div>
+        </Section>
       )}
     </div>
   );
@@ -426,39 +411,36 @@ function AboutPanel() {
  *  - 副标题用 margin-top:-8px 反向补偿 flex gap，长文案换行时行高错位。
  * 现改为数据驱动：骨架只渲染一次（PageShell），内容组件按 tab 查表。
  */
-const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide" | "xwide"; card?: boolean; selfHeader?: boolean; fill?: boolean }> = {
-  // general / appearance / memory / about 自带 settings-card(-stack) 结构，不再外包 Card
+const PANELS: Record<SettingsTab, { Comp: React.ComponentType; width?: "standard" | "wide" | "xwide"; selfHeader?: boolean; fill?: boolean }> = {
+  // 各设置面板自行通过 Section / Card / List 组织内容，外层不再套 Card
   general: { Comp: GeneralPanel },
   appearance: { Comp: AppearancePanel },
   // S6（plan-41-197）：模型页自带单卡片左右衔接布局，不外包 Card（避免“卡片套卡片”）
-  // S18（plan-41-197b）：自带标题区（模型设置 + 副标题 + 刷新），外层不再渲染标题
   // plan-114-450：模型页也走统一页头 + 填充式（左右两列在卡片内各自滚动），宽档容纳双栏
   models: { Comp: ModelsPanel, fill: true, width: "wide" },
-  // plan-41-198：拓展页 = 已安装管理（市场在左面板「拓展」）；自带标题区 +
-  // 头部固定、列表独立滚动（fill）
   // plan-114-450：标题区交还 PageShell（统一页头），「市场」经 PageActions 投送到右上角
   extensions: { Comp: InstalledPanel, fill: true },
-  // plan-114-450：以下面板改为自带 Section（组标题 + 卡片），外层不再包 Card
-  subagents: { Comp: SubagentsPanel },
+  // plan-114-450：以下面板使用 Section（组标题 + 卡片）组织内容
+  // plan-20261123-agent-panel-ui：双栏成员工作区需要 wide 档（880px）容纳左右列表与提示词工作台
+  subagents: { Comp: SubagentsPanel, width: "wide" },
   workflows: { Comp: WorkflowSettingsPanel },
   rules: { Comp: RulesPanel },
-  // policy / usage 含表格与图表，走宽档（唯一允许的宽度差异）
-  policy: { Comp: PolicyPanel, width: "wide", card: true },
-  scheduled: { Comp: ScheduledPanel, card: true },
-  hooks: { Comp: HooksPanel, card: true },
+  // policy / usage 含表格与多栏编辑器，走宽档（唯一允许的宽度差异）
+  policy: { Comp: PolicyPanel, width: "wide" },
+  scheduled: { Comp: ScheduledPanel },
+  hooks: { Comp: HooksPanel },
   // S19（plan-41-197c）：记忆页头部固定、列表独立滑动——走填充式布局（fill）
   memory: { Comp: MemoryPanel, fill: true },
   // plan-20261021-usage-update：调用记录表有 10 列，用 xwide 档；面板自带卡片（概览 / 调用记录各自成卡），不再外包 Card
   usage: { Comp: UsagePanel, width: "xwide" },
-  diagnostics: { Comp: DiagnosticsPanel, card: true },
-  index: { Comp: IndexLibraryPanel, card: true },
+  diagnostics: { Comp: DiagnosticsPanel },
+  index: { Comp: IndexLibraryPanel },
   worktrees: { Comp: WorktreesPanel },
-  archive: { Comp: ArchivedPanel, card: true },
+  archive: { Comp: ArchivedPanel },
   about: { Comp: AboutPanel },
-  // plan-73-323 / plan-73-326：宠物分区（面板自带 settings-card 结构，不再外包 Card——
-  // 此前 card:true 会形成“卡片套卡片”，与「设置 → 常规」的排版不一致）
+  // plan-73-323 / plan-73-326：宠物分区
   pets: { Comp: PetsPanel },
-  // plan-334-1661：自带 settings-card-stack / 子标签结构，不外包 Card
+  // plan-334-1661：电脑操控
   desktop: { Comp: DesktopPanel },
   // plan-114-449：嗒嗒乐园，宽档画布
   playground: { Comp: PlaygroundPanel, width: "wide" },
@@ -468,7 +450,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
   const { t } = useI18n();
   const meta = PANELS[tab];
   if (!meta) return null;
-  const { Comp, width = "standard", card = false, selfHeader = false, fill = false } = meta;
+  const { Comp, width = "standard", selfHeader = false, fill = false } = meta;
   // 副标题仅在该 tab 确有文案时渲染（缺省不占位，保证卡片区起点恒定）
   // S18：selfHeader 的 tab（模型页）由内容组件自渲染标题区，外层整体不渲染标题。
   const subtitle = selfHeader ? "" : t(`settings.ps.${tab}`);
@@ -482,7 +464,7 @@ function Panel({ tab }: { tab: SettingsTab }) {
         width={width}
         fill={fill}
       >
-        {card ? <Card>{<Comp />}</Card> : <Comp />}
+        <Comp />
       </PageShell>
     </PageTransition>
   );

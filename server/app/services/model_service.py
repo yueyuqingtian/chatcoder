@@ -44,11 +44,13 @@ async def create_model(db: AsyncSession, **kwargs) -> int:
 
 
 async def get_model(db: AsyncSession, model_id: int) -> Model | None:
-    return await db.get(Model, model_id)
+    return await db.get(Model, model_id, populate_existing=True)
 
 
 async def list_models(db: AsyncSession) -> list[Model]:
-    res = await db.execute(select(Model).order_by(Model.id.desc()))
+    res = await db.execute(
+        select(Model).order_by(Model.id.desc()).execution_options(populate_existing=True)
+    )
     return list(res.scalars().all())
 
 

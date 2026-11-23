@@ -520,10 +520,10 @@
   /* plan-20261018-git-indent：统一左内距 12px（与 .gp-head / .gp-views / .gp-commit 一致）。
      此前组头 8px、行 16px（容器 8 + 行 8）、头部 12px 三套口径，父级分组行比子行少缩进一半，
      吸顶滚动时又与顶部内容错位——看起来像「父级框没有左间距」。 */
-  gap: 4px;
+  gap: 8px;
   padding: 0 12px;
   min-height: 32px;
-  background: var(--gp-surface);
+  background: var(--bg-panel);
   box-shadow: inset 0 -1px 0 var(--border-light);
 }
 /* 分组标题：占满中间空间，让右侧批量菜单始终靠右；比文件行更强（实色 + 600） */
@@ -567,7 +567,7 @@
 .gp-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   min-height: 28px;
   /* 行内不再重复缩进：复选框与组头复选框同一列（都落在 12px），
      此前这里再叠 8px，导致父级分组头与子行复选框错位 8px。 */
@@ -772,6 +772,7 @@
 /* 动作行：左是 amend 开关（与按钮同一水平线），右是两个提交动作 */
 .gp-commit-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -789,7 +790,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-inline-start: auto;
 }
 
 /* ── 历史：时间线 ───────────────────────────────────────── */
@@ -898,7 +901,7 @@
 
 /* ── 提交详情 ───────────────────────────────────────────── */
 .gp-cv { display: flex; flex-direction: column; gap: 8px; padding: 4px 4px 0; min-width: 0; }
-.gp-cv-nav { display: flex; }
+.gp-cv-nav { display: flex; position: sticky; top: 0; z-index: 2; background: var(--bg-panel); }
 .gp-cv-subject {
   font-size: 13px;
   font-weight: 600;
@@ -984,3 +987,78 @@
 @media (prefers-reduced-motion: reduce) {
   .gp-row-ops { transition: none; }
 }
+
+/* plan-771-3177：窄面板也保留固定按钮槽，差异与贮藏详情各自在内容区滚动。 */
+.gp-notice .ui-icon-btn { min-width: 24px; min-height: 24px; }
+.gp-filter-bar, .gp-subview-bar, .gp-commit-guidance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px 8px;
+}
+.gp-filter-bar .ui-input-wrap, .gp-subview-bar .ui-input-wrap { min-width: 0; flex: 1; }
+.gp-commit-guidance { padding: 4px 0 0; font-size: 11px; line-height: 18px; color: var(--text-3); }
+.gp-commit-guidance .is-long { color: var(--warning); }
+.gp-section-label, .gp-list-title, .gp-list-meta, .gp-mono-ellipsis, .gp-stash-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+.gp-diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.gp-diff-number {
+  flex: 0 0 5ch;
+  padding-inline-end: 1ch;
+  text-align: end;
+  user-select: none;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.gp-diff.is-wrap .gp-diff-line { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gp-diff-line.is-hunk { align-items: center; gap: 8px; }
+.gp-diff-hunk-text { margin-inline-end: auto; }
+.gp-subview { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.gp-subview-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 12px 12px; }
+.gp-subview-hint, .gp-filter-empty, .gp-stash-stat, .gp-group-head {
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 18px;
+}
+.gp-filter-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+.gp-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 8px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+}
+.gp-list, .gp-stash-list, .gp-stash-files { list-style: none; margin: 0; padding: 0; }
+.gp-list-row, .gp-stash-head, .gp-stash-file { display: flex; align-items: center; gap: 8px; padding: 4px; min-width: 0; }
+.gp-list-row.is-current, .gp-stash-item.is-open { background: var(--bg-hover); border-radius: var(--r-md); }
+.gp-list-main, .gp-stash-info, .gp-stash-file-main { flex: 1; min-width: 0; }
+.gp-list-title, .gp-list-meta, .gp-stash-file-main, .gp-stash-top { display: flex; align-items: center; gap: 4px; }
+.gp-list-meta, .gp-stash-time { color: var(--text-3); font-size: 11px; line-height: 16px; }
+.gp-list-ops, .gp-stash-ops, .gp-conflict-ops, .gp-subview-bar-ops { display: flex; align-items: center; gap: 4px; }
+.gp-stash-list { display: grid; gap: 6px; }
+.gp-stash-item { border: 1px solid var(--border); border-radius: var(--r-md); }
+.gp-stash-toggle { flex: 1; min-width: 0; justify-content: flex-start; height: auto; min-height: var(--ctl-h-sm); }
+.gp-stash-info { text-align: start; }
+.gp-stash-ref { color: var(--text-2); font-family: var(--font-mono); font-size: 11px; }
+.gp-stash-detail { padding: 4px 8px 8px; }
+.gp-stash-stat { margin-block: 4px; }
+.gp-stash-form { display: grid; gap: 12px; }

@@ -101,9 +101,19 @@ async def content(download: bool = False, target: Path = Depends(resource)):
 
 
 @router.get("/children")
-async def children(depth: int = Query(1,ge=1,le=8), target: Path = Depends(resource)):
-    if not target.is_dir(): raise HTTPException(400, "此路径不是目录")
-    return {"path":target.as_posix(), "children":await run_in_threadpool(initial_tree,target,depth) if depth>1 else await run_in_threadpool(list_children,target)}
+async def children(
+    depth: int = Query(1, ge=1, le=8),
+    show_hidden: bool = Query(False),
+    target: Path = Depends(resource),
+):
+    if not target.is_dir():
+        raise HTTPException(400, "此路径不是目录")
+    children_nodes = (
+        await run_in_threadpool(initial_tree, target, depth, show_hidden)
+        if depth > 1
+        else await run_in_threadpool(list_children, target, show_hidden)
+    )
+    return {"path": target.as_posix(), "children": children_nodes}
 
 
 @router.get("/workbook")

@@ -132,13 +132,14 @@ function resolveTab(sid: string, explicit?: unknown, prefer?: unknown, forNav = 
   if (typeof explicit === "string" && explicit) {
     const t = st.tabs.find((x) => x.id === explicit);
     if (!t) throw new Error(`标签 ${explicit} 不存在，请用 browser_tabs 查看现有标签`);
+    if (t.loginProtected) throw new Error("此标签页包含受保护的登录内容");
     agentTab.set(sid, t.id);
     return t;
   }
   for (const id of [prefer, agentTab.get(sid)]) {
     if (typeof id === "string" && id) {
       const t = st.tabs.find((x) => x.id === id);
-      if (t) { agentTab.set(sid, t.id); return t; }
+      if (t && !t.loginProtected) { agentTab.set(sid, t.id); return t; }
     }
   }
   const active = st.tabs.find((t) => t.id === st.activeTabId);
@@ -147,7 +148,7 @@ function resolveTab(sid: string, explicit?: unknown, prefer?: unknown, forNav = 
     agentTab.set(sid, active.id);
     return { ...active, owner: "ai" };
   }
-  if (!forNav && active && active.url) {
+  if (!forNav && active && active.url && !active.loginProtected) {
     // 还没有 AI 标签时，读 / 操作用户正在看的页面（如「看看我当前打开的页面」）
     agentTab.set(sid, active.id);
     return active;
@@ -162,6 +163,7 @@ async function ensureFrame(sid: string, tab: BrowserTabState): Promise<FrameReco
   const rec = await waitFrameReady(sid, tab.id, 12000);
   if (!rec) throw new Error("浏览器标签未能就绪（页面仍在加载或面板尚未挂载），请稍后重试");
   if (typeof rec.el?.executeJavaScript !== "function") throw new Error("当前环境不支持操作页面");
+  await reserveForAgent(rec);
   // plan-20261018-operator-boost：停泊网页若被祖先包含块带离视口会完全不出帧，动作前先确保它在视口原点
   try { healParkedFrame(rec.el as unknown as Element); } catch { /* 守卫失败不影响动作 */ }
   return rec;
@@ -233,6 +235,13 @@ async function mainExec(rec: FrameRecord | null, op: string, args: Record<string
   const res = await api.browserAgentExec(rec?.wcId ?? 0, op, args);
   if (!res?.ok) throw new Error(res?.error || "浏览器操作失败");
   return res.result;
+}
+
+const reservedGuestIds = new WeakMap<FrameRecord, number>();
+async function reserveForAgent(rec: FrameRecord) {
+  if (!rec.wcId || reservedGuestIds.get(rec) === rec.wcId) return;
+  await mainExec(rec, "reserveForAgent", {});
+  reservedGuestIds.set(rec, rec.wcId);
 }
 
 async function drainEvents(sid: string, rec: FrameRecord | null): Promise<Array<Record<string, unknown>>> {
@@ -551,7 +560,7 @@ async function listTabs(sid: string) {
   const st = useBrowserStore.getState().getSessionState(sid);
   const agent = agentTab.get(sid) ?? null;
   return {
-    tabs: st.tabs.filter((t) => t.url || t.src).map((t) => ({
+    tabs: st.tabs.filter((t) => !t.loginProtected && (t.url || t.src)).map((t) => ({
       id: t.id, url: t.url, title: t.title, loading: t.loading, active: t.id === st.activeTabId, owner: t.owner,
     })),
     active: st.activeTabId,
@@ -583,6 +592,7 @@ async function navigateTab(sid: string, tab: BrowserTabState, a: Record<string, 
   const store = useBrowserStore.getState();
   const rec0 = getFrame(sid, tab.id);
   if (rec0?.ready && typeof rec0.el?.loadURL === "function") {
+    await reserveForAgent(rec0);
     store.updateTab(sid, tab.id, { url, loading: true, error: undefined });
     const since = rec0.navSeq;
     const domSince = rec0.domSeq;
@@ -606,6 +616,7 @@ async function navigateTab(sid: string, tab: BrowserTabState, a: Record<string, 
   store.navigate(sid, url, tab.id);
   const rec = await waitFrameReady(sid, tab.id, 15000);
   if (!rec) throw new Error("浏览器标签未能就绪，请稍后重试");
+  await reserveForAgent(rec);
   // 首次挂载：webview 就绪即 DOM 就绪；只有显式要求完整加载时继续等
   const t0 = performance.now();
   while (performance.now() - t0 < timeout) {
@@ -750,7 +761,7 @@ async function dispatch(sid: string, op: string, a: Record<string, any>): Promis
   if (op === "tabs.list") return listTabs(sid);
   if (op === "clipboard") return mainExec(null, "clipboard", a);
   // plan-20261018-operator-boost：下载记录由主进程维护（保存到设置的下载目录），与标签无关
-  if (op === "downloads") return mainExec(null, "downloads", a);
+  if (op === "downloads") return mainExec(null, "downloads", { since_id: a.since_id, wait_ms: a.wait_ms, limit: a.limit });
   // plan-20261116-review-fixes：微应用不走浏览器标签解析，由所属会话的 UID 精确定位 guest。
   // 返回值由主进程 JSON 化后再过来（返回值的类型收敛发生在页面侧，见 microappCall 的脚本），
   // 这里只需原样透传；失败文案由主进程给出，mainExec 会把它抛成 browser.response 的 error。
@@ -992,6 +1003,11 @@ function onMainEvent(ev: { type: string; wcId: number; [k: string]: unknown }) {
   const rec = findFrameByWcId(Number(ev.wcId));
   if (!rec) return;
   const store = useBrowserStore.getState();
+  if (ev.type === "login-protected") {
+    store.updateTab(rec.sid, rec.tabId, { loginProtected: true });
+    if (agentTab.get(rec.sid) === rec.tabId) agentTab.delete(rec.sid);
+    return;
+  }
   if (ev.type === "dialog") {
     store.setDialog(rec.sid, {
       tabId: rec.tabId, wcId: Number(ev.wcId), type: String(ev.dialogType || "alert"),
@@ -1017,7 +1033,7 @@ function onMainEvent(ev: { type: string; wcId: number; [k: string]: unknown }) {
     if (!url) return;
     const st = store.getSessionState(rec.sid);
     const source = st.tabs.find((t) => t.id === rec.tabId);
-    const aiActive = st.agent.phase === "working" && agentTab.get(rec.sid) === rec.tabId;
+    const aiActive = !source?.loginProtected && st.agent.phase === "working" && agentTab.get(rec.sid) === rec.tabId;
     const activate = st.activeTabId === rec.tabId && (!aiActive || !tabOnScreen(rec.sid, rec.tabId) || Date.now() - st.userActiveAt > 6000);
     const id = store.newTab(rec.sid, url, { owner: source?.owner ?? "user", activate });
     if (aiActive) {

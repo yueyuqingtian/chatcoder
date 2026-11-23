@@ -3,6 +3,7 @@
  * 持久化到 localStorage + 主进程 ui-prefs.json 双通道（plan-73-344），启动时自动应用 CSS 变量。
  */
 import { create } from "zustand";
+import { normalizeQueueMessageMode, type QueueMessageMode } from "../components/composer/queueDelivery";
 
 export type Language = "zh" | "en";
 
@@ -73,11 +74,11 @@ const DEFAULTS: UiPrefs = {
   shadowStrength: 1,
   chatFontFamily: "system",
   uiFontFamily: "inter",
-  chatFontSize: 13,
+  chatFontSize: 14,
   chatBubbleWidth: 70,
-  chatLineHeight: 2.2,
+  chatLineHeight: 1.62,
   uiBaseFontSize: 13,
-  contentMaxWidth: 1000,
+  contentMaxWidth: 860,
   sidebarFontSize: 14,
   sidebarIconSize: 16,
   sidebarFocusColor: "",
@@ -102,12 +103,12 @@ const FONT_OPTIONS: Record<string, string> = {
  *  其余选项依赖本机已安装的字体，未安装时按栈逐级回退，不会出现方块字。 */
 export const UI_FONT_OPTIONS: Record<string, { label: string; desc: string; stack: string; bundled?: boolean }> = {
   inter: {
-    label: "Inter（推荐）", desc: "内置字体，小字号清晰锐利", bundled: true,
-    stack: '"Inter Variable", "Microsoft YaHei UI", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
+    label: "Inter + 系统锐利黑体（推荐）", desc: "内置 Inter 拉丁字形搭配系统高清中文黑体，清晰锐利", bundled: true,
+    stack: '"Inter Variable", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif',
   },
   system: {
-    label: "系统默认", desc: "Segoe UI / 苹方 + 微软雅黑",
-    stack: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+    label: "系统默认", desc: "苹方 / 微软雅黑 UI",
+    stack: 'ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei", sans-serif',
   },
   // plan-20261116-bundled-fonts：思源黑体改为随应用内置（Noto Sans SC，同一套设计，OFL-1.1），
   // 字体族用独立名 Source Han Sans SC Bundled（@font-face 见 styles/fonts.css），
@@ -185,8 +186,21 @@ function loadPrefs(): UiPrefs {
   // 旧默认值（12/14）视作“用户未自定义”，迁移到新默认；手动调过的值保持不变。
   if (stored.sidebarFontSize === 12) stored.sidebarFontSize = 14;
   if (stored.sidebarIconSize === 14) stored.sidebarIconSize = 16;
-  // plan-73-344：消息行距默认值 1.7 → 2.2；旧默认值视作“未自定义”，迁移到新默认。
-  if (stored.chatLineHeight === 1.7) stored.chatLineHeight = DEFAULTS.chatLineHeight;
+  // plan-20261121-flow-typography：一次性把旧默认值（13px / 2.2 / 1000px）平滑迁移至新阅读基线（14px / 1.62 / 860px）。
+  // 用 localStorage 一次性标记避免覆盖用户此后手动调回的偏好。
+  const TYPO_MIGRATED_KEY = "chatcoder.ui-prefs.typo-v2";
+  let typoMigrated = false;
+  try { typoMigrated = localStorage.getItem(TYPO_MIGRATED_KEY) === "1"; } catch { typoMigrated = true; }
+  if (!typoMigrated) {
+    if (stored.chatFontSize === 13) stored.chatFontSize = DEFAULTS.chatFontSize;
+    if (stored.chatLineHeight === 2.2 || stored.chatLineHeight === 1.7) {
+      stored.chatLineHeight = DEFAULTS.chatLineHeight;
+    }
+    if (stored.contentMaxWidth === 1000) stored.contentMaxWidth = DEFAULTS.contentMaxWidth;
+    try { localStorage.setItem(TYPO_MIGRATED_KEY, "1"); } catch { /* ignore */ }
+  } else if (stored.chatLineHeight === 1.7) {
+    stored.chatLineHeight = DEFAULTS.chatLineHeight;
+  }
   // plan-404-1892（图1）：左面板最小宽 200 → 240——「分组/项目」胶囊 + 两个操作图标在 200px 下必然换行。
   // 历史保存的 200px 偏好按新下限校正；上限 480 不变。
   // plan-20261016-ux（问题 10）：上限放宽到 640（大屏可拖宽，实际上限由 ResizeHandle 按窗口宽计算）
@@ -345,6 +359,9 @@ interface UiState extends UiPrefs {
   /** 任务完成系统通知档位（设置 → 常规）：always 始终 / unfocused 仅窗口未聚焦时（默认）/ off 关闭。
    *  chat.ts 在轮次结束时读它决定要不要弹系统通知（仅桌面端生效）。 */
   taskNotifyMode: "always" | "unfocused" | "off";
+  /** plan-20261120-queue-message-mode：任务执行中用户新发送消息的默认处理方式（设置 → 常规）：
+   *  queue 排队入列（默认）/ immediate 直接发送（立即注入运行中回合）。 */
+  queueMessageMode: QueueMessageMode;
   refreshGlobalFlags: () => Promise<void>;
   /** plan-26-126 M5：本次开启玻璃**未即时生效**（极少数环境需重启）——
    *  仅用于设置页一次性提示，不持久化、不常驻。 */
@@ -366,6 +383,8 @@ export const useUiStore = create<UiState>((set, get) => ({
   showMessageSearch: false,
   // 任务完成系统通知：默认「窗口未聚焦时」，启动后由后端全局设置刷新
   taskNotifyMode: "unfocused",
+  // 队列消息模式：默认「排队入列」，启动后由后端全局设置刷新
+  queueMessageMode: "queue",
   glassNeedRestart: false, // plan-26-126 M5：瞬时状态，由 setGlassMode 回包驱动
   glassRestartNotice: false, // 毛玻璃「重启生效」徽标的一次性展示开关
   consumeGlassRestartNotice: () => set({ glassRestartNotice: false }),
@@ -380,6 +399,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         taskNotifyMode: data.task_notify_mode === "always" || data.task_notify_mode === "off"
           ? data.task_notify_mode
           : "unfocused",
+        queueMessageMode: normalizeQueueMessageMode(data.queue_message_mode),
         terminalFont: data.terminal_font || "",
       });
     } catch { /* 后端不可达时保持默认 */ }

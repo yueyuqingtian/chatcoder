@@ -3,13 +3,15 @@
  * 会话 229: 统一改用全局 ImageGallery（左右切换/缩放/下载）；
  * 并新增 MessageAttachmentList——消息内图片改为约 150px 缩略图并排展示，非图片附件保持卡片。
  */
-import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage, IconFolder, IconMessageSquare } from "../icons";
+import { IconPaperclip, IconFileText, IconBox, IconPlug, IconPackage, IconFolder, IconMessageSquare, IconLayoutGrid } from "../icons";
 import { type AttachmentInfo, type ComposerRefOut, resolveFileUrl } from "../../api/client";
 import { useChatStore } from "../../store/chat";
 import { usePanelStore } from "../../store/panel";
 import { openGallery } from "../../store/gallery";
 import { Tooltip } from "../ui";
 import { tokenize, tokenDisplayName } from "../../utils/tokens";
+import { stripRefLines } from "../../utils/refLines";
+export { stripRefLines };
 
 function fmtSize(n: number): string {
   if (!n || n <= 0) return "";
@@ -119,6 +121,8 @@ const REF_KIND_LABEL: Record<string, string> = {
   file: "文件", dir: "文件夹", skill: "技能", mcp: "连接器", plugin: "插件", session: "会话",
   // plan-693-2868（P1）：微应用引用——不补这一项，悬停会露出 "microapp：appId" 的原始名
   microapp: "微应用",
+  // plan-interactive-ui：交互方案勾选引用
+  "ui-selection": "已选方案",
 };
 
 export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
@@ -135,6 +139,7 @@ export function RefChips({ refs }: { refs: ComposerRefOut[] }) {
                 : r.kind === "dir" ? <IconFolder size={11} />
                 : r.kind === "mcp" ? <IconPlug size={11} />
                 : r.kind === "plugin" ? <IconPackage size={11} />
+                : r.kind === "ui-selection" ? <IconLayoutGrid size={11} />
                 : <IconBox size={11} />}
             </span>
             {r.label || r.value}
@@ -153,20 +158,6 @@ export function refsOf(content: Record<string, unknown> | undefined): ComposerRe
     const it = r as { kind?: unknown; value?: unknown };
     return Boolean(it && typeof it === "object" && typeof it.kind === "string" && typeof it.value === "string");
   });
-}
-
-/** plan-308-1542 需求2：拼在消息文本里的引用行（buildRefsSuffix 产物）在有了芯片后
- *  应从气泡文本中剔除，避免「芯片 + 同一段文字」重复展示。
- *  只在消息确实带结构化 refs 时才剔除（历史消息保留原文，不丢信息）。
- *  plan-633-2604（R3）：「引用文件夹」同样剔除（拖入文件夹的引用行）。
- *  plan-693-2868（P1）：「使用微应用」同样剔除——否则气泡里会同时出现芯片与同一段文字。 */
-export function stripRefLines(text: string, hasRefs: boolean): string {
-  if (!hasRefs || !text) return text;
-  return text
-    .split("\n")
-    .filter((ln) => !/^(引用文件|引用文件夹|引用会话|使用技能|使用连接器|使用插件|使用微应用)：/.test(ln.trim()))
-    .join("\n")
-    .trim();
 }
 
 /** 从消息 content 中解析附件数组（v14: content.attachments）。 */
