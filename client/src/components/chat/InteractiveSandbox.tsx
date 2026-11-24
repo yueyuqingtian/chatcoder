@@ -46,10 +46,10 @@ export interface InteractiveSandboxProps {
 export const InteractiveSandbox = memo(function InteractiveSandbox({
   html,
   cacheKey = "",
-  minHeight = 120,
-  maxHeight = 500,
+  minHeight = 96,
+  maxHeight = 680,
   fillHeight = false,
-  flush = false,
+  flush = true,
   title = "可交互组件预览",
   className,
   onAction,

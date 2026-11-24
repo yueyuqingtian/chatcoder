@@ -28,6 +28,12 @@ from pathlib import Path
 
 import httpx
 
+from app.orchestration.context_sanitizer import (
+    force_sanitize_context_text,
+    has_unsanitized_context_keyword,
+    sanitize_context_text,
+    sanitize_context_tools,
+)
 from app.orchestration.history_sequence import record_wire_prefix
 from app.core.config import settings
 from app.models.providers.prompt_cache import mark_anthropic_cache
@@ -551,6 +557,19 @@ _OUTBOUND_RISK_PATTERNS = (
     (re.compile(r"\b(you\s+are|i\s+am)\s+claude[\s_-]*code\b", re.IGNORECASE), "you are ta+3 agent"),
 )
 
+# plan-20261124-context-sanitize：脱敏结构时必须跳过的媒体/加密块与协议元数据字段，
+# 防止给图片 base64、Anthropic 思考签名或 model 名插入零宽字符导致上游 400/404。
+_SANITIZE_SKIP_BLOCK_TYPES = frozenset({"image", "image_url", "thinking", "redacted_thinking"})
+_SANITIZE_SKIP_KEYS = frozenset({"signature", "thoughtSignature", "thought_signature"})
+_WIRE_MSG_META_KEYS = frozenset({"role", "id", "type", "name", "tool_call_id", "tool_use_id", "cache_control"})
+
+
+def _apply_ta3_risk_patterns(text: str) -> str:
+    out = text
+    for pat, repl in _OUTBOUND_RISK_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
 
 def _sanitize_enabled() -> bool:
     """出站脱敏开关（plan-598-2482）。
@@ -572,53 +591,203 @@ def _sanitize_enabled() -> bool:
 
 
 def sanitize_outbound_text(text: str) -> str:
-    """脱敏出站文本中的高危网关拦截特征（默认开启，见 `_sanitize_enabled`）。"""
+    """脱敏出站文本中的高危网关拦截特征与项目上下文关键词（默认开启，见 `_sanitize_enabled`）。
+
+    plan-20261124-context-sanitize：先执行 ta3 专有签名替换（`you are claude code`），
+    再执行项目统一的零宽字符关键词脱敏（受 `context_sanitize_enabled` 控制）；
+    若 `ta3_sanitize_outbound=False`（逐字节调试模式）则保持原样下发。
+    """
     if not text or not isinstance(text, str):
         return text
     if not _sanitize_enabled():
         return text
-    return _force_sanitize_text(text)
+    return sanitize_context_text(_apply_ta3_risk_patterns(text))
 
 
 def _force_sanitize_text(text: str) -> str:
-    """无条件执行脱敏替换（供「因特征被拦后自动重试」使用，绕开开关）。"""
+    """无条件执行脱敏替换与零宽字符关键词脱敏（供「因特征被拦后自动重试」使用，绕开开关）。"""
     if not text or not isinstance(text, str):
         return text
-    out = text
-    for pat, repl in _OUTBOUND_RISK_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
+    return force_sanitize_context_text(_apply_ta3_risk_patterns(text))
 
 
 def _force_sanitize_structure(val):
-    """无条件递归脱敏（供自动重试用）。"""
+    """无条件递归脱敏（供自动重试用；跳过图片 base64 与加密思考块，绝不改 dict 键名）。"""
     if isinstance(val, str):
         return _force_sanitize_text(val)
     if isinstance(val, dict):
-        return {k: _force_sanitize_structure(v) for k, v in val.items()}
+        btype = val.get("type")
+        if isinstance(btype, str) and btype in _SANITIZE_SKIP_BLOCK_TYPES:
+            return val
+        return {
+            k: (v if k in _SANITIZE_SKIP_KEYS else _force_sanitize_structure(v))
+            for k, v in val.items()
+        }
     if isinstance(val, list):
         return [_force_sanitize_structure(x) for x in val]
     return val
 
 
-def _has_risk_signature(payload) -> bool:
-    """请求体里是否含竞品 CLI 签名特征（决定被拦后是否值得自动重试一次）。"""
-    try:
-        blob = json.dumps(payload, ensure_ascii=False) if not isinstance(payload, str) else payload
-    except Exception:
+def _force_sanitize_wire_message(msg: dict) -> dict:
+    """无条件脱敏单条线缆消息（OpenAI/Anthropic 通用），跳过 role/id/name/图片/签名等协议字段。"""
+    if not isinstance(msg, dict):
+        return msg
+    out = {}
+    for k, v in msg.items():
+        if k in _WIRE_MSG_META_KEYS or k in _SANITIZE_SKIP_KEYS:
+            out[k] = v
+        elif k == "tool_calls" and isinstance(v, list):
+            new_calls = []
+            for tc in v:
+                if not isinstance(tc, dict):
+                    new_calls.append(tc)
+                    continue
+                tc_copy = dict(tc)
+                fn = tc_copy.get("function")
+                if isinstance(fn, dict):
+                    fn_copy = dict(fn)
+                    raw_args = fn_copy.get("arguments")
+                    if isinstance(raw_args, str) and raw_args:
+                        try:
+                            parsed = json.loads(raw_args)
+                        except ValueError:
+                            fn_copy["arguments"] = _force_sanitize_text(raw_args)
+                        else:
+                            fn_copy["arguments"] = json.dumps(
+                                _force_sanitize_structure(parsed), ensure_ascii=False,
+                            )
+                    elif isinstance(raw_args, (dict, list)):
+                        fn_copy["arguments"] = _force_sanitize_structure(raw_args)
+                    tc_copy["function"] = fn_copy
+                new_calls.append(tc_copy)
+            out[k] = new_calls
+        elif k == "content" and isinstance(v, list):
+            new_blocks = []
+            for blk in v:
+                if not isinstance(blk, dict):
+                    new_blocks.append(_force_sanitize_structure(blk))
+                    continue
+                btype = blk.get("type")
+                if btype in _SANITIZE_SKIP_BLOCK_TYPES:
+                    new_blocks.append(blk)
+                elif btype == "tool_use":
+                    bcopy = dict(blk)
+                    if "input" in bcopy:
+                        bcopy["input"] = _force_sanitize_structure(bcopy["input"])
+                    new_blocks.append(bcopy)
+                elif btype == "tool_result":
+                    bcopy = dict(blk)
+                    if "content" in bcopy:
+                        bcopy["content"] = _force_sanitize_structure(bcopy["content"])
+                    new_blocks.append(bcopy)
+                else:
+                    new_blocks.append(_force_sanitize_structure(blk))
+            out[k] = new_blocks
+        else:
+            out[k] = _force_sanitize_structure(v)
+    return out
+
+
+def _force_sanitize_body(body: dict) -> dict:
+    """403 兜底重试专用：只脱敏请求体中的 system / messages / tools.description，
+    绝不修改 model、prompt_cache_key 等顶层协议元数据（避免 model 名如 deepseek-v4 被破坏）。
+    """
+    if not isinstance(body, dict):
+        return _force_sanitize_structure(body)
+    out = dict(body)
+    if "system" in out:
+        out["system"] = _force_sanitize_structure(out["system"])
+    if isinstance(out.get("messages"), list):
+        out["messages"] = [_force_sanitize_wire_message(m) for m in out["messages"]]
+    if isinstance(out.get("tools"), list):
+        out["tools"] = sanitize_context_tools(out["tools"], force=True)
+    return out
+
+
+def _text_has_risk(text: str) -> bool:
+    if not text:
         return False
     for pat, _repl in _OUTBOUND_RISK_PATTERNS:
-        if pat.search(blob):
+        if pat.search(text):
             return True
+    return has_unsanitized_context_keyword(text)
+
+
+def _iter_context_texts(val, *, in_tools: bool = False):
+    """遍历上下文文本节点，跳过 model/id/name/图片/加密思考块等非上下文协议字段。"""
+    if isinstance(val, str):
+        yield val
+        return
+    if isinstance(val, list):
+        for item in val:
+            yield from _iter_context_texts(item, in_tools=in_tools)
+        return
+    if not isinstance(val, dict):
+        return
+    btype = val.get("type")
+    if isinstance(btype, str) and btype in _SANITIZE_SKIP_BLOCK_TYPES:
+        return
+    if in_tools:
+        for k, v in val.items():
+            if k == "description" and isinstance(v, str):
+                yield v
+            elif k in ("properties", "$defs", "definitions", "patternProperties") and isinstance(v, dict):
+                for pv in v.values():
+                    yield from _iter_context_texts(pv, in_tools=True)
+            elif k in ("function", "parameters", "input_schema", "items", "additionalProperties",
+                       "anyOf", "oneOf", "allOf"):
+                yield from _iter_context_texts(v, in_tools=True)
+        return
+    # 顶层请求体只检查 system / messages / tools，跳过 model 等协议元数据
+    if any(k in val for k in ("messages", "system", "model", "tools")):
+        if "system" in val:
+            yield from _iter_context_texts(val["system"])
+        if "messages" in val:
+            yield from _iter_context_texts(val["messages"])
+        if "tools" in val:
+            yield from _iter_context_texts(val["tools"], in_tools=True)
+        return
+    for k, v in val.items():
+        if k in _WIRE_MSG_META_KEYS or k in _SANITIZE_SKIP_KEYS:
+            continue
+        if k == "arguments" and isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                yield v
+            else:
+                yield from _iter_context_texts(parsed)
+        else:
+            yield from _iter_context_texts(v)
+
+
+def _has_risk_signature(payload) -> bool:
+    """请求体上下文里是否含未脱敏的竞品签名或敏感关键词（决定被拦后是否值得自动重试一次）。"""
+    if isinstance(payload, str):
+        return _text_has_risk(payload)
+    try:
+        for text in _iter_context_texts(payload):
+            if _text_has_risk(text):
+                return True
+    except Exception:
+        return False
     return False
 
 
 def sanitize_outbound_structure(val):
-    """递归脱敏字典、列表或字符串结构体（用于 tool 参数与 content_blocks）。"""
+    """递归脱敏字典、列表或字符串结构体（用于 tool 参数与非媒体 content_blocks）。"""
+    if not _sanitize_enabled():
+        return val
     if isinstance(val, str):
         return sanitize_outbound_text(val)
     if isinstance(val, dict):
-        return {k: sanitize_outbound_structure(v) for k, v in val.items()}
+        btype = val.get("type")
+        if isinstance(btype, str) and btype in _SANITIZE_SKIP_BLOCK_TYPES:
+            return val
+        return {
+            k: (v if k in _SANITIZE_SKIP_KEYS else sanitize_outbound_structure(v))
+            for k, v in val.items()
+        }
     if isinstance(val, list):
         return [sanitize_outbound_structure(x) for x in val]
     return val
@@ -1642,6 +1811,8 @@ class Ta3Provider(ModelProvider):
         stream=false、Accept 取 JSON 优先、OpenAI 面不带思考字段；响应若仍是 SSE 则照常流式解析。
         """
         disguised = disguise_tools(request.tools or [])
+        if _sanitize_enabled() and disguised:
+            disguised = sanitize_context_tools(disguised) or []
         url = self._endpoint()
         if self._anthropic:
             body = self._build_anthropic_body(request, disguised, text=text)
@@ -1705,7 +1876,7 @@ class Ta3Provider(ModelProvider):
                                 and _is_block_response(resp.status_code, err_text)
                                 and _has_risk_signature(body)):
                             _retried_after_block = True
-                            body = _force_sanitize_structure(body)
+                            body = _force_sanitize_body(body)
                             logger.warning(
                                 "[ta3] 请求因内容特征被拦截(%s)，已自动脱敏并重试一次: %s",
                                 resp.status_code, err_text[:160])

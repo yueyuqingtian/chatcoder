@@ -143,7 +143,8 @@ class AntigravityProvider(ModelProvider):
             else:
                 contents.append({"role": role, "parts": list(parts)})
 
-        for msg in messages:
+        from app.orchestration.context_sanitizer import sanitize_context_messages
+        for msg in sanitize_context_messages(messages):
             role = (msg.role or "").lower()
             if role in ("system", "developer"):
                 text = self._text_of(msg)
@@ -303,7 +304,8 @@ class AntigravityProvider(ModelProvider):
         inner: dict[str, Any] = {"contents": contents}
         if system_instruction:
             inner["systemInstruction"] = system_instruction
-        tools = self._convert_tools(request.tools)
+        from app.orchestration.context_sanitizer import sanitize_context_tools
+        tools = self._convert_tools(sanitize_context_tools(request.tools))
         if tools:
             inner["tools"] = tools
 

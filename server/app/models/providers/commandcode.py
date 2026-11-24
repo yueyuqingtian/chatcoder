@@ -97,8 +97,9 @@ class CommandCodeProvider(ModelProvider):
         system_parts: list[str] = []
         out_messages: list[dict] = []
 
+        from app.orchestration.context_sanitizer import sanitize_context_messages
         from app.orchestration.history_sequence import prepare_history
-        for m in prepare_history(messages):
+        for m in sanitize_context_messages(prepare_history(messages)):
             role = m.role
 
             if role in ("system", "developer"):
@@ -256,8 +257,9 @@ class CommandCodeProvider(ModelProvider):
         return out or None
 
     def _build_payload(self, request: ChatRequest) -> dict:
+        from app.orchestration.context_sanitizer import sanitize_context_tools
         system_prompt, messages = self._convert_messages(request.messages)
-        tools = self._convert_tools(request.tools)
+        tools = self._convert_tools(sanitize_context_tools(request.tools))
         thread_id = str(uuid.uuid4())
 
         params: dict[str, Any] = {

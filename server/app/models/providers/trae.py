@@ -30,6 +30,7 @@ from app.orchestration.history_sequence import record_wire_prefix
 from app.auth.trae.business import build_business_headers
 from app.models.providers.usage_normalization import openai_usage
 from app.models.base import ModelProvider
+from app.orchestration.context_sanitizer import sanitize_context_messages
 from app.orchestration.history_sequence import prepare_history, validate_openai_wire
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -143,7 +144,9 @@ class TraeProvider(ModelProvider):
         v29: 该请求体没有思考开关字段（档位由云端 model_name 配置决定），
         用户选择关闭思考同样只能不下发。
         """
-        messages = validate_openai_wire([self._convert_message(m) for m in prepare_history(request.messages)])
+        messages = validate_openai_wire(
+            [self._convert_message(m) for m in sanitize_context_messages(prepare_history(request.messages))]
+        )
         query_blocks = [
             {"type": "text", "data": {"content": m.get("content") or ""}}
             for m in messages if m.get("role") == "user" or m.get("content")
@@ -185,7 +188,9 @@ class TraeProvider(ModelProvider):
 
     def _build_work_body(self, request: ChatRequest) -> dict[str, Any]:
         """构造 TRAE 主对话编排请求；Work 额度只由此通道消费。"""
-        messages = validate_openai_wire([self._convert_message(m) for m in prepare_history(request.messages)])
+        messages = validate_openai_wire(
+            [self._convert_message(m) for m in sanitize_context_messages(prepare_history(request.messages))]
+        )
         query_blocks = [
             {"type": "text", "data": {"content": m.get("content") or ""}}
             for m in messages if m.get("content")

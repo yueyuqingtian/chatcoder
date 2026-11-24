@@ -16,7 +16,9 @@ import {
   IconGitGraph,
   IconMaximize,
   IconMinus,
+  IconNoWrap,
   IconPlus,
+  IconWrapText,
 } from "../icons";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
@@ -59,6 +61,9 @@ export const MermaidBlock = memo(function MermaidBlock({
   const [modalOpen, setModalOpen] = useState(false);
   const [modalZoom, setModalZoom] = useState(1);
   const [copied, setCopied] = useState(false);
+  const [wrapped, setWrapped] = useState(false);
+
+  const lineCount = source ? source.replace(/\r?\n$/, "").split(/\r?\n/).length : 0;
 
   useEffect(() => {
     const code = source.trim();
@@ -74,6 +79,7 @@ export const MermaidBlock = memo(function MermaidBlock({
           startOnLoad: false,
           securityLevel: "strict",
           theme: theme === "dark" ? "dark" : "neutral",
+          themeVariables: { background: "transparent" },
           fontFamily: "var(--font-sans, sans-serif)",
         });
         const renderId = `${safeId}_${Date.now().toString(36)}`;
@@ -110,48 +116,100 @@ export const MermaidBlock = memo(function MermaidBlock({
   // 流式未封块期间先安静展示源码，封块后无缝切到图表
   if (live) {
     return (
-      <div className="md-code-block" role="region" aria-label="Mermaid 流程图">
+      <div className="md-code-block mmd-block" role="region" aria-label="Mermaid 流程图">
         <div className="md-code-head">
           <span className="md-code-lang">
-            <IconGitGraph size={13} />
-            <span>mermaid · 绘制中…</span>
+            <IconGitGraph size={14} />
+            <span>mermaid</span>
+            <span className="md-code-lang-meta">· 绘制中…</span>
           </span>
         </div>
-        <pre className="md-code-pre">{source}</pre>
+        <pre className="md-code-pre"><code>{source}</code></pre>
+      </div>
+    );
+  }
+
+  // plan-seamless-flow-ui：图表态改用无外框透明画布 + 退让式单行眉标，直接融入消息流背景；
+  // 切换查看源码或语法异常时仍以干净的代码视图展示。
+  if (tab === "code" || error) {
+    return (
+      <div className="md-code-block mmd-block" role="region" aria-label="Mermaid 流程图源码">
+        <div className="md-code-head">
+          <span className="md-code-lang">
+            <IconGitGraph size={14} />
+            <span>mermaid</span>
+            {lineCount > 0 && <span className="md-code-lang-meta">· {lineCount} 行</span>}
+          </span>
+          <div className="md-code-actions">
+            {!error && (
+              <div className="iui-seg" role="tablist" aria-label="图表视图切换">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  className="iui-seg-btn"
+                  onClick={() => setTab("view")}
+                >
+                  图表
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={true}
+                  className="iui-seg-btn is-active"
+                  onClick={() => setTab("code")}
+                >
+                  源码
+                </button>
+              </div>
+            )}
+            <Tooltip content={wrapped ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+              <button
+                type="button"
+                className={`md-code-action-btn${wrapped ? " is-active" : ""}`}
+                aria-label={wrapped ? "关闭自动换行" : "开启自动换行"}
+                aria-pressed={wrapped}
+                onClick={() => setWrapped((v) => !v)}
+              >
+                {wrapped ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
+              </button>
+            </Tooltip>
+            <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="top">
+              <button
+                type="button"
+                className={`md-code-copy-btn${copied ? " copied" : ""}`}
+                aria-label={copied ? "已复制" : "复制源码"}
+                onClick={handleCopy}
+              >
+                {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+        {error ? (
+          <div className="mmd-error-wrap">
+            <div className="mmd-error-note">流程图语法暂无法解析，已保留源码供核对：{error}</div>
+            <pre className={`md-code-pre${wrapped ? " is-wrapped" : ""}`}><code>{source}</code></pre>
+          </div>
+        ) : (
+          <pre className={`md-code-pre${wrapped ? " is-wrapped" : ""}`}><code>{source}</code></pre>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="md-code-block mmd-block" role="region" aria-label="Mermaid 流程图">
-      <div className="md-code-head">
-        <span className="md-code-lang">
-          <IconGitGraph size={13} />
-          <span>mermaid</span>
-        </span>
-        <div className="md-code-actions">
-          <div className="iui-seg" role="tablist" aria-label="图表视图切换">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "view"}
-              className={`iui-seg-btn${tab === "view" ? " is-active" : ""}`}
-              onClick={() => setTab("view")}
-            >
-              图表
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "code"}
-              className={`iui-seg-btn${tab === "code" ? " is-active" : ""}`}
-              onClick={() => setTab("code")}
-            >
-              源码
-            </button>
-          </div>
-
-          {tab === "view" && svg && (
+    <div className="iui-canvas mmd-seamless" role="region" aria-label="Mermaid 流程图">
+      <div className="iui-eyebrow">
+        <div className="iui-eyebrow-left">
+          <span className="iui-eyebrow-icon" aria-hidden="true">
+            <IconGitGraph size={14} />
+          </span>
+          <span className="iui-eyebrow-title">流程图</span>
+          <span className="iui-eyebrow-kind">mermaid</span>
+        </div>
+        <div className="iui-eyebrow-tools">
+          {svg && (
             <>
               <Tooltip content="缩小" side="top">
                 <button
@@ -163,7 +221,16 @@ export const MermaidBlock = memo(function MermaidBlock({
                   <IconMinus size={13} />
                 </button>
               </Tooltip>
-              <span className="mmd-zoom-label">{Math.round(zoom * 100)}%</span>
+              <Tooltip content="复位缩放" side="top">
+                <button
+                  type="button"
+                  className="mmd-zoom-reset"
+                  aria-label="复位缩放"
+                  onClick={() => setZoom(1)}
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+              </Tooltip>
               <Tooltip content="放大" side="top">
                 <button
                   type="button"
@@ -196,7 +263,16 @@ export const MermaidBlock = memo(function MermaidBlock({
               </Tooltip>
             </>
           )}
-
+          <Tooltip content="查看源码" side="top">
+            <button
+              type="button"
+              className="md-code-action-btn"
+              aria-label="查看源码"
+              onClick={() => setTab("code")}
+            >
+              <IconCode size={14} />
+            </button>
+          </Tooltip>
           <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="top">
             <button
               type="button"
@@ -210,14 +286,7 @@ export const MermaidBlock = memo(function MermaidBlock({
         </div>
       </div>
 
-      {tab === "code" ? (
-        <pre className="md-code-pre">{source}</pre>
-      ) : error ? (
-        <div className="mmd-error-wrap">
-          <div className="mmd-error-note">流程图语法暂无法解析，已保留源码供核对：{error}</div>
-          <pre className="md-code-pre">{source}</pre>
-        </div>
-      ) : svg ? (
+      {svg ? (
         <div
           className="mmd-stage"
           onDoubleClick={() => setZoom(1)}

@@ -480,6 +480,13 @@ class Settings(BaseSettings):
     # lib/web/fetch/index.js:76-78、1468-1470）。默认 False → 发 `node`（与官方一致）；
     # True → 发 ta3_user_agent，仅供应急伪装。
     ta3_send_user_agent: bool = False
+    # plan-20261124-context-sanitize：上下文构造脱敏总开关与自定义关键词清单（默认开启）。
+    # 所有模型出站请求构造上下文时，对敏感产品/模型关键词（不分大小写）两侧自动
+    # 插入零宽字符，仅作用于发往模型的出站副本，不污染数据库、UI 展示或工具执行。
+    # context_sanitize_keywords 为 None 时使用内置默认词表；用户编辑后存具体列表（可为空）。
+    context_sanitize_enabled: bool = True
+    context_sanitize_keywords: list[str] | None = None
+
     # plan-598-2482：是否对出站消息内容做竞品签名脱敏。
     # 内置拦截策略：**默认开启**。`you are claude code` 这类签名一旦被工具执行
     # （grep 源码、读依赖）读进历史消息，后续每条请求都会带着它，网关会直接 403 拦掉

@@ -546,8 +546,9 @@ class KiroProvider(ModelProvider):
         turns: list[dict] = []
         pending_results: list[dict] = []
 
+        from app.orchestration.context_sanitizer import sanitize_context_messages, sanitize_context_tools
         from app.orchestration.history_sequence import prepare_history, validate_kiro_wire
-        for msg in prepare_history(request.messages):
+        for msg in sanitize_context_messages(prepare_history(request.messages)):
             if msg.role in ("system", "developer"):
                 if not msg.content:
                     continue
@@ -674,7 +675,7 @@ class KiroProvider(ModelProvider):
             if results:
                 ctx["toolResults"] = results
             if with_tools:
-                ctx["tools"] = self._convert_tools(request.tools)
+                ctx["tools"] = self._convert_tools(sanitize_context_tools(request.tools))
             if ctx:
                 item["userInputMessageContext"] = ctx
             return item

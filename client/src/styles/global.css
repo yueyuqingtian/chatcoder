@@ -2129,8 +2129,8 @@ svg.icon-ring-progress[data-loading] > circle:first-child { stroke-opacity: 0.25
    - 结构化行自带内距、且分隔线要贴卡片边缘 → 排除，不补内距；
    - 其余内容（面板根、工具条、资源列表、标题、表格）统一补 --sp-5，
      避免容器 padding:0 后内容贴边。 */
-.settings-card > *:not(.settings-row):not(.ui-card-row):not(.settings-card-title),
-.ui-card:not(.is-flush) > *:not(.ui-card-row):not(.ui-card-title):not(.ui-card-body) { padding: var(--sp-5); }
+.settings-card > *:not(.settings-row):not(.ui-card-row):not(.settings-card-title):not(.ui-collapse),
+.ui-card:not(.is-flush) > *:not(.ui-card-row):not(.ui-card-title):not(.ui-card-body):not(.ui-collapse) { padding: var(--sp-5); }
 /* plan-121-482：卡片内的行列表横向贴边——抵消上面统一补的内距，让行分隔线贴合卡片边缘；
    行内容仍保持 --sp-5 横向内距，与卡片其它内容对齐（等价于常规页「横向内距交给行自身」的做法）。
    注意 padding:0 同必须重置——.settings-card 的直接子元素（如 ui/List）会被上面规则补内距，

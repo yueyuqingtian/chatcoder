@@ -2295,6 +2295,12 @@ export interface GlobalSettingsOut {
   global_rules: string;
   /** plan-278-1391: 上下文压缩触发阈值（0.50~0.95，默认 0.90）；压缩常开，由此阈值决定何时触发 */
   auto_compact_threshold_ratio?: number;
+  /** plan-20261124-context-sanitize：上下文构造脱敏总开关（默认开启） */
+  context_sanitize_enabled?: boolean;
+  /** plan-20261124-context-sanitize：当前生效的脱敏关键词列表（不区分大小写；传 null 恢复默认） */
+  context_sanitize_keywords?: string[] | null;
+  /** plan-20261124-context-sanitize：只读，后端内置默认脱敏关键词列表 */
+  default_context_sanitize_keywords?: string[];
   language: string;
   /** plan-75-332: 以下五项旧风控已废弃（后端仅保留字段兼容旧 config.json，
    *  不再参与任何判定）——是否需审批统一由会话权限模式裁决。 */
@@ -2411,7 +2417,7 @@ export interface GlobalSettingsOut {
   workflow_isolation_default?: "shared" | "worktree";
 }
 
-export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, never>>;
+export type GlobalSettingsIn = Partial<Omit<GlobalSettingsOut, "default_context_sanitize_keywords">>;
 
 /** plan-20261020-bgtask：运行中的后台命令；elapsed 为服务端算好的已运行秒数（前端以收到的时刻为基准累加） */
 export interface BgProcessOut {

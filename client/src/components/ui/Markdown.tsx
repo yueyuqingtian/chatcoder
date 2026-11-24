@@ -19,7 +19,20 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { IconCopy, IconCheck, IconWrapText, IconNoWrap, IconEye, IconCode, IconMaximize } from "../icons";
+import {
+  IconAlertCircle,
+  IconAlertTriangle,
+  IconCheck,
+  IconCode,
+  IconCopy,
+  IconEye,
+  IconInfo,
+  IconMaximize,
+  IconNoWrap,
+  IconSparkles,
+  IconWrapText,
+  IconZap,
+} from "../icons";
 import { usePanelStore } from "../../store/panel";
 import { useChatStore } from "../../store/chat";
 import { useUiStore } from "../../store/ui";
@@ -29,6 +42,7 @@ import { TableBlock } from "./TableBlock";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { nodeText } from "./markdownData";
+import { parseCalloutChildren, type CalloutKind } from "./callout";
 import { LongCode } from "./LongCode";
 import { ViewportBlock } from "./ViewportBlock";
 import { MermaidBlock } from "./MermaidBlock";
@@ -99,51 +113,117 @@ export function CodeBlockWrapper({ children, live = false }: { children: ReactNo
     : source;
   const cacheKey = isPreviewable ? `md:${detectedLang}:${source.length}:${source.slice(0, 64)}` : "";
 
+  // plan-seamless-flow-ui：内联 HTML/SVG 预览态去掉外层代码块重边框，改为透明无框画布 + 退让式单行眉标
+  if (showPreview) {
+    return (
+      <div className="iui-canvas iui-inline-embed" role="region" aria-label="交互预览">
+        <div className="iui-eyebrow">
+          <div className="iui-eyebrow-left">
+            <span className="iui-eyebrow-icon" aria-hidden="true">
+              <IconSparkles size={14} />
+            </span>
+            <span className="iui-eyebrow-title">交互预览</span>
+            <span className="iui-eyebrow-kind">{detectedLang}</span>
+          </div>
+          <div className="iui-eyebrow-tools">
+            <Tooltip content="查看源码" side="top">
+              <button
+                className="md-code-action-btn"
+                onClick={() => setUserView("code")}
+                aria-label="查看源码"
+                type="button"
+              >
+                <IconCode size={14} />
+              </button>
+            </Tooltip>
+            <Tooltip content="大窗查看" side="top">
+              <button
+                className="md-code-action-btn"
+                onClick={() => setModalOpen(true)}
+                aria-label="大窗查看"
+                type="button"
+              >
+                <IconMaximize size={13} />
+              </button>
+            </Tooltip>
+            <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="top">
+              <button
+                className={`md-code-copy-btn${copied ? " copied" : ""}`}
+                onClick={handleCopy}
+                aria-label={copied ? "已复制" : "复制源码"}
+                type="button"
+              >
+                {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+        <div className="iui-stage-seamless">
+          <InteractiveSandbox html={sandboxHtml} cacheKey={cacheKey} title={`${detectedLang} 交互预览`} />
+        </div>
+        <Dialog
+          open={modalOpen}
+          onClose={() => setModalOpen(false)}
+          className="iui-modal-dialog"
+          bodyClassName="iui-modal-body"
+          title="交互预览"
+          subtitle="在安全沙箱大窗中查看与体验界面"
+          width={1400}
+          actions={
+            <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="bottom">
+              <button
+                className={`md-code-copy-btn${copied ? " copied" : ""}`}
+                onClick={handleCopy}
+                aria-label={copied ? "已复制" : "复制源码"}
+                type="button"
+              >
+                {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+              </button>
+            </Tooltip>
+          }
+        >
+          <div className="iui-modal-stage">
+            <InteractiveSandbox
+              html={sandboxHtml}
+              fillHeight
+              flush={false}
+              title={`${detectedLang} 大窗交互预览`}
+            />
+          </div>
+        </Dialog>
+      </div>
+    );
+  }
+
   return (
-    <div className="md-code-block" role="region" aria-label={showPreview ? "交互预览" : "代码块"}>
+    <div className="md-code-block" role="region" aria-label="代码块">
       <div className="md-code-head">
         <span className="md-code-lang">{detectedLang || "code"}</span>
         <div className="md-code-actions">
           {isPreviewable && !isLive && (
-            <>
-              <Tooltip content={showPreview ? "查看源码" : "在安全沙箱中预览交互效果"} side="top">
-                <button
-                  className={`md-code-action-btn${showPreview ? " is-active" : ""}`}
-                  onClick={() => setUserView(showPreview ? "code" : "preview")}
-                  aria-label={showPreview ? "查看源码" : "预览效果"}
-                  aria-pressed={showPreview}
-                  type="button"
-                >
-                  {showPreview ? <IconCode size={14} /> : <IconEye size={14} />}
-                </button>
-              </Tooltip>
-              {showPreview && (
-                <Tooltip content="大窗查看" side="top">
-                  <button
-                    className="md-code-action-btn"
-                    onClick={() => setModalOpen(true)}
-                    aria-label="大窗查看"
-                    type="button"
-                  >
-                    <IconMaximize size={13} />
-                  </button>
-                </Tooltip>
-              )}
-            </>
-          )}
-          {!showPreview && (
-            <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+            <Tooltip content="在安全沙箱中预览交互效果" side="top">
               <button
                 className="md-code-action-btn"
-                onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
-                aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
-                aria-pressed={codeWordWrap}
+                onClick={() => setUserView("preview")}
+                aria-label="预览效果"
+                aria-pressed={false}
                 type="button"
               >
-                {codeWordWrap ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
+                <IconEye size={14} />
               </button>
             </Tooltip>
           )}
+          <Tooltip content={codeWordWrap ? "当前：自动换行（点击关闭）" : "当前：不自动换行（点击开启）"} side="top">
+            <button
+              className="md-code-action-btn"
+              onClick={() => setPrefs({ codeWordWrap: !codeWordWrap })}
+              aria-label={codeWordWrap ? "关闭自动换行" : "开启自动换行"}
+              aria-pressed={codeWordWrap}
+              type="button"
+            >
+              {codeWordWrap ? <IconWrapText size={14} /> : <IconNoWrap size={14} />}
+            </button>
+          </Tooltip>
           {/* plan-282-1416：复制按钮图标化（原「复制」文字改为纯图标 + aria-label），
               头部更安静，同时保留已复制反馈（图标换勾 + copied 态着色） */}
           {/* plan-20261016-ux（问题 8）：悬停提示改用统一 Tooltip（不再用原生 title） */}
@@ -159,43 +239,8 @@ export function CodeBlockWrapper({ children, live = false }: { children: ReactNo
           </Tooltip>
         </div>
       </div>
-      {showPreview ? (
-        <div className="iui-code-preview">
-          <InteractiveSandbox html={sandboxHtml} cacheKey={cacheKey} title={`${detectedLang} 交互预览`} />
-          <Dialog
-            open={modalOpen}
-            onClose={() => setModalOpen(false)}
-            className="iui-modal-dialog"
-            bodyClassName="iui-modal-body"
-            title="交互预览"
-            subtitle="在安全沙箱大窗中查看与体验界面"
-            width={1400}
-            actions={
-              <Tooltip content={copied ? "已复制到剪贴板" : "复制源码"} side="bottom">
-                <button
-                  className={`md-code-copy-btn${copied ? " copied" : ""}`}
-                  onClick={handleCopy}
-                  aria-label={copied ? "已复制" : "复制源码"}
-                  type="button"
-                >
-                  {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                </button>
-              </Tooltip>
-            }
-          >
-            <div className="iui-modal-stage">
-              <InteractiveSandbox
-                html={sandboxHtml}
-                fillHeight
-                title={`${detectedLang} 大窗交互预览`}
-              />
-            </div>
-          </Dialog>
-        </div>
-      ) : (
-        <pre className={`md-code-pre${codeWordWrap ? " is-wrapped" : ""}`} ref={preRef}>{source.length > 12000
-          ? <LongCode source={source} language={detectedLang} live={isLive} /> : children}</pre>
-      )}
+      <pre className={`md-code-pre${codeWordWrap ? " is-wrapped" : ""}`} ref={preRef}>{source.length > 12000
+        ? <LongCode source={source} language={detectedLang} live={isLive} /> : children}</pre>
     </div>
   );
 }
@@ -263,6 +308,14 @@ function FileLink({ href, children }: { href?: string; children?: ReactNode }) {
   );
 }
 
+function calloutIcon(kind: CalloutKind): ReactNode {
+  if (kind === "tip") return <IconSparkles size={14} />;
+  if (kind === "important") return <IconZap size={14} />;
+  if (kind === "warning") return <IconAlertTriangle size={14} />;
+  if (kind === "caution") return <IconAlertCircle size={14} />;
+  return <IconInfo size={14} />;
+}
+
 /** 共享 markdown 组件映射——MarkdownContent 与 StreamingMarkdown（流式增量）共用，保证渲染一致 */
 export const markdownComponents: Components = {
   code({ node, className, children }) {
@@ -307,7 +360,21 @@ export const markdownComponents: Components = {
       />
     );
   },
-  blockquote({ children }) { return <blockquote className="md-blockquote">{children}</blockquote>; },
+  blockquote({ children }) {
+    const callout = parseCalloutChildren(children);
+    if (callout) {
+      return (
+        <div className={`md-callout tone-${callout.tone}`} role="note">
+          <div className="md-callout-head">
+            {calloutIcon(callout.kind)}
+            <span>{callout.title}</span>
+          </div>
+          {callout.body.length > 0 && <div className="md-callout-body">{callout.body}</div>}
+        </div>
+      );
+    }
+    return <blockquote className="md-blockquote">{children}</blockquote>;
+  },
   // plan-20261016-ux（问题 8）：表格统一走 TableBlock——卡片样式 + 复制 Markdown / 下载 CSV / 展开浮窗
   table({ children }) { return <TableBlock>{children}</TableBlock>; },
   th({ children }) { return <th className="md-th">{children}</th>; },

@@ -10,6 +10,11 @@ import { useI18n } from "../../store/i18n";
 import { isFontInstalled } from "../../utils/fontProbe";
 import { normalizeQueueMessageMode, type QueueMessageMode } from "../composer/queueDelivery";
 import { Button, CardRow, Input, Section, Segmented, Select, Slider, Switch, TagInput, type SelectOption } from "../ui";
+import {
+  ContextSanitizeSection,
+  FALLBACK_DEFAULT_SANITIZE_KEYWORDS,
+  isSameKeywordList,
+} from "./ContextSanitizeSection";
 
 /** 终端 Shell 兜底列表（后端探测结果未返回时使用，此时全部视为可用） */
 const TERMINAL_SHELLS: Array<{ value: string; label: string }> = [
@@ -70,11 +75,18 @@ export function GeneralPanel() {
     agent_retry_intervals: "10,20,30",
     // plan-278-1391: 上下文压缩触发阈值（占模型窗口比例，默认 0.90）
     auto_compact_threshold_ratio: 0.90,
+    // plan-20261124-context-sanitize：上下文构造脱敏总开关与自定义关键词清单
+    context_sanitize_enabled: true,
+    context_sanitize_keywords: [...FALLBACK_DEFAULT_SANITIZE_KEYWORDS],
     // 采样温度（工具轮 / 文本轮）与单次最大输出；0 输出上限 = 由模型或官方兜底决定
     agent_tool_temperature: 0.3,
     agent_text_temperature: 0.7,
     agent_max_output_tokens: 0,
   });
+  /** 后端返回的内置默认脱敏关键词（只读参考，用于判断「恢复默认」显示与复位） */
+  const [defaultSanitizeKeywords, setDefaultSanitizeKeywords] = useState<string[]>(FALLBACK_DEFAULT_SANITIZE_KEYWORDS);
+  const defaultSanitizeKeywordsRef = useRef<string[]>(FALLBACK_DEFAULT_SANITIZE_KEYWORDS);
+  defaultSanitizeKeywordsRef.current = defaultSanitizeKeywords;
   /** 增强搜索实际使用的 rg 来源（只读，由后端探测；不随设置一起回写） */
   const [rgSource, setRgSource] = useState<"bundled" | "path" | "none" | undefined>(undefined);
   /** 是否运行在桌面版（Electron）：任务完成通知依赖主进程 Notification，网页版不展示该设置 */
@@ -88,10 +100,14 @@ export function GeneralPanel() {
   const pendingSaveRef = useRef<typeof cfg | null>(null);
   const flushSave = useCallback(async (payload: typeof cfg) => {
     try {
+      const defaults = defaultSanitizeKeywordsRef.current;
+      const useDefaultKeywords = isSameKeywordList(payload.context_sanitize_keywords, defaults);
       await api.setGlobalSettings({
         ...payload,
         // plan-278-1391: 压缩触发阈值（保留两位小数，避免浮点噪声）
         auto_compact_threshold_ratio: Math.round(payload.auto_compact_threshold_ratio * 100) / 100,
+        // plan-20261124-context-sanitize：与内置默认一致时传 null，保持跟随默认词表
+        context_sanitize_keywords: useDefaultKeywords ? null : payload.context_sanitize_keywords,
       });
       // 保存即生效：刷新 todos / 搜索入口 / 终端字体等全局显示开关
       await useUiStore.getState().refreshGlobalFlags();
@@ -167,6 +183,10 @@ export function GeneralPanel() {
     try {
       const g = await api.getGlobalSettings(signal);
       if (signal?.aborted) return;
+      const defaults = Array.isArray(g.default_context_sanitize_keywords) && g.default_context_sanitize_keywords.length > 0
+        ? g.default_context_sanitize_keywords
+        : FALLBACK_DEFAULT_SANITIZE_KEYWORDS;
+      setDefaultSanitizeKeywords(defaults);
       setCfg({
         terminal_shell: g.terminal_shell || "auto",
         terminal_font: g.terminal_font || DEFAULT_TERMINAL_FONT,
@@ -182,6 +202,11 @@ export function GeneralPanel() {
         // plan-278-1391: 压缩触发阈值（后端可能未返回，回退默认 0.90）
         auto_compact_threshold_ratio: typeof g.auto_compact_threshold_ratio === "number"
           ? g.auto_compact_threshold_ratio : 0.90,
+        // plan-20261124-context-sanitize：上下文脱敏开关与当前词表
+        context_sanitize_enabled: g.context_sanitize_enabled !== false,
+        context_sanitize_keywords: Array.isArray(g.context_sanitize_keywords)
+          ? g.context_sanitize_keywords
+          : [...defaults],
         agent_tool_temperature: typeof g.agent_tool_temperature === "number" ? g.agent_tool_temperature : 0.3,
         agent_text_temperature: typeof g.agent_text_temperature === "number" ? g.agent_text_temperature : 0.7,
         agent_max_output_tokens: typeof g.agent_max_output_tokens === "number" ? g.agent_max_output_tokens : 0,
@@ -385,6 +410,15 @@ export function GeneralPanel() {
           />
         </CardRow>
       </Section>
+
+      {/* plan-20261124-context-sanitize：上下文脱敏开关与可编辑关键词词表 */}
+      <ContextSanitizeSection
+        enabled={cfg.context_sanitize_enabled}
+        keywords={cfg.context_sanitize_keywords}
+        defaultKeywords={defaultSanitizeKeywords}
+        onEnabledChange={(v) => patch({ context_sanitize_enabled: v })}
+        onKeywordsChange={(next) => patch({ context_sanitize_keywords: next })}
+      />
 
       <BrowserDownloadDirRow />
     </div>

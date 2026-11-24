@@ -11,7 +11,7 @@ import { MsgType, SenderType } from "@chatcoder/shared";
 import type { MessageOut } from "@chatcoder/shared";
 import { buildTimeline, isOutsideProcess, splitFlowSegments } from "../src/components/chat/timeline";
 import { stripRefLines } from "../src/utils/refLines";
-import { buildSandboxDocument } from "../src/components/chat/sandboxDoc";
+import { buildSandboxDocument, HOST_VAR_KEYS } from "../src/components/chat/sandboxDoc";
 
 function msg(
   id: number,
@@ -80,20 +80,29 @@ function msg(
   assert.equal(stripRefLines(raw, false), raw);
 }
 
-// 3. 沙箱文档包装：CSP + 主题变量 + 通信桥
+// 3. 沙箱文档包装：CSP + 主题变量 + 通信桥 + 默认无边距透明融入
 {
   const fragDoc = buildSandboxDocument("<div>Hello</div>", "inst-1", "dark", { "--bg-card": "#212121" });
   assert.ok(fragDoc.includes('data-theme="dark"'));
   assert.ok(fragDoc.includes("connect-src 'none'"));
   assert.ok(fragDoc.includes("--bg-card:#212121;"));
+  assert.ok(fragDoc.includes("background: transparent;"));
+  assert.ok(fragDoc.includes("padding: 0;"), "内联沙箱默认零边距以便与正文左缘齐平");
   assert.ok(fragDoc.includes("window.chatcoder"));
   assert.ok(fragDoc.includes('<div id="__cc_root"><div>Hello</div></div>'));
+
+  const modalDoc = buildSandboxDocument("<div>Modal</div>", "inst-m", "dark", {}, false);
+  assert.ok(modalDoc.includes("padding: 16px;"), "大窗预览传入 flush=false 时应保留呼吸内距");
 
   const fullDoc = buildSandboxDocument("<!doctype html><html><head><title>T</title></head><body><main>X</main></body></html>", "inst-2", "light", { "--text-1": "#111" });
   assert.ok(fullDoc.includes("connect-src 'none'"));
   assert.ok(fullDoc.includes("--text-1:#111;"));
   assert.ok(fullDoc.includes("window.chatcoder"));
   assert.ok(fullDoc.includes("<main>X</main>"));
+
+  for (const key of ["--text-strong", "--text-prose", "--md-code-fg", "--md-code-bg", "--info-ring"]) {
+    assert.ok(HOST_VAR_KEYS.includes(key), `HOST_VAR_KEYS 应同步包含 ${key}`);
+  }
 }
 
 console.log("interactive-ui.test.ts: all assertions passed");

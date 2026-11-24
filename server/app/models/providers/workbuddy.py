@@ -31,6 +31,7 @@ from app.models.base import ModelProvider
 from app.models.providers.temperature_policy import request_temperature
 from app.models.providers.tool_args import parse_tool_args
 from app.models.providers.workbuddy_model_caps import get_model_caps, map_reasoning_effort
+from app.orchestration.context_sanitizer import sanitize_context_messages, sanitize_context_tools
 from app.orchestration.history_sequence import prepare_history, validate_openai_wire
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -176,7 +177,9 @@ class WorkBuddyProvider(ModelProvider):
     def _build_body(self, request: ChatRequest) -> dict:
         body: dict = {
             "model": request.model or self._model_name,
-            "messages": validate_openai_wire([self._convert_message(m) for m in prepare_history(request.messages)]),
+            "messages": validate_openai_wire(
+                [self._convert_message(m) for m in sanitize_context_messages(prepare_history(request.messages))]
+            ),
             "stream": True,
         }
         # 温度统一取值：思考开启时不设置；目录声明的 temperature 作为次级默认；
@@ -199,7 +202,7 @@ class WorkBuddyProvider(ModelProvider):
         elif max_output:
             body["max_tokens"] = max_output
         if request.tools:
-            body["tools"] = request.tools
+            body["tools"] = sanitize_context_tools(request.tools)
             body["tool_choice"] = "auto"
         self._apply_thinking(body, request)
         record_wire_prefix("workbuddy", body)

@@ -152,24 +152,24 @@ svg.ic-spinner .ic-spinner-arc { transform-box: view-box; transform-origin: 12px
 /* 文件名可点击行：只在 hover 时提示可点，不常驻下划线 */
 .tc-filelink:hover .tc-filename { text-decoration: none; color: var(--accent); }
 
-/* ── 正文链接：可打开的文件链接用「文件芯片」表达，无法打开的去掉下划线按普通代码文本展示 ── */
-.md-body a.md-a:not(.md-file-link) { text-decoration: none; color: var(--accent); border-bottom: 1px solid color-mix(in oklab, var(--accent) 35%, transparent); }
-.md-body a.md-a:not(.md-file-link):hover { border-bottom-color: var(--accent); }
+/* ── 正文链接：plan-seamless-flow-ui 文件链接升级为彩色类型图标 + 冷蓝等宽文件芯片，无硬框高辨识 ── */
+.md-body a.md-a:not(.md-file-link) { text-decoration: none; color: var(--info); border-bottom: 1px solid color-mix(in oklab, var(--info) 35%, transparent); }
+.md-body a.md-a:not(.md-file-link):hover { border-bottom-color: var(--info); }
 .md-body .md-file-link {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 1.55em; padding: 0 7px; margin: 0 1px; border-radius: var(--r-md);
-  text-decoration: none; color: var(--text-1);
-  background: color-mix(in oklab, var(--text-1) 5%, transparent);
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 0.06em 0.46em 0.06em 0.34em; margin: 0 0.08em; border-radius: var(--r-sm);
+  text-decoration: none; color: var(--md-file-fg);
+  background: var(--md-file-bg);
   font-family: var(--font-mono); font-size: 0.86em; font-weight: 500;
-  line-height: 1; vertical-align: -0.14em;
-  transition: background var(--dur-2) var(--ease-standard), color var(--dur-2);
+  line-height: 1.45; vertical-align: -0.04em;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
 }
-.md-body .md-file-link:hover { background: var(--accent-soft); color: var(--accent); }
+.md-body .md-file-link:hover { background: var(--md-file-hover-bg); color: var(--md-file-fg); }
 .md-body .md-file-link-disabled {
-  text-decoration: none !important; border: none; cursor: text; color: var(--text-1);
-  font-family: var(--font-mono); font-size: 0.875em; line-height: 1.4;
+  text-decoration: none !important; border: none; cursor: text; color: var(--md-code-fg);
+  font-family: var(--font-mono); font-size: 0.865em; font-weight: 500; line-height: 1.4;
   padding: 0.1em 0.42em; border-radius: var(--r-sm);
-  background: color-mix(in oklab, var(--text-1) 6%, transparent);
+  background: var(--md-code-bg);
 }
 
 /* ── 工具图标状态（plan-91-393）：运行中循环动画 / 完成静止 / 失败转红 ── */
@@ -315,34 +315,83 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 /* 运行中的占位：与最终图同高的静态底色块（不做循环闪烁） */
 .shot-thumb.is-loading { cursor: default; box-shadow: none; }
 
-/* ══ plan-20261016-ux（问题 8）→ plan-20261121-flow-typography：消息流 Markdown 排版统一 ══════════════════════
+/* ══ plan-20261016-ux → plan-20261121-flow-typography → plan-seamless-flow-ui：消息流 Markdown 排版统一 ══════════
    流式与落库共用（StreamingMarkdown 同样包在 .turn-agent-text 里）。
-   确立「行内紧凑（1.62）+ 段间呼吸（0.72em）+ 清晰字阶」阅读节奏。 */
+   确立「三阶文字对比（--text-strong > --text-prose > --text-3）+ 外松内紧列表 + 冷蓝醒目行内提示」阅读节奏。 */
 
-.turn-agent-text .md-body .md-p { margin: 0 0 0.72em; line-height: inherit; }
+.turn-agent-text .md-body .md-p { margin: 0 0 0.8em; line-height: inherit; }
 .turn-agent-text .md-body .md-h1,
 .turn-agent-text .md-body .md-h2,
 .turn-agent-text .md-body .md-h3,
 .turn-agent-text .md-body .md-h4,
 .turn-agent-text .md-body .md-h5,
-.turn-agent-text .md-body .md-h6 { line-height: 1.38; color: var(--text-1); font-weight: 640; letter-spacing: -0.015em; }
-.turn-agent-text .md-body .md-h1 { font-size: 1.42em; margin: 1.5em 0 0.6em; padding-bottom: 0; border-bottom: none; }
-.turn-agent-text .md-body .md-h2 { font-size: 1.24em; margin: 1.4em 0 0.52em; }
-.turn-agent-text .md-body .md-h3 { font-size: 1.08em; margin: 1.15em 0 0.42em; }
-.turn-agent-text .md-body .md-h4 { font-size: 1em; margin: 0.95em 0 0.35em; color: var(--text-2); }
+.turn-agent-text .md-body .md-h6 { line-height: 1.38; color: var(--text-strong, var(--text-1)); font-weight: 620; letter-spacing: -0.015em; }
+.turn-agent-text .md-body .md-h1 { font-size: 1.38em; margin: 1.55em 0 0.62em; padding-bottom: 0; border-bottom: none; }
+.turn-agent-text .md-body .md-h2 { font-size: 1.2em; margin: 1.48em 0 0.56em; }
+.turn-agent-text .md-body .md-h3 { font-size: 1.06em; margin: 1.2em 0 0.44em; }
+.turn-agent-text .md-body .md-h4 { font-size: 1em; margin: 0.98em 0 0.36em; color: var(--text-2); }
 .turn-agent-text .md-body .md-h5 { font-size: 0.94em; margin: 0.85em 0 0.3em; color: var(--text-2); }
 .turn-agent-text .md-body .md-h6 { font-size: 0.88em; margin: 0.8em 0 0.25em; color: var(--text-3); }
-/* 列表：段间与条间呼吸分明，紧凑列表项不额外撑开；嵌套列表贴紧父项 */
+/* 列表：有序项段距略宽、嵌套子列表紧凑贴父项，序号稳重、项目符号柔和退让 */
 .turn-agent-text .md-body .md-ul,
-.turn-agent-text .md-body .md-ol { margin: 0.35em 0 0.85em; padding-left: 1.4em; }
-.turn-agent-text .md-body .md-li { margin: 0.36em 0; padding-left: 0.15em; line-height: inherit; }
+.turn-agent-text .md-body .md-ol { margin: 0.38em 0 0.9em; padding-left: 1.45em; }
+.turn-agent-text .md-body .md-ol > .md-li { margin: 0.56em 0; padding-left: 0.18em; line-height: inherit; }
+.turn-agent-text .md-body .md-ul > .md-li { margin: 0.34em 0; padding-left: 0.15em; line-height: inherit; }
 .turn-agent-text .md-body .md-li > .md-p { margin: 0; }
 .turn-agent-text .md-body .md-li > .md-ul,
-.turn-agent-text .md-body .md-li > .md-ol { margin: 0.28em 0 0.36em; }
-.turn-agent-text .md-body .md-li::marker { color: var(--text-3); }
-/* 引用与分隔线（遵守无左侧竖线规则，用微底圆角块表达） */
-.turn-agent-text .md-body .md-blockquote { margin: 0.85em 0; padding: 10px 14px; border-radius: var(--r-md); }
+.turn-agent-text .md-body .md-li > .md-ol { margin: 0.3em 0 0.4em; }
+.turn-agent-text .md-body .md-li::marker { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.turn-agent-text .md-body .md-ol > .md-li::marker { color: var(--text-2); font-weight: 600; }
+/* 引用与语义提示块（严守无左侧竖线规则，纯靠圆角柔色语义面 + 1px 淡环 + 行首图标标题表达层级） */
+.turn-agent-text .md-body .md-blockquote { margin: 0.9em 0; padding: 10px 14px; border-radius: var(--r-md); }
 .turn-agent-text .md-body .md-blockquote > .md-p { margin: 0; }
+.md-body .md-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 11px 14px;
+  border-radius: var(--r-lg);
+  font-size: 0.96em;
+  line-height: 1.62;
+}
+.md-body .md-callout.tone-info {
+  background: color-mix(in oklab, var(--info) 7.5%, transparent);
+  border: 1px solid var(--info-ring);
+}
+.md-body .md-callout.tone-tip {
+  background: color-mix(in oklab, var(--success) 7.5%, transparent);
+  border: 1px solid var(--success-ring);
+}
+.md-body .md-callout.tone-important {
+  background: var(--important-soft);
+  border: 1px solid var(--important-ring);
+}
+.md-body .md-callout.tone-warn {
+  background: color-mix(in oklab, var(--warning) 8%, transparent);
+  border: 1px solid var(--warning-ring);
+}
+.md-body .md-callout.tone-danger {
+  background: color-mix(in oklab, var(--error) 7.5%, transparent);
+  border: 1px solid var(--error-ring);
+}
+.md-body .md-callout-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.88em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.md-body .md-callout-head svg { flex-shrink: 0; }
+.md-body .md-callout.tone-info .md-callout-head { color: var(--info); }
+.md-body .md-callout.tone-tip .md-callout-head { color: var(--success); }
+.md-body .md-callout.tone-important .md-callout-head { color: var(--important); }
+.md-body .md-callout.tone-warn .md-callout-head { color: var(--warning); }
+.md-body .md-callout.tone-danger .md-callout-head { color: var(--error); }
+.md-body .md-callout-body { color: var(--text-prose, var(--text-1)); min-width: 0; }
+.md-body .md-callout-body > :first-child { margin-top: 0; }
+.md-body .md-callout-body > :last-child { margin-bottom: 0; }
 .turn-agent-text .md-body hr,
 .turn-agent-text .md-body .md-hr { margin: 1.25em 0; border: none; border-top: 1px solid var(--border); }
 
@@ -370,23 +419,48 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   background: color-mix(in oklab, var(--text-1) 4.5%, var(--bg-panel));
   border-bottom: 1px solid var(--surface-inset-border);
 }
+.md-body .md-code-lang,
 :is(.turn-agent-text, .ft-md-preview) .md-body .md-code-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
+  line-height: 1.3;
   text-transform: none;
   letter-spacing: 0;
   color: var(--text-2);
   min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.md-body .md-code-lang > svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.md-body .md-code-lang > span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.md-code-lang-meta {
+  flex-shrink: 0;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 .md-code-actions {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+.md-code-actions > .iui-seg {
+  margin-inline-end: 2px;
 }
 .md-code-action-btn,
 :is(.turn-agent-text, .ft-md-preview) .md-body .md-code-copy-btn {
@@ -470,28 +544,28 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   background: color-mix(in oklab, var(--text-2) 65%, transparent);
 }
 
-/* 表格（plan-03054563-1）：一体式顶栏（表图标 + 行列维度 + 操作按钮）+ 舒展列宽 + 轻盈分隔线 */
+/* 表格（plan-03054563-1 → plan-seamless-flow-ui）：消息流内去粗重外框，改为编辑感轻表格，弹窗预览保留清晰边界 */
 .md-table-block {
   position: relative;
-  margin: 12px 0;
+  margin: 14px 0;
   min-width: 0;
   max-width: 100%;
 }
 .md-table-card {
-  border: 1px solid var(--surface-inset-border);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  background: var(--surface-inset);
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
 }
 .md-table-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 34px;
-  padding: 0 8px 0 12px;
-  background: color-mix(in oklab, var(--text-1) 4%, var(--bg-panel));
-  border-bottom: 1px solid var(--surface-inset-border);
+  min-height: 28px;
+  padding: 0 2px 4px;
+  background: transparent;
+  border-bottom: none;
 }
 .md-table-meta {
   display: inline-flex;
@@ -500,7 +574,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   min-width: 0;
   font-size: 12px;
   font-weight: 500;
-  color: var(--text-2);
+  color: var(--text-3);
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   white-space: nowrap;
@@ -512,6 +586,12 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  opacity: 0.6;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.md-table-block:hover .md-table-tools,
+.md-table-block:focus-within .md-table-tools,
+.md-table-dialog .md-table-tools {
   opacity: 1;
 }
 .md-table-tool {
@@ -544,13 +624,13 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   margin: 0;
   border-collapse: collapse;
   border-spacing: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.56;
 }
 .md-body .md-table-card .md-table.md-table-windowed { table-layout: fixed; width: 100%; }
 .md-body .md-table-card .md-th,
 .md-body .md-table-card .md-td {
-  padding: 9px 14px;
+  padding: 9px 14px 9px 4px;
   border: none;
   border-bottom: 1px solid var(--border-light);
   text-align: left;
@@ -559,16 +639,16 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 .md-body .md-table-card .md-th,
 .md-table-modal .md-th {
-  padding: 8px 14px;
+  padding: 8px 14px 8px 4px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-2);
   white-space: nowrap;
-  background: color-mix(in oklab, var(--text-1) 2%, var(--surface-inset));
+  background: transparent;
   border-bottom: 1px solid var(--border);
 }
 .md-body .md-table-card .md-td {
-  color: var(--text-1);
+  color: var(--text-prose, var(--text-1));
   min-width: 72px;
   max-width: 300px;
   white-space: normal;
@@ -576,13 +656,14 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 }
 .md-body .md-table-card .md-td :not(pre) > .md-inline-code,
 .md-body .md-table-card .md-td .md-inline-code {
-  color: var(--text-1);
-  background: color-mix(in oklab, var(--text-1) 6%, transparent);
-  border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
-  padding: 0 4px;
+  color: var(--md-code-fg);
+  background: var(--md-code-bg);
+  border: none;
+  padding: 0.08em 0.38em;
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
   font-size: 0.86em;
+  font-weight: 500;
 }
 .md-body .md-table-card tbody tr:last-child > .md-td { border-bottom: none; }
 .md-body .md-table-card tbody tr { transition: background var(--dur-1) var(--ease-standard); }
@@ -591,7 +672,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 /* 窄容器自适应：子代理右侧栏、侧边对话小窗、窄版 MD 文档预览自动收紧表格与代码块内距 */
 :is(.subagent-panel, .mini-chat) .md-body .md-table-card .md-th,
 :is(.subagent-panel, .mini-chat) .md-body .md-table-card .md-td {
-  padding: 7px 10px;
+  padding: 7px 10px 7px 4px;
   max-width: 220px;
 }
 @container (max-width: 480px) {
@@ -599,7 +680,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   .ft-md-preview .md-body .md-table-card .md-td,
   .subagent-panel .md-body .md-table-card .md-th,
   .subagent-panel .md-body .md-table-card .md-td {
-    padding: 7px 10px;
+    padding: 7px 10px 7px 4px;
     max-width: 210px;
   }
   .ft-md-preview .md-body .md-code-pre,
@@ -608,45 +689,67 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   }
 }
 
-/* 浮窗：大视图可横纵滚动，表头吸顶；浮窗不在 .turn-agent-text 下，行内代码 / 加粗单独补齐消息流同款样式 */
+/* 浮窗：大视图可横纵滚动，表头吸顶；浮窗内保留卡片边界与冷蓝行内代码一致口径 */
 .md-table-dialog-body { padding-top: 4px; }
-.md-table-modal { font-size: 13px; line-height: 1.65; color: var(--text-1); }
+.md-table-modal { font-size: 13px; line-height: 1.65; color: var(--text-prose, var(--text-1)); }
+.md-table-modal .md-table-card {
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
 .md-table-modal .md-table-scroll { max-height: min(68vh, 720px); overflow: auto; }
 .md-table-modal .md-table { font-size: 13px; }
-.md-table-modal .md-th { position: sticky; top: 0; z-index: 1; }
-/* plan-621-2572：浮窗内行内代码与正文统一为中性灰底与细描边，去除旧版蓝字 */
-.md-table-modal .md-inline-code {
-  color: var(--text-1); background: color-mix(in oklab, var(--text-1) 6%, transparent);
-  border: 1px solid color-mix(in oklab, var(--text-1) 8%, transparent);
-  padding: 0 5px; border-radius: var(--r-sm);
-  font-family: var(--font-mono); font-size: 0.88em;
+.md-table-modal .md-th,
+.md-table-modal .md-td { padding: 9px 14px; }
+.md-table-modal .md-th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-panel);
 }
-.md-table-modal .md-strong { font-weight: 600; }
+.md-table-modal .md-inline-code {
+  color: var(--md-code-fg);
+  background: var(--md-code-bg);
+  border: none;
+  padding: 0.08em 0.42em;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 0.865em;
+  font-weight: 500;
+}
+.md-table-modal .md-strong { font-weight: 600; color: var(--text-strong, var(--text-1)); }
 
-/* ══ plan-20261017-ux-overhaul 阶段 D → plan-20261121-flow-typography：Markdown 正文排版收口 ══════════════════════ */
+/* ══ plan-20261017-ux-overhaul → plan-20261121-flow-typography → plan-seamless-flow-ui：Markdown 正文排版收口 ══ */
 .turn-item-text,
 .turn-agent-text,
 :is(.turn-agent-text, .ft-md-preview) .md-body { min-width: 0; max-width: 100%; }
-.turn-agent-text .md-body { color: var(--text-1); letter-spacing: -0.005em; }
+.turn-agent-text .md-body { color: var(--text-prose, var(--text-1)); letter-spacing: -0.004em; }
 .turn-agent-text .md-body > :first-child { margin-top: 0; }
 .turn-agent-text .md-body > :last-child { margin-bottom: 0; }
 .turn-agent-text .md-body strong,
-.turn-agent-text .md-body .md-strong { font-weight: 600; color: var(--text-1); }
+.turn-agent-text .md-body .md-strong { font-weight: 600; color: var(--text-strong, var(--text-1)); }
 .turn-agent-text .md-body .md-blockquote {
   color: var(--text-2);
-  background: color-mix(in oklab, var(--text-1) 4%, transparent);
+  background: color-mix(in oklab, var(--text-1) 3.8%, transparent);
 }
-/* 行内代码：去掉外框描边，改用干净的中性微底胶囊，减少密集排版的视觉噪音 */
-.turn-agent-text .md-body .md-inline-code {
-  color: var(--text-1);
-  background: color-mix(in oklab, var(--text-1) 6.5%, transparent);
+/* 行内代码（plan-seamless-flow-ui）：冷蓝醒目字体 + 极淡通透底色胶囊，接口路径/命令/组件名一眼可辨 */
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-inline-code {
+  color: var(--md-code-fg);
+  background: var(--md-code-bg);
   border: none;
-  padding: 0.1em 0.42em;
+  padding: 0.11em 0.42em;
+  margin: 0 0.04em;
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 0.875em;
+  font-size: 0.865em;
+  font-weight: 500;
   line-height: 1.4;
   font-variant-ligatures: none;
+  transition: background var(--dur-1) var(--ease-standard);
+}
+:is(.turn-agent-text, .ft-md-preview) .md-body .md-inline-code:hover {
+  background: var(--md-code-hover-bg);
 }
 
 /* 消息层次：用户消息（气泡）> AI 正文（主色）> 工作过程（工具 / 思考，安静次级色、略小一号） */
@@ -956,11 +1059,11 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   .tc-row.has-output .tc-chevron, .turn-worktime.clickable .turn-worktime-arrow, .sa-open-hint { opacity: 1; }
 }
 
-/* ── 消息流内嵌交互界面、沙箱与 Mermaid（plan-interactive-ui）── */
+/* ── 消息流内嵌交互界面、沙箱与 Mermaid（plan-interactive-ui → plan-seamless-flow-ui 无框融入重构）── */
 .iui-sandbox-frame {
   display: block;
   width: 100%;
-  min-height: 120px;
+  min-height: 96px;
   border: 0;
   background: transparent;
   transition: height var(--dur-2) var(--ease-standard);
@@ -970,10 +1073,6 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   height: 100%;
   min-height: 100%;
   transition: none;
-}
-
-.iui-code-preview {
-  background: var(--color-card);
 }
 
 /* 大窗预览弹窗（交互预览 / Mermaid 流程图共用）：贴近项目圆角、面板层级与充裕视口占比 */
@@ -1048,10 +1147,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .iui-modal-tabs {
   display: flex;
   align-items: center;
-  padding: 4px 6px;
-  background: var(--color-card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  padding: 2px 0;
   flex-shrink: 0;
 }
 .iui-modal-stage {
@@ -1059,7 +1155,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--color-card);
+  background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   overflow: hidden;
@@ -1103,7 +1199,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .iui-seg-btn:hover { color: var(--text-1); }
 .iui-seg-btn.is-active {
   background: var(--color-card);
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
   box-shadow: var(--shadow-xs);
 }
 
@@ -1112,19 +1208,22 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   color: var(--text-1);
 }
 
-/* Mermaid 流程图容器 */
+/* Mermaid 流程图无框画布：透明底直接落于 --bg-panel，弹窗内保留边框 */
+.mmd-seamless { margin: 14px 0; }
 .mmd-stage {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 16px 14px;
+  padding: 10px 0;
   overflow: auto;
-  background: var(--color-card);
-  min-height: 100px;
+  background: transparent;
+  min-height: 88px;
 }
 .mmd-stage-modal {
   flex: 1 1 0;
   min-height: 0;
+  padding: 18px 16px;
+  background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
 }
@@ -1137,6 +1236,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
 .mmd-svg-inner svg {
   max-width: 100%;
   height: auto;
+  background: transparent !important;
 }
 .mmd-zoom-label {
   min-width: 34px;
@@ -1145,16 +1245,32 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+.mmd-zoom-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 26px;
+  padding: 0 5px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.mmd-zoom-reset:hover { background: var(--bg-hover); color: var(--text-1); }
 .mmd-modal-tools {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 .mmd-loading {
-  padding: 20px 14px;
+  padding: 18px 4px;
   font-size: 12.5px;
   color: var(--text-3);
-  text-align: center;
 }
 .mmd-error-note {
   padding: 8px 14px;
@@ -1165,69 +1281,92 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   border-bottom: 1px solid var(--border);
 }
 
-/* 交互界面主卡片（present_ui 工具产出） */
+/* 交互界面无框画布（present_ui 工具产出 / Markdown 内联预览 / Mermaid 共用） */
 .turn-item-iui {
-  margin: 8px 0 12px;
+  margin: 14px 0 16px;
   min-width: 0;
+  container-type: inline-size;
 }
-.iui-card {
-  background: var(--color-card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  overflow: hidden;
+.iui-canvas {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  position: relative;
+  background: transparent;
 }
-.iui-head {
+.iui-inline-embed { margin: 14px 0; }
+
+/* 单行静谧眉标：零底色、零底边线，工具图标常态降噪、悬停显影 */
+.iui-eyebrow {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  min-height: 38px;
-  padding: 6px 10px 6px 14px;
-  background: color-mix(in oklab, var(--text-1) 3%, var(--color-card));
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  min-height: 28px;
+  flex-wrap: wrap;
 }
-.iui-head-meta {
+.iui-eyebrow-left {
   display: flex;
   align-items: center;
   gap: 7px;
   min-width: 0;
-  font-size: 12.5px;
-  line-height: 1.35;
+  font-size: 13px;
+  line-height: 1.4;
 }
-.iui-head-meta svg {
-  color: var(--text-3);
+.iui-eyebrow-compact {
+  min-height: 20px;
+  font-size: 12.5px;
+}
+.iui-eyebrow-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--info);
   flex-shrink: 0;
 }
-.iui-title {
+.iui-eyebrow-title {
   font-weight: 600;
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.iui-sub {
+.iui-eyebrow-kind {
   font-size: 12px;
   color: var(--text-3);
   flex-shrink: 0;
   white-space: nowrap;
 }
-.iui-head-tools {
-  display: flex;
+.iui-eyebrow-tools {
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0.56;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.iui-eyebrow-tools.is-always,
+.iui-canvas:hover .iui-eyebrow-tools,
+.iui-canvas:focus-within .iui-eyebrow-tools {
+  opacity: 1;
+}
+@media (hover: none) {
+  .iui-eyebrow-tools,
+  .md-table-tools { opacity: 1; }
 }
 
-.iui-tabs-bar {
+/* 多版式无框导航：合并方案切换与勾选指示为单行药丸条 */
+.iui-compare-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.iui-compare-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--color-card);
   flex-wrap: wrap;
 }
 .iui-tab-list {
@@ -1237,12 +1376,12 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   flex-wrap: wrap;
   min-width: 0;
 }
-.iui-tab {
+.iui-variant-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 11px;
   border: 1px solid transparent;
   border-radius: var(--r-md);
   background: transparent;
@@ -1253,50 +1392,20 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
 }
-.iui-tab:hover {
+.iui-variant-pill:hover {
   background: var(--bg-hover);
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
 }
-.iui-tab.is-viewing {
+.iui-variant-pill.is-viewing {
   background: var(--surface);
-  border-color: var(--border);
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
 }
-.iui-tab-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-brand);
-  flex-shrink: 0;
-}
-
-.iui-pick-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--border);
-  background: var(--color-card);
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.25;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
-}
-.iui-pick-btn:hover {
-  border-color: var(--border-hover);
-  color: var(--text-1);
-}
-.iui-pick-btn.is-picked {
-  border-color: color-mix(in oklab, var(--color-brand) 48%, transparent);
-  background: color-mix(in oklab, var(--color-brand) 10%, transparent);
+.iui-variant-pill.is-picked {
+  border-color: var(--info-ring);
+  background: color-mix(in oklab, var(--info) 8.5%, transparent);
   color: var(--info);
 }
-.iui-check-box {
+.iui-pick-dot {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1307,45 +1416,94 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   flex-shrink: 0;
   transition: background var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard);
 }
-.iui-check-box.is-radio { border-radius: 999px; }
-.iui-pick-btn.is-picked .iui-check-box,
-.iui-grid-pick.is-checked .iui-check-box {
-  border-color: var(--color-brand);
-  background: var(--color-brand);
+.iui-pick-dot.is-radio { border-radius: var(--r-pill); }
+.iui-variant-pill.is-picked .iui-pick-dot,
+.iui-grid-pick.is-checked .iui-pick-dot,
+.iui-pick-btn.is-picked .iui-pick-dot {
+  border-color: var(--info);
+  background: var(--info);
   color: var(--color-white);
 }
 
-.iui-stage {
-  background: var(--color-card);
+.iui-pick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-1) var(--ease-standard), border-color var(--dur-1) var(--ease-standard), color var(--dur-1) var(--ease-standard);
+}
+.iui-pick-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-strong, var(--text-1));
+}
+.iui-pick-btn.is-picked {
+  border-color: var(--info-ring);
+  background: color-mix(in oklab, var(--info) 9%, transparent);
+  color: var(--info);
+}
+
+/* 无框透明舞台：直接融入 --bg-panel，超长时提供柔和底淡出与大窗入口 */
+.iui-stage-seamless {
+  position: relative;
+  background: transparent;
   min-width: 0;
 }
+.iui-overflow-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 54px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  background: linear-gradient(180deg, transparent 0%, color-mix(in oklab, var(--bg-panel) 90%, transparent) 62%, var(--bg-panel) 100%);
+  pointer-events: none;
+}
+.iui-overflow-fade > * { pointer-events: auto; }
+
+/* 并排对比网格：直接敞开陈列在消息流画布上，无外盒、无灰槽嵌套 */
 .iui-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 10px;
-  padding: 12px;
-  background: var(--bg-panel);
+  gap: 14px;
+  padding: 2px 0;
+  background: transparent;
 }
 .iui-grid-cell {
   display: flex;
   flex-direction: column;
+  gap: 10px;
   min-width: 0;
-  background: var(--color-card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  transition: border-color var(--dur-1) var(--ease-standard);
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--r-lg);
+  transition: border-color var(--dur-1) var(--ease-standard), background var(--dur-1) var(--ease-standard);
+}
+.iui-grid-cell:hover {
+  background: var(--bg-hover);
 }
 .iui-grid-cell.is-checked {
-  border-color: var(--color-brand);
+  border-color: var(--info-ring);
+  background: color-mix(in oklab, var(--info) 7%, transparent);
 }
 .iui-grid-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--border);
 }
 .iui-grid-pick {
   display: inline-flex;
@@ -1354,9 +1512,9 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
   font-size: 12.5px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.35;
   cursor: pointer;
   min-width: 0;
@@ -1366,26 +1524,27 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.iui-grid-sandbox { min-width: 0; }
 .iui-grid-note {
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-2);
-}
-
-.iui-caption {
-  padding: 8px 14px;
-  border-top: 1px solid var(--border);
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-2);
+  margin-top: auto;
 }
-/* 查看源码面板：统一代码块头部、行号语法高亮与静止态常驻可见滚动条 */
+
+.iui-caption {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+/* 查看源码面板：平滑折叠的独立轻量代码卡 */
 .iui-source-wrap {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--surface-inset-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
   background: color-mix(in oklab, var(--text-1) 2%, var(--bg-panel));
 }
 .iui-source-head {
@@ -1396,7 +1555,7 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   min-height: 32px;
   padding: 0 8px 0 12px;
   background: color-mix(in oklab, var(--text-1) 4%, var(--bg-panel));
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--surface-inset-border);
 }
 .iui-source-meta {
   display: flex;
@@ -1498,16 +1657,19 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   word-break: break-word;
 }
 
-.iui-bridge-bar {
+/* 沙箱回调条：无框轻柔圆角条 */
+.iui-bridge-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--info-soft);
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--info-ring);
+  background: color-mix(in oklab, var(--info) 8%, transparent);
   font-size: 12.5px;
   line-height: 1.45;
+  color: var(--text-1);
   flex-wrap: wrap;
 }
 .iui-bridge-actions {
@@ -1517,28 +1679,22 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   margin-left: auto;
 }
 
-.iui-decide {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in oklab, var(--text-1) 2.5%, var(--color-card));
-}
-.iui-decide-top {
+/* 精简单行决策栏：直接置于舞台下方，无灰底盒盖住页面呼吸感 */
+.iui-decide-dock {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  padding-top: 2px;
 }
 .iui-picked-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 24px;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--color-card);
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
   border: 1px solid var(--border);
   font-size: 12px;
   line-height: 1.2;
@@ -1549,24 +1705,12 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   white-space: nowrap;
 }
 .iui-picked-badge strong {
-  color: var(--text-1);
+  color: var(--text-strong, var(--text-1));
   font-weight: 600;
 }
 .iui-note-input {
   flex: 1 1 200px;
   min-width: 0;
-}
-.iui-decide-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.iui-decide-hint {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-3);
 }
 .iui-decide-actions {
   display: flex;
@@ -1575,14 +1719,15 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   margin-left: auto;
 }
 
-.iui-done-bar {
+.iui-done-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 9px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--success-soft);
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--success-ring);
+  background: color-mix(in oklab, var(--success) 8%, transparent);
   font-size: 12.5px;
   line-height: 1.45;
   flex-wrap: wrap;
@@ -1599,22 +1744,23 @@ svg.tg [class^="tg-"], svg.tg [class*=" tg-"] { transform-box: fill-box; transfo
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 28px 16px;
+  padding: 18px 2px;
   font-size: 12.5px;
   line-height: 1.45;
   color: var(--text-3);
 }
 .iui-error-bar {
-  padding: 14px 16px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--error-ring);
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--error);
-  background: var(--error-soft);
+  background: color-mix(in oklab, var(--error) 8%, transparent);
 }
 
 @container (max-width: 380px) {
   .iui-grid { grid-template-columns: 1fr; }
-  .iui-head { padding: 6px 8px 6px 10px; }
-  .iui-sub { display: none; }
-  .iui-decide { padding: 8px 10px; }
+  .iui-eyebrow-kind { display: none; }
+  .iui-decide-actions { width: 100%; justify-content: flex-end; }
 }

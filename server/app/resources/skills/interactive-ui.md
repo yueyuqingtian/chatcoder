@@ -27,13 +27,16 @@
 ## 沙箱界面编写约束（必须遵守）
 
 1. **完全离线自包含**：沙箱启用严格 CSP（`connect-src 'none'`），**禁止**任何外网 `<script src>` / `<link href>` / `fetch()` / CDN（如 cdn.jsdelivr.net）。样式与脚本全部内联写在 `<style>` 与 `<script>` 中，图表使用原生 `<svg>` 或 `<canvas>` 绘制。
-2. **使用宿主主题语义变量**（自动跟随浅/深色切换）：
-   - 背景：`var(--bg-card)`、`var(--bg-panel)`、`var(--surface)`、`var(--bg-hover)`
-   - 文字：`var(--text-1)`、`var(--text-2)`、`var(--text-3)`
-   - 边框与点缀：`var(--border)`、`var(--border-hover)`、`var(--color-brand)`、`var(--primary)` / `var(--primary-fg)`、`var(--success)`、`var(--warning)`、`var(--error)`
+2. **无外框无缝融入消息流画布（重要）**：
+   - 宿主沙箱背景透明且零外边距（直接与消息流正文左缘对齐）。**严禁**在最外层再套整张白/深色大卡片、外边框、大阴影或重复标题栏，避免出现「盒子套盒子」的割裂感。
+   - 直接在透明画布上排布指标、控件、SVG 图表或组件原型；需要局部层次时优先使用 `var(--surface)` / `var(--bg-hover)` 柔和微底与留白，而不是粗重描边。
+3. **使用宿主主题语义变量**（自动跟随浅/深色切换）：
+   - 背景与层次：`transparent`、`var(--surface)`、`var(--bg-panel)`、`var(--bg-elevated)`、`var(--bg-hover)`
+   - 三阶文字：`var(--text-strong)`（标题/关键数字）、`var(--text-prose)` / `var(--text-1)`（正文）、`var(--text-2)`、`var(--text-3)`
+   - 点缀与状态：`var(--md-code-fg)` / `var(--md-code-bg)`（冷蓝高亮数值/参数）、`var(--border)`、`var(--border-hover)`、`var(--color-brand)`、`var(--primary)` / `var(--primary-fg)`、`var(--info)` / `var(--info-ring)`、`var(--success)`、`var(--warning)`、`var(--error)`
    - 圆角：控件 `8px`（`var(--r-md)`）、卡片 `12px`（`var(--r-lg)`），**禁止**左侧彩色装饰竖线。
-3. **Canvas 主题重绘**：若页面使用 `<canvas>`，监听 `window.addEventListener("chatcoder:themechange", draw)` 在主题切换时读取 `getComputedStyle(document.documentElement)` 重绘。
-4. **禁止视口自锁高度**：外层容器高度由内部内容自适应决定（上限约 500px），**严禁**在顶层容器写 `100vh`、`min-height: 100vh`、`h-screen` 或 `height: 100%`，否则容器会塌缩。
-5. **与微应用（`microapp-create`）的分工**：
+4. **Canvas 主题重绘**：若页面使用 `<canvas>`，监听 `window.addEventListener("chatcoder:themechange", draw)` 在主题切换时读取 `getComputedStyle(document.documentElement)` 重绘。
+5. **禁止视口自锁高度**：外层容器高度由内部内容自适应决定（上限约 680px），**严禁**在顶层容器写 `100vh`、`min-height: 100vh`、`h-screen` 或 `height: 100%`，否则容器会塌缩。
+6. **与微应用（`microapp-create`）的分工**：
    - 消息流即时展示、多方案比选、图表与一次性原型 → 用本技能（`present_ui`，零写盘、跨模式通用）；
    - 需要长期保存到个人应用库、挂到右侧面板且持续读写项目数据 → 用 `microapp-create`。

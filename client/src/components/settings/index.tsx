@@ -54,7 +54,7 @@ export interface SettingsIndexItem {
 
 /** 供命令中心（Cmd+K）搜索：设置项索引 */
 export const SETTINGS_INDEX: SettingsIndexItem[] = [
-  { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning", icon: <SettingsGlyph name="general" /> },
+  { key: "general", label: "常规", group: "basic", keywords: "语言 代理 终端 Shell 字体 搜索 todos reasoning 上下文 脱敏 零宽 关键词", icon: <SettingsGlyph name="general" /> },
   { key: "appearance", label: "外观", group: "basic", keywords: "主题 毛玻璃 布局 字号 颜色 面板", icon: <SettingsGlyph name="appearance" /> },
   { key: "pets", label: "宠物", group: "basic", keywords: "宠物 pet petdex 桌面 浮窗 任务 状态 徽标 胶囊", icon: <SettingsGlyph name="pets" /> },
   // plan-334-1661：电脑操控（内核常驻的内置工具，不注册为 MCP，因此不在连接器页）

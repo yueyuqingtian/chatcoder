@@ -6,7 +6,7 @@ from functools import partial, wraps
 from pathlib import Path
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import (
     format_retry_intervals,
@@ -17,6 +17,10 @@ from app.core.config import (
 from app.core.ripgrep_env import locate_ripgrep
 from app.core.user_config_io import (
     config_transaction, read_config_snapshot, recent_config, remember_config, run_config_io, write_config,
+)
+from app.orchestration.context_sanitizer import (
+    DEFAULT_CONTEXT_SANITIZE_KEYWORDS,
+    normalize_context_sanitize_keywords,
 )
 
 router = APIRouter()
@@ -218,6 +222,14 @@ def load_persisted_workspace() -> None:
         settings.queue_message_mode = _queue_message_mode(data["queue_message_mode"])
     if "memory_enabled" in data:
         settings.auto_memory_enabled = bool(data["memory_enabled"])
+    # plan-20261124-context-sanitize：启动时恢复上下文脱敏开关与自定义关键词清单
+    if "context_sanitize_enabled" in data:
+        settings.context_sanitize_enabled = bool(data["context_sanitize_enabled"])
+    if "context_sanitize_keywords" in data:
+        raw_kws = data["context_sanitize_keywords"]
+        settings.context_sanitize_keywords = (
+            None if raw_kws is None else normalize_context_sanitize_keywords(raw_kws)
+        )
     # 采样温度与最大输出：与 PUT 同口径夹紧，启动即生效（否则重启后回落到环境变量或默认值）
     for _fkey in ("agent_tool_temperature", "agent_text_temperature"):
         if _fkey in data:
@@ -422,6 +434,14 @@ class GlobalSettingsOut(BaseModel):
     global_rules: str = ""
     # plan-278-1391: 上下文压缩触发阈值（占模型窗口比例）。默认 0.90，可配置范围 0.50~0.95。
     auto_compact_threshold_ratio: float = 0.90
+    # plan-20261124-context-sanitize：上下文脱敏开关、当前生效关键词与只读默认词表
+    context_sanitize_enabled: bool = True
+    context_sanitize_keywords: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_CONTEXT_SANITIZE_KEYWORDS)
+    )
+    default_context_sanitize_keywords: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_CONTEXT_SANITIZE_KEYWORDS)
+    )
     language: str = "zh"
     # v1.0: Agent/安全配置
     # plan-75-332：auto_approve_tools / force_approval_tools / sandbox_mode /
@@ -562,6 +582,9 @@ class GlobalSettingsIn(BaseModel):
     global_rules: str | None = None
     # plan-278-1391: 压缩触发阈值比例（0.50~0.95）
     auto_compact_threshold_ratio: float | None = None
+    # plan-20261124-context-sanitize：上下文脱敏开关与自定义关键词列表（传 null 恢复默认）
+    context_sanitize_enabled: bool | None = None
+    context_sanitize_keywords: list[str] | None = None
     language: str | None = None
     # v1.0: Agent/安全配置
     auto_approve_tools: bool | None = None
@@ -660,6 +683,20 @@ def _global_settings_out(data: dict) -> GlobalSettingsOut:
         auto_compact_threshold_ratio=float(
             data.get("auto_compact_threshold_ratio", settings.auto_compact_threshold_ratio)
         ),
+        # plan-20261124-context-sanitize：上下文脱敏开关、当前词表（未自定义时回落默认）与内置默认词表
+        context_sanitize_enabled=bool(
+            data.get("context_sanitize_enabled", settings.context_sanitize_enabled)
+        ),
+        context_sanitize_keywords=(
+            normalize_context_sanitize_keywords(data["context_sanitize_keywords"])
+            if "context_sanitize_keywords" in data and data["context_sanitize_keywords"] is not None
+            else (
+                normalize_context_sanitize_keywords(settings.context_sanitize_keywords)
+                if settings.context_sanitize_keywords is not None
+                else list(DEFAULT_CONTEXT_SANITIZE_KEYWORDS)
+            )
+        ),
+        default_context_sanitize_keywords=list(DEFAULT_CONTEXT_SANITIZE_KEYWORDS),
         language=data.get("language", "zh"),
         auto_approve_tools=data.get("auto_approve_tools", settings.auto_approve_tools),
         force_approval_tools=data.get("force_approval_tools", settings.force_approval_tools),
@@ -841,6 +878,19 @@ def set_global_settings(body: GlobalSettingsIn) -> GlobalSettingsOut:
         if _ratio is not None and 0.50 <= _ratio <= 0.95:
             data["auto_compact_threshold_ratio"] = round(_ratio, 2)
             updates["auto_compact_threshold_ratio"] = round(_ratio, 2)
+    # plan-20261124-context-sanitize：上下文脱敏开关与关键词列表（落盘 + 运行时立即生效）
+    if body.context_sanitize_enabled is not None:
+        _cse = bool(body.context_sanitize_enabled)
+        data["context_sanitize_enabled"] = _cse
+        updates["context_sanitize_enabled"] = _cse
+    if "context_sanitize_keywords" in body.model_fields_set:
+        if body.context_sanitize_keywords is None:
+            data.pop("context_sanitize_keywords", None)
+            updates["context_sanitize_keywords"] = None
+        else:
+            _kws = normalize_context_sanitize_keywords(body.context_sanitize_keywords)
+            data["context_sanitize_keywords"] = _kws
+            updates["context_sanitize_keywords"] = _kws
     if body.language is not None:
         data["language"] = body.language
     # v1.0: Agent/安全配置

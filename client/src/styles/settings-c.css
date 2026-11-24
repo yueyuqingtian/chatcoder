@@ -88,6 +88,125 @@
   line-height: 1;
 }
 
+/* plan-20261124-context-sanitize → plan-seamless-flow-ui：常规页上下文脱敏关键词编辑区
+   对齐全站 CardRow（14px var(--sp-5) 内距、13.5px 标题 + 12px 说明），去除内缩细横线与双重内边距。 */
+.ui-card-row.gp-sanitize-switch-row {
+  transition: border-color var(--dur-3) var(--ease-emphasized-decel);
+}
+.ui-card-row.gp-sanitize-switch-row.is-collapsed {
+  border-bottom-color: transparent;
+}
+.gp-sanitize-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: 14px var(--sp-5);
+}
+.gp-sanitize-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  min-width: 0;
+}
+.gp-sanitize-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.gp-sanitize-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.gp-sanitize-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.gp-sanitize-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.4;
+  transition: border-color var(--dur-2) var(--ease-standard), background var(--dur-2) var(--ease-standard);
+}
+.gp-sanitize-chip:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-hover);
+}
+.gp-sanitize-chip-text {
+  cursor: text;
+  color: var(--text-1);
+  line-height: 1.4;
+  outline: none;
+}
+.gp-sanitize-chip-text:focus-visible {
+  text-decoration: underline;
+}
+.gp-sanitize-edit-wrap {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-hover);
+  background: var(--color-input);
+}
+.gp-sanitize-edit-input {
+  min-width: 5ch;
+  max-width: 240px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.gp-sanitize-empty {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gp-sanitize-add {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.gp-sanitize-add > .ui-input,
+.gp-sanitize-add > .ui-input-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gp-sanitize-error {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-destructive);
+}
+
 /* ── 使用统计：工具条 / KPI / 明细表（plan-91-393） ── */
 .sc-usage-toolbar > .btn { margin-left: 0; }
 .sc-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }

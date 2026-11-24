@@ -320,7 +320,12 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
   const [modalOpen, setModalOpen] = useState(false);
   const [modalCopied, setModalCopied] = useState(false);
   const [sending, setSending] = useState(false);
+  const [stageOverflow, setStageOverflow] = useState(false);
   const [bridgeMsg, setBridgeMsg] = useState<{ summary: string; raw: unknown; action: string } | null>(null);
+
+  useEffect(() => {
+    setStageOverflow(false);
+  }, [viewingId, layout]);
 
   useEffect(() => {
     if (!payload) return;
@@ -342,7 +347,7 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
   if (failed) {
     return (
       <div className="turn-item turn-item-iui">
-        <div className="iui-card">
+        <div className="iui-canvas">
           <div className="iui-error-bar">{errText}</div>
         </div>
       </div>
@@ -352,7 +357,7 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
   if (!payload) {
     return (
       <div className="turn-item turn-item-iui">
-        <div className="iui-card" aria-busy={live}>
+        <div className="iui-canvas" aria-busy={live}>
           <div className="iui-skeleton">
             {live && <IconSpinner size={14} />}
             <span>{live ? "正在生成可交互界面…" : "正在加载交互界面…"}</span>
@@ -364,17 +369,23 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
 
   const variants = payload.variants;
   const current = variants.find((v) => v.id === viewingId) ?? variants[0];
-  const checkedSet = new Set(savedState.checkedIds.filter((id) => variants.some((v) => v.id === id)));
-  const chosenVariants = variants.filter((v) => checkedSet.has(v.id));
+  const rawChecked = savedState.checkedIds.filter((id) => variants.some((v) => v.id === id));
   const isMulti = variants.length > 1;
   const sel = payload.selection;
   const submitted = savedState.submitted;
+
+  // plan-seamless-flow-ui：单选模式下自动对齐当前查看的版式，消除「切换标签后再找勾选按钮」的折返操作
+  const effectiveCheckedIds = sel.enabled && sel.mode === "single" && !submitted
+    ? (rawChecked.length > 0 ? [rawChecked[0]] : [current.id])
+    : rawChecked;
+  const checkedSet = new Set(effectiveCheckedIds);
+  const chosenVariants = variants.filter((v) => checkedSet.has(v.id));
 
   const toggleVariantCheck = (vid: string) => {
     if (submitted) return;
     updateSaved((prev) => {
       if (sel.mode === "single") {
-        return { ...prev, checkedIds: prev.checkedIds.includes(vid) && prev.checkedIds.length === 1 ? [] : [vid] };
+        return { ...prev, checkedIds: [vid] };
       }
       const has = prev.checkedIds.includes(vid);
       return {
@@ -383,6 +394,14 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
       };
     });
     setViewingId(vid);
+  };
+
+  const handleVariantTabClick = (vid: string) => {
+    setViewingId(vid);
+    if (!sel.enabled || submitted) return;
+    if (sel.mode === "single") {
+      updateSaved((prev) => ({ ...prev, checkedIds: [vid] }));
+    }
   };
 
   const buildRefPayload = (): ComposerRefOut => {
@@ -482,113 +501,141 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
 
   const currentChecked = checkedSet.has(current.id);
   const metaSub = isMulti
-    ? `· ${variants.length} 套版式${sel.enabled ? (sel.mode === "multiple" ? " · 多选" : " · 单选") : ""}`
-    : `· ${KIND_SUB_LABEL[payload.kind]}`;
+    ? `${variants.length} 套版式${sel.enabled ? (sel.mode === "multiple" ? " · 多选" : " · 单选") : ""}`
+    : KIND_SUB_LABEL[payload.kind];
+
+  const primaryConfirmText = sel.confirm_label !== "选定并继续"
+    ? sel.confirm_label
+    : (sel.mode === "single" && chosenVariants.length === 1
+      ? `选用「${chosenVariants[0].label}」并继续`
+      : "选定并继续");
+
+  const actionToolbar = (
+    <div className={`iui-eyebrow-tools${isMulti ? " is-always" : ""}`}>
+      {isMulti && (
+        <div className="iui-seg" role="tablist" aria-label="版式排列方式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={layout === "tabs"}
+            className={`iui-seg-btn${layout === "tabs" ? " is-active" : ""}`}
+            onClick={() => setLayout("tabs")}
+          >
+            单览
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={layout === "grid"}
+            className={`iui-seg-btn${layout === "grid" ? " is-active" : ""}`}
+            onClick={() => setLayout("grid")}
+          >
+            并排
+          </button>
+        </div>
+      )}
+      <Tooltip content={showSource ? "收起源码" : "查看源码"} side="top">
+        <button
+          type="button"
+          className={`md-code-action-btn${showSource ? " is-active" : ""}`}
+          aria-label={showSource ? "收起源码" : "查看源码"}
+          aria-expanded={showSource}
+          onClick={() => setShowSource((v) => !v)}
+        >
+          <IconCode size={14} />
+        </button>
+      </Tooltip>
+      <Tooltip content="大窗查看" side="top">
+        <button
+          type="button"
+          className="md-code-action-btn"
+          aria-label="大窗查看"
+          onClick={() => setModalOpen(true)}
+        >
+          <IconMaximize size={13} />
+        </button>
+      </Tooltip>
+    </div>
+  );
 
   return (
     <div className="turn-item turn-item-iui">
-      <article className="iui-card" aria-label={payload.title}>
-        <div className="iui-head">
-          <div className="iui-head-meta">
-            {kindIcon(payload.kind)}
-            <span className="iui-title">{payload.title}</span>
-            <span className="iui-sub">{metaSub}</span>
+      {/* plan-seamless-flow-ui：去外壳无边框画布，直接以 --bg-panel 为底，融入消息流阅读节奏 */}
+      <article className="iui-canvas" aria-label={payload.title}>
+        {(!isMulti || layout === "grid") ? (
+          <div className="iui-eyebrow">
+            <div className="iui-eyebrow-left">
+              <span className="iui-eyebrow-icon" aria-hidden="true">{kindIcon(payload.kind)}</span>
+              <span className="iui-eyebrow-title">{payload.title}</span>
+              <span className="iui-eyebrow-kind">{metaSub}</span>
+            </div>
+            {actionToolbar}
           </div>
-          <div className="iui-head-tools">
-            {isMulti && (
-              <div className="iui-seg" role="tablist" aria-label="版式排列方式">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={layout === "tabs"}
-                  className={`iui-seg-btn${layout === "tabs" ? " is-active" : ""}`}
-                  onClick={() => setLayout("tabs")}
-                >
-                  标签
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={layout === "grid"}
-                  className={`iui-seg-btn${layout === "grid" ? " is-active" : ""}`}
-                  onClick={() => setLayout("grid")}
-                >
-                  对比
-                </button>
+        ) : (
+          <div className="iui-compare-header">
+            {payload.title !== "交互界面" && (
+              <div className="iui-eyebrow-left iui-eyebrow-compact">
+                <span className="iui-eyebrow-icon" aria-hidden="true">{kindIcon(payload.kind)}</span>
+                <span className="iui-eyebrow-title">{payload.title}</span>
+                <span className="iui-eyebrow-kind">{metaSub}</span>
               </div>
             )}
-            <Tooltip content={showSource ? "收起源码" : "查看源码"} side="top">
-              <button
-                type="button"
-                className={`md-code-action-btn${showSource ? " is-active" : ""}`}
-                aria-label={showSource ? "收起源码" : "查看源码"}
-                aria-expanded={showSource}
-                onClick={() => setShowSource((v) => !v)}
-              >
-                <IconCode size={14} />
-              </button>
-            </Tooltip>
-            <Tooltip content="大窗查看" side="top">
-              <button
-                type="button"
-                className="md-code-action-btn"
-                aria-label="大窗查看"
-                onClick={() => setModalOpen(true)}
-              >
-                <IconMaximize size={13} />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-
-        {isMulti && layout === "tabs" && (
-          <div className="iui-tabs-bar">
-            <div className="iui-tab-list" role="tablist" aria-label="切换预览版式">
-              {variants.map((v) => {
-                const viewing = v.id === current.id;
-                const picked = checkedSet.has(v.id);
-                return (
-                  <button
-                    key={v.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={viewing}
-                    className={`iui-tab${viewing ? " is-viewing" : ""}`}
-                    onClick={() => setViewingId(v.id)}
-                  >
-                    {picked && <span className="iui-tab-dot" aria-label="已勾选" />}
-                    <span>{v.label}</span>
-                  </button>
-                );
-              })}
+            <div className="iui-compare-bar">
+              <div className="iui-tab-list" role="tablist" aria-label="切换预览版式">
+                {variants.map((v) => {
+                  const viewing = v.id === current.id;
+                  const picked = checkedSet.has(v.id);
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={viewing}
+                      className={`iui-variant-pill${viewing ? " is-viewing" : ""}${picked ? " is-picked" : ""}`}
+                      onClick={() => {
+                        if (sel.enabled && sel.mode === "multiple" && !submitted) {
+                          toggleVariantCheck(v.id);
+                        } else {
+                          handleVariantTabClick(v.id);
+                        }
+                      }}
+                    >
+                      {sel.enabled && !submitted && (
+                        <span className={`iui-pick-dot${sel.mode === "single" ? " is-radio" : ""}`} aria-hidden="true">
+                          {picked && <IconCheck size={9} />}
+                        </span>
+                      )}
+                      <span>{v.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {actionToolbar}
             </div>
-            {sel.enabled && !submitted && (
-              <button
-                type="button"
-                className={`iui-pick-btn${currentChecked ? " is-picked" : ""}`}
-                onClick={() => toggleVariantCheck(current.id)}
-                aria-pressed={currentChecked}
-              >
-                <span className={`iui-check-box${sel.mode === "single" ? " is-radio" : ""}`}>
-                  {currentChecked && <IconCheck size={10} />}
-                </span>
-                <span>{currentChecked ? "已勾选此版式" : "勾选此版式"}</span>
-              </button>
-            )}
           </div>
         )}
 
-        <div className="iui-stage">
+        <div className={`iui-stage-seamless${stageOverflow && (layout === "tabs" || !isMulti) ? " is-overflowing" : ""}`}>
           {layout === "tabs" || !isMulti ? (
-            <InteractiveSandbox
-              key={current.id}
-              html={current.html}
-              cacheKey={`${callKey}:${current.id}`}
-              minHeight={current.height ? Math.min(240, current.height) : 120}
-              maxHeight={500}
-              title={`${payload.title} · ${current.label}`}
-              onAction={handleSandboxAction}
-            />
+            <>
+              <InteractiveSandbox
+                key={current.id}
+                html={current.html}
+                cacheKey={`${callKey}:${current.id}`}
+                minHeight={current.height ? Math.min(240, current.height) : 96}
+                maxHeight={680}
+                title={`${payload.title} · ${current.label}`}
+                onAction={handleSandboxAction}
+                onOverflowChange={setStageOverflow}
+              />
+              {stageOverflow && (
+                <div className="iui-overflow-fade">
+                  <Button size="xs" variant="secondary" onClick={() => setModalOpen(true)}>
+                    大窗查看完整内容
+                  </Button>
+                </div>
+              )}
+            </>
           ) : (
             <div className="iui-grid">
               {variants.map((v) => {
@@ -603,8 +650,8 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
                           onClick={() => toggleVariantCheck(v.id)}
                           aria-pressed={checked}
                         >
-                          <span className={`iui-check-box${sel.mode === "single" ? " is-radio" : ""}`}>
-                            {checked && <IconCheck size={10} />}
+                          <span className={`iui-pick-dot${sel.mode === "single" ? " is-radio" : ""}`}>
+                            {checked && <IconCheck size={9} />}
                           </span>
                           <span className="iui-grid-pick-label">{v.label}</span>
                         </button>
@@ -622,14 +669,16 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
                         </button>
                       </Tooltip>
                     </div>
-                    <InteractiveSandbox
-                      html={v.html}
-                      cacheKey={`${callKey}:grid:${v.id}`}
-                      minHeight={v.height ? Math.min(200, v.height) : 120}
-                      maxHeight={340}
-                      title={`${payload.title} · ${v.label}`}
-                      onAction={handleSandboxAction}
-                    />
+                    <div className="iui-grid-sandbox">
+                      <InteractiveSandbox
+                        html={v.html}
+                        cacheKey={`${callKey}:grid:${v.id}`}
+                        minHeight={v.height ? Math.min(200, v.height) : 96}
+                        maxHeight={380}
+                        title={`${payload.title} · ${v.label}`}
+                        onAction={handleSandboxAction}
+                      />
+                    </div>
                     {v.summary && <div className="iui-grid-note">{v.summary}</div>}
                   </div>
                 );
@@ -646,23 +695,25 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
           <SourceCodePane source={current.html} filePath={current.file_path} />
         </ChatCollapse>
 
-        {bridgeMsg && (
-          <div className="iui-bridge-bar">
-            <span>{bridgeMsg.summary}</span>
-            <div className="iui-bridge-actions">
-              <Button size="xs" variant="ghost" disabled={sending} onClick={() => setBridgeMsg(null)}>
-                忽略
-              </Button>
-              <Button size="xs" variant="primary" loading={sending} onClick={() => void handleSendBridge()}>
-                发给 AI
-              </Button>
+        <ChatCollapse open={Boolean(bridgeMsg)}>
+          {bridgeMsg && (
+            <div className="iui-bridge-strip">
+              <span>{bridgeMsg.summary}</span>
+              <div className="iui-bridge-actions">
+                <Button size="xs" variant="ghost" disabled={sending} onClick={() => setBridgeMsg(null)}>
+                  忽略
+                </Button>
+                <Button size="xs" variant="primary" loading={sending} onClick={() => void handleSendBridge()}>
+                  发给 AI
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </ChatCollapse>
 
         {sel.enabled && (
           submitted ? (
-            <div className="iui-done-bar">
+            <div className="iui-done-strip">
               <span className="iui-done-label">
                 <IconCheck size={13} />
                 <span>
@@ -679,46 +730,43 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
               </Button>
             </div>
           ) : (
-            <div className="iui-decide">
-              <div className="iui-decide-top">
+            <div className="iui-decide-dock">
+              {sel.mode === "multiple" && (
                 <span className="iui-picked-badge">
                   已选 <strong>{chosenVariants.length > 0 ? chosenVariants.map((v) => v.label).join("、") : "未选择"}</strong>
                 </span>
-                {sel.allow_note && (
-                  <Input
-                    size="sm"
-                    className="iui-note-input"
-                    value={savedState.note}
-                    placeholder="补充调整意见（可选，如：把主色换成天空蓝）…"
-                    aria-label="补充调整意见"
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      updateSaved((prev) => ({ ...prev, note: val }));
-                    }}
-                  />
-                )}
-              </div>
-              <div className="iui-decide-foot">
-                <span className="iui-decide-hint">确认后将把选中版式的源码与意见发回 AI 继续处理</span>
-                <div className="iui-decide-actions">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={chosenVariants.length === 0 || sending}
-                    onClick={handleFillComposer}
-                  >
-                    填入输入框
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={chosenVariants.length === 0}
-                    loading={sending}
-                    onClick={() => void handleConfirmAndContinue()}
-                  >
-                    {sel.confirm_label}
-                  </Button>
-                </div>
+              )}
+              {sel.allow_note && (
+                <Input
+                  size="sm"
+                  className="iui-note-input"
+                  value={savedState.note}
+                  placeholder="可选：补充调整意见（如：把主色换成天空蓝）…"
+                  aria-label="补充调整意见"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    updateSaved((prev) => ({ ...prev, note: val }));
+                  }}
+                />
+              )}
+              <div className="iui-decide-actions">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={chosenVariants.length === 0 || sending}
+                  onClick={handleFillComposer}
+                >
+                  填入输入框
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={chosenVariants.length === 0}
+                  loading={sending}
+                  onClick={() => void handleConfirmAndContinue()}
+                >
+                  {primaryConfirmText}
+                </Button>
               </div>
             </div>
           )
@@ -742,15 +790,15 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
         width={1400}
         actions={
           <div className="iui-modal-head-actions">
-            {sel.enabled && !submitted && (
+            {sel.enabled && !submitted && sel.mode === "multiple" && (
               <button
                 type="button"
                 className={`iui-pick-btn${currentChecked ? " is-picked" : ""}`}
                 onClick={() => toggleVariantCheck(current.id)}
                 aria-pressed={currentChecked}
               >
-                <span className={`iui-check-box${sel.mode === "single" ? " is-radio" : ""}`}>
-                  {currentChecked && <IconCheck size={10} />}
+                <span className="iui-pick-dot">
+                  {currentChecked && <IconCheck size={9} />}
                 </span>
                 <span>{currentChecked ? "已勾选此版式" : "勾选此版式"}</span>
               </button>
@@ -794,7 +842,7 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
                 loading={sending}
                 onClick={() => { setModalOpen(false); void handleConfirmAndContinue(); }}
               >
-                {sel.confirm_label}
+                {primaryConfirmText}
               </Button>
             </div>
           </div>
@@ -803,19 +851,33 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
         {isMulti && (
           <div className="iui-modal-tabs">
             <div className="iui-tab-list" role="tablist" aria-label="大窗切换版式">
-              {variants.map((v) => (
-                <button
-                  key={v.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={v.id === current.id}
-                  className={`iui-tab${v.id === current.id ? " is-viewing" : ""}`}
-                  onClick={() => setViewingId(v.id)}
-                >
-                  {checkedSet.has(v.id) && <span className="iui-tab-dot" aria-label="已勾选" />}
-                  <span>{v.label}</span>
-                </button>
-              ))}
+              {variants.map((v) => {
+                const viewing = v.id === current.id;
+                const picked = checkedSet.has(v.id);
+                return (
+                  <button
+                    key={v.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={viewing}
+                    className={`iui-variant-pill${viewing ? " is-viewing" : ""}${picked ? " is-picked" : ""}`}
+                    onClick={() => {
+                      if (sel.enabled && sel.mode === "multiple" && !submitted) {
+                        toggleVariantCheck(v.id);
+                      } else {
+                        handleVariantTabClick(v.id);
+                      }
+                    }}
+                  >
+                    {sel.enabled && !submitted && (
+                      <span className={`iui-pick-dot${sel.mode === "single" ? " is-radio" : ""}`} aria-hidden="true">
+                        {picked && <IconCheck size={9} />}
+                      </span>
+                    )}
+                    <span>{v.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -824,6 +886,7 @@ export const InteractiveUiCard = memo(function InteractiveUiCard({
             key={`modal:${current.id}`}
             html={current.html}
             fillHeight
+            flush={false}
             title={`${payload.title} · 大窗预览`}
             onAction={handleSandboxAction}
           />

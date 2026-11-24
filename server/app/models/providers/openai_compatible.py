@@ -322,7 +322,8 @@ class OpenAICompatibleProvider(ModelProvider):
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:
-            kwargs["tools"] = request.tools
+            from app.orchestration.context_sanitizer import sanitize_context_tools
+            kwargs["tools"] = sanitize_context_tools(request.tools)
             kwargs["tool_choice"] = "auto"
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
@@ -455,7 +456,8 @@ class OpenAICompatibleProvider(ModelProvider):
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:
-            kwargs["tools"] = request.tools
+            from app.orchestration.context_sanitizer import sanitize_context_tools
+            kwargs["tools"] = sanitize_context_tools(request.tools)
             kwargs["tool_choice"] = "auto"
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
@@ -494,7 +496,8 @@ class OpenAICompatibleProvider(ModelProvider):
         if request.max_tokens:
             kwargs["max_tokens"] = request.max_tokens
         if request.tools:
-            kwargs["tools"] = request.tools
+            from app.orchestration.context_sanitizer import sanitize_context_tools
+            kwargs["tools"] = sanitize_context_tools(request.tools)
             kwargs["tool_choice"] = "auto"
         # v6.0: 透传 reasoning_effort（对齐 codex thinking），none/None 不传以兼容老网关
         if request.reasoning_effort and request.reasoning_effort != "none":
@@ -610,8 +613,9 @@ class OpenAICompatibleProvider(ModelProvider):
         """
         from app.core.config import settings
 
+        from app.orchestration.context_sanitizer import sanitize_context_messages
         from app.orchestration.history_sequence import prepare_history, validate_openai_wire
-        messages = prepare_history(messages)
+        messages = sanitize_context_messages(prepare_history(messages))
         result = []
         for m in messages:
             if m.role == "developer":
